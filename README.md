@@ -11,8 +11,7 @@ just-smaller --output ~/Desktop/small --json shoot/
 ```
 
 By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
-[ImageOptim](https://github.com/ImageOptim/ImageOptim) by Kornel Lesiński; the
-code here is new and shares none of ImageOptim's.
+[ImageOptim](https://github.com/ImageOptim/ImageOptim) by Kornel Lesiński.
 
 ## What it promises
 
