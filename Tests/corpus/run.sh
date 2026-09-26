@@ -15,8 +15,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
-CORPUS=${JUST_SMALLER_CORPUS:-$HOME/Documents/JustSmaller-Testkorpus}
-[ -d "$CORPUS" ] || [ ! -d "$HOME/Documents/ImageOptim-Testkorpus" ] || CORPUS=$HOME/Documents/ImageOptim-Testkorpus
+CORPUS=${JUST_SMALLER_CORPUS:-$(dirname "$ROOT")/Testkorpus}
 TIER=quick; UPDATE=no
 while [ $# -gt 0 ]; do
 	case "$1" in

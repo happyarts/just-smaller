@@ -4,14 +4,14 @@
 # photos) plus generated edge cases, and they stay outside the working tree.
 #
 # usage: Tests/corpus/build-corpus.sh
-#   JUST_SMALLER_CORPUS  where to put it (default ~/Documents/JustSmaller-Testkorpus)
+#   JUST_SMALLER_CORPUS  where to put it (default: Testkorpus next to the repository)
 #
 # Produces two tiers:
 #   quick/  ~30 files, one per format and edge case, for every change
 #   full/   several hundred real-world files plus all edge cases
 # Real photos come from download-cache/, filled by fetch-real-images.py.
 set -eu
-CORPUS=${JUST_SMALLER_CORPUS:-$HOME/Documents/JustSmaller-Testkorpus}
+CORPUS=${JUST_SMALLER_CORPUS:-$(cd "$(dirname "$0")/../../.." && pwd)/Testkorpus}
 HERE=$(cd "$(dirname "$0")" && pwd)
 
 PY=""

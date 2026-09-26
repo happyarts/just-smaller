@@ -20,7 +20,7 @@ change), the tools are not. For each job we pick, in this order:
 |---|---|---|---|
 | PNG lossless | oxipng 10.2.1 (+ zopfli on "Thorough") | MIT | keep — best measured, actively maintained |
 | PNG lossy (palette) | quantizr 1.4 via own `png-quantize` | MIT | **done:** same size as pngquant, higher SSIMULACRA2, twice as fast (see below); exoquant is unmaintained |
-| JPEG lossless | jpegtran from mozjpeg 4.1.5 | BSD (IJG) | keep for now: 1.1 points more savings than libjpeg-turbo 3.2 (see below); plan: own scan optimiser on libjpeg-turbo 3.2 |
+| JPEG lossless | jpegtran from mozjpeg master (5.0 development, 2025-06) | BSD (IJG) | keep for now: 1.1 points more savings than libjpeg-turbo 3.2 (see below); plan: own scan optimiser on libjpeg-turbo 3.2 |
 | JPEG lossy | jpegli | BSD | **done:** jpegli (Google, active): up to 28 % smaller than mozjpeg and 12 % smaller than Apple's encoder at the same visual quality |
 | JPEG metadata | own filter | — | **own Swift marker filter** (drop APPn/COM, keep ICC, write a minimal EXIF with the orientation) |
 | GIF | — (later version) | — | no maintained permissive optimizer exists (gifsicle is GPL-2; rusty_gif is an encoder, not an optimizer) → **own optimizer** in Swift: frame cropping, transparency for unchanged pixels, LZW re-encoding |
@@ -221,8 +221,9 @@ frequency bands, how many refinement passes) and keeps the smallest.
 libjpeg-turbo uses one fixed layout. Trying a few layouts with libjpeg-turbo's
 `-scans` closes half the gap.
 
-mozjpeg's last release (4.1.5) is based on libjpeg-turbo 3.0; libjpeg-turbo
-3.2 (June 2026) is actively maintained and gets security fixes. So: decoding
+mozjpeg's last release (4.1.5, 2022) is based on libjpeg-turbo 3.0; we build
+its master branch (5.0 development, last change 2025-06). libjpeg-turbo 3.2
+(June 2026) is actively maintained and gets security fixes. So: decoding
 and verification use libjpeg-turbo 3.2; jpegtran from mozjpeg stays for its
 extra savings until our own scan optimiser (mozjpeg's algorithm is BSD, it can
 be ported onto libjpeg-turbo 3.2) matches it. Every result is proven by

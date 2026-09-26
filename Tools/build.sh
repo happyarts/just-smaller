@@ -1,6 +1,7 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
-# Vendor/ (git submodules pinned to released versions) and Tools/.
+# Vendor/ (git submodules pinned to released versions; mozjpeg to its master
+# branch, which has had no release since 2022) and Tools/.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY]
 #
@@ -27,8 +28,12 @@ if ! command -v cmake >/dev/null; then
 	python3 -m venv "$ROOT/.tools" && "$ROOT/.tools/bin/pip" install --quiet cmake
 fi
 
-# Fetch the sources on first use; jpegli only needs a few of its submodules.
-(cd "$ROOT" && git submodule update --init --depth 1 Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/mozjpeg Vendor/libjpeg-turbo Vendor/jpegli)
+# Fetch missing sources on first use (a checkout that is already there is left
+# as it is); jpegli only needs a few of its submodules.
+for dep in oxipng oxvg libwebp mozjpeg libjpeg-turbo jpegli; do
+	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
+		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
+done
 for dep in highway skcms libpng zlib lcms; do
 	[ -n "$(ls -A "$ROOT/Vendor/jpegli/third_party/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT/Vendor/jpegli" submodule update --init --depth 1 "third_party/$dep"

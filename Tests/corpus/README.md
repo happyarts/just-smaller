@@ -2,7 +2,7 @@
 
 A local set of test images plus a runner that pushes them through the
 `just-smaller` command and checks every result. The images never go into the
-repository (image rights); they live in `~/Documents/JustSmaller-Testkorpus`
+repository (image rights); they live in a `Testkorpus` folder next to the repository
 (override with `JUST_SMALLER_CORPUS`).
 
 ```sh
