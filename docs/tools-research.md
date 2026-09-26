@@ -185,6 +185,29 @@ fallback, e.g. comparing the average quantizer step instead.
 dependency less (jpegli is BSD-3-Clause). jpegli is also the encoder for any
 future opt-in conversion to JPEG. Lossless JPEG stays with jpegtran + jpegcmp.
 
+## Lossless PNG: OxiPNG vs ECT (measured 2026-09-27, first round)
+
+199 PNGs from the corpus (≤ 8 MB), 10 files in parallel on an M1 Max.
+Compared is the compressed image data (IDAT), so metadata choices don't
+skew it; every result was checked pixel by pixel against the original.
+
+| | image data (of original) | time |
+|---|---|---|
+| OxiPNG 10.2.1 `-o 4` (our default) | 84.54 % | 88 s |
+| OxiPNG `-o 6` | 84.29 % | 292 s |
+| [ECT](https://github.com/fhanau/Efficient-Compression-Tool) `-3 --strict` | 84.96 % | 60 s |
+| **ECT `-5 --strict`** | **84.16 %** | **90 s** |
+
+ECT (Apache-2.0, maintained) at level 5 beats OxiPNG's slowest level in the
+time of our default. No pixel errors; it rejected a CgBI file (which the
+engine skips anyway). OxiPNG's one pixel difference is its known greyscale
+reduction that drops the ICC profile — the verifier rejects that result.
+
+Still to measure: ECT `-9`, OxiPNG with Zopfli, zopflipng; ECT's handling of
+metadata, 16-bit and alpha. ECT contains the Zopfli improvements that were
+proposed upstream and never merged (google/zopfli#119), so a Zopfli fork is
+not needed.
+
 ## PNG palette reduction: quantizr vs pngquant (measured 2026-09-27)
 
 68 truecolour PNGs from the corpus, 256 colours, full dithering, then OxiPNG:
@@ -260,9 +283,10 @@ the same idea as our visually-lossless mode, which aims at SSIMULACRA2
 
 ## Benchmarks still to run
 
-1. AVIF/HEIC: ImageIO re-encode savings vs quality loss on real photos.
-2. TIFF: ImageIO LZW/Deflate recompression savings.
-3. Own scan optimiser on libjpeg-turbo 3.2 vs mozjpeg jpegtran.
+1. PNG: ECT `-9`, OxiPNG + Zopfli, zopflipng (see above).
+2. AVIF/HEIC: ImageIO re-encode savings vs quality loss on real photos.
+3. TIFF: ImageIO LZW/Deflate recompression savings.
+4. Own scan optimiser on libjpeg-turbo 3.2 vs mozjpeg jpegtran.
 
 ## Sources
 
