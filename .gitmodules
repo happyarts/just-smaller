@@ -1,0 +1,24 @@
+[submodule "Vendor/oxipng"]
+	path = Vendor/oxipng
+	url = https://github.com/oxipng/oxipng.git
+	shallow = true
+[submodule "Vendor/oxvg"]
+	path = Vendor/oxvg
+	url = https://github.com/noahbald/oxvg.git
+	shallow = true
+[submodule "Vendor/libwebp"]
+	path = Vendor/libwebp
+	url = https://github.com/webmproject/libwebp.git
+	shallow = true
+[submodule "Vendor/mozjpeg"]
+	path = Vendor/mozjpeg
+	url = https://github.com/mozilla/mozjpeg.git
+	shallow = true
+[submodule "Vendor/jpegli"]
+	path = Vendor/jpegli
+	url = https://github.com/google/jpegli.git
+	shallow = true
+[submodule "Vendor/libjpeg-turbo"]
+	path = Vendor/libjpeg-turbo
+	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
+	shallow = true

@@ -1,0 +1,266 @@
+{
+  "sourceLanguage": "en",
+  "strings": {
+    "%@ is turned off in Settings": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist in den Einstellungen ausgeschaltet"
+          }
+        }
+      }
+    },
+    "-optimized": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "-optimiert"
+          }
+        }
+      }
+    },
+    "Animated WebP is not supported yet": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animiertes WebP wird noch nicht unterstützt"
+          }
+        }
+      }
+    },
+    "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apples iPhone-Variante von PNG (CgBI), die nur Apples Werkzeuge lesen können"
+          }
+        }
+      }
+    },
+    "Empty file": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leere Datei"
+          }
+        }
+      }
+    },
+    "GIF optimization comes in a later version": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GIF-Optimierung kommt in einer späteren Version"
+          }
+        }
+      }
+    },
+    "HDR HEIC images are left untouched": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HDR-HEIC-Bilder bleiben unverändert"
+          }
+        }
+      }
+    },
+    "HEIC can only be optimized in lossy mode": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HEIC lässt sich nur verlustbehaftet optimieren"
+          }
+        }
+      }
+    },
+    "Has Content Credentials (C2PA). Optimizing would invalidate them.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält einen Herkunftsnachweis (C2PA). Eine Optimierung würde ihn ungültig machen."
+          }
+        }
+      }
+    },
+    "Lossy WebP can’t be optimized without loss": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Verlustbehaftetes WebP lässt sich nicht verlustfrei optimieren"
+          }
+        }
+      }
+    },
+    "Metadata": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Metadaten"
+          }
+        }
+      }
+    },
+    "Not a supported image": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kein unterstütztes Bildformat"
+          }
+        }
+      }
+    },
+    "Nothing to optimize": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nichts zu optimieren"
+          }
+        }
+      }
+    },
+    "Result rejected: %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ergebnis verworfen: %@"
+          }
+        }
+      }
+    },
+    "The file changed while it was being optimized": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei wurde während der Optimierung verändert"
+          }
+        }
+      }
+    },
+    "The file is damaged or incomplete": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei ist beschädigt oder unvollständig"
+          }
+        }
+      }
+    },
+    "The file or its folder is read-only": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei oder ihr Ordner ist schreibgeschützt"
+          }
+        }
+      }
+    },
+    "The optimizer is missing from the app bundle.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Optimierungswerkzeug fehlt im App-Bundle."
+          }
+        }
+      }
+    },
+    "animation timing changed": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animationszeiten verändert"
+          }
+        }
+      }
+    },
+    "color profile lost": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Farbprofil verloren"
+          }
+        }
+      }
+    },
+    "different dimensions": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "andere Abmessungen"
+          }
+        }
+      }
+    },
+    "looks different": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "sieht anders aus"
+          }
+        }
+      }
+    },
+    "orientation lost": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ausrichtung verloren"
+          }
+        }
+      }
+    },
+    "original": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original"
+          }
+        }
+      }
+    },
+    "pixels changed": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pixel verändert"
+          }
+        }
+      }
+    },
+    "unreadable": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "nicht lesbar"
+          }
+        }
+      }
+    }
+  },
+  "version": "1.0"
+}

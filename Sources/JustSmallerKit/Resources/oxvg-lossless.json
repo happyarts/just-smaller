@@ -1,0 +1,140 @@
+{
+  "optimise": {
+    "jobs": {
+      "removeDoctype": true,
+      "removeXMLProcInst": true,
+      "removeComments": {},
+      "removeDeprecatedAttrs": {
+        "removeAny": false
+      },
+      "removeMetadata": true,
+      "removeEditorsNSData": {
+        "additionalNamespaces": null
+      },
+      "cleanupAttrs": {
+        "newlines": true,
+        "trim": true,
+        "spaces": true
+      },
+      "mergeStyles": true,
+      "inlineStyles": {
+        "onlyMatchedOnce": true,
+        "removeMatchedSelectors": true,
+        "useMqs": [
+          "",
+          "screen"
+        ],
+        "usePseudos": [
+          ""
+        ]
+      },
+      "minifyStyles": {
+        "usage": true
+      },
+      "cleanupIds": {
+        "remove": true,
+        "minify": true,
+        "preserve": null,
+        "preservePrefixes": null,
+        "force": false
+      },
+      "removeUselessDefs": true,
+      "cleanupNumericValues": {
+        "floatPrecision": 5,
+        "defaultPx": true,
+        "convertToPx": true
+      },
+      "convertColors": {
+        "method": null
+      },
+      "removeUnknownsAndDefaults": {
+        "unknownContent": true,
+        "unknownAttrs": true,
+        "defaultAttrs": true,
+        "defaultMarkupDeclarations": true,
+        "uselessOverrides": true,
+        "keepDataAttrs": true,
+        "keepAriaAttrs": true,
+        "keepRoleAttr": false
+      },
+      "removeNonInheritableGroupAttrs": true,
+      "removeUselessStrokeAndFill": {
+        "stroke": true,
+        "fill": true,
+        "removeNone": false
+      },
+      "cleanupEnableBackground": true,
+      "removeHiddenElems": {
+        "isHidden": null,
+        "displayNone": null,
+        "opacityZero": null,
+        "circleRZero": null,
+        "ellipseRxZero": null,
+        "ellipseRyZero": null,
+        "rectWidthZero": null,
+        "rectHeightZero": null,
+        "patternWidthZero": null,
+        "patternHeightZero": null,
+        "imageWidthZero": null,
+        "imageHeightZero": null,
+        "pathEmptyD": null,
+        "polylineEmptyPoints": null,
+        "polygonEmptyPoints": null
+      },
+      "removeEmptyText": {
+        "text": null,
+        "tspan": null,
+        "tref": null
+      },
+      "convertShapeToPath": {
+        "convertArcs": false,
+        "floatPrecision": 5
+      },
+      "convertEllipseToCircle": true,
+      "moveElemsAttrsToGroup": true,
+      "moveGroupAttrsToElems": true,
+      "collapseGroups": true,
+      "applyTransforms": {
+        "transformPrecision": null,
+        "applyTransformsStroked": false
+      },
+      "convertPathData": {
+        "closeSegments": false,
+        "uniteSegments": false,
+        "joinNodes": true,
+        "removeEmptySegments": true,
+        "removeZeroSegments": true,
+        "removeCloseLine": false,
+        "straightCurves": false,
+        "arcCurves": false,
+        "smartArcRounding": false,
+        "tolerance": {
+          "positional": 1e-05,
+          "angular": 1e-05,
+          "precision": 5
+        }
+      },
+      "convertTransform": {
+        "convertToShorts": true,
+        "degPrecision": null,
+        "floatPrecision": 5,
+        "transformPrecision": 5,
+        "matrixToTransform": true,
+        "shortRotate": true,
+        "removeUseless": true,
+        "collapseIntoOne": true
+      },
+      "removeEmptyAttrs": true,
+      "removeEmptyContainers": true,
+      "removeUnusedNS": true,
+      "sortAttrs": {
+        "order": null,
+        "xmlnsOrder": null
+      },
+      "sortDefsChildren": true,
+      "removeDesc": {
+        "removeAny": false
+      }
+    }
+  }
+}

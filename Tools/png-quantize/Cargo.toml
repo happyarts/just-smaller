@@ -1,0 +1,16 @@
+[package]
+name = "png-quantize"
+version = "1.0.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "Reduces a PNG to a palette of at most 256 colours with quantizr, keeping its colour metadata."
+publish = false
+
+[dependencies]
+quantizr = "1.4"
+png = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
