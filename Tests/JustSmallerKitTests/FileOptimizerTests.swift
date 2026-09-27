@@ -404,6 +404,29 @@ struct FileOptimizerTests {
         }
     }
 
+    @Test func pngMetadataFilterKeepsWhatChangesTheLook() throws {
+        func chunk(_ type: String, _ payload: [UInt8] = []) -> Data { PNGMetadataFilter.chunk(type, payload) }
+        var png = Data(PNGMetadataFilter.signature)
+        for c in [chunk("IHDR", Array(repeating: 1, count: 13)), chunk("iCCP", [1, 2]), chunk("tEXt", Array("Author\0Me".utf8)),
+                  chunk("eXIf", [0]), chunk("pHYs", [0]), chunk("cICP", [1, 13, 0, 1]), chunk("IDAT", [9]),
+                  chunk("tIME", [0]), chunk("IEND")] { png.append(c) }
+        func types(_ data: Data) -> [String] {
+            var out: [String] = [], i = 8
+            let b = [UInt8](data)
+            while i + 12 <= b.count {
+                let n = Int(b[i]) << 24 | Int(b[i + 1]) << 16 | Int(b[i + 2]) << 8 | Int(b[i + 3])
+                out.append(String(decoding: b[i + 4..<i + 8], as: UTF8.self)); i += 12 + n
+            }
+            return out
+        }
+        #expect(types(try PNGMetadataFilter.strip(png, orientation: 1)) == ["IHDR", "iCCP", "cICP", "IDAT", "IEND"])
+        #expect(types(try PNGMetadataFilter.strip(png, orientation: 6)) == ["IHDR", "eXIf", "iCCP", "cICP", "IDAT", "IEND"])
+        // Known CRC of an empty IEND chunk.
+        #expect(chunk("IEND").suffix(4) == Data([0xAE, 0x42, 0x60, 0x82]))
+        #expect(throws: PNGMetadataFilter.Malformed.self) { try PNGMetadataFilter.strip(Data("not a png".utf8), orientation: 1) }
+        #expect(throws: PNGMetadataFilter.Malformed.self) { try PNGMetadataFilter.strip(png.prefix(40), orientation: 1) }
+    }
+
     @Test func keepsPermissionsTagsAndCreationDate() async throws {
         let url = write(image(), "attrs.png", type: .png)
         let fm = FileManager.default
