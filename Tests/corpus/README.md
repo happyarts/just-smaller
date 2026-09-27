@@ -23,7 +23,7 @@ everything is still lossless.
 - raster images decode to identical pixels (`imgcmp.swift`, ImageIO, animation
   timeline aware: merged identical frames with the same total duration pass)
 - JPEGs keep their DCT coefficients (`jpegcmp`): ImageIO decodes identical DCT
-  data differently depending on Huffman tables, see docs/upstream-findings.md
+  data differently depending on Huffman tables
 - colour profile and EXIF orientation survive metadata stripping
 - SVGs render the same (Quick Look thumbnail, ≤ 0.1 % antialiasing pixels)
 - `broken-*` files are left byte-for-byte alone
