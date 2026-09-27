@@ -116,10 +116,12 @@ cargo_tool() { # name manifest [cargo args…]
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
 cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng
-cargo_tool oxvg "$ROOT/Vendor/oxvg/Cargo.toml" --locked -p oxvg
+# Only the OXVG optimiser, through our svg-optimise: the oxvg command also
+# carries a JSX compiler, a linter and a language server.
+cargo_tool svg-optimise "$ROOT/Tools/svg-optimise/Cargo.toml" --locked
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml"
 
-for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng oxvg png-quantize; do
+for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng svg-optimise png-quantize; do
 	codesign --force --sign "$IDENTITY" --timestamp=none "$OUT/$tool" 2>/dev/null
 done
 log "tools in $OUT"

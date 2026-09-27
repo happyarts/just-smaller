@@ -206,18 +206,18 @@ enum Pipeline {
 
     // MARK: - SVG
 
+    /// The OXVG optimiser through Tools/svg-optimise, which writes to stdout
+    /// and never reads a configuration other than the one it is given.
     static func oxvg(lossless: Bool) -> Candidate {
         Candidate(name: "OXVG", isLossy: !lossless) { input, output, work in
-            // oxvg writes to stdout. It runs in the empty work directory so it
-            // can't pick up an oxvgrc.json lying next to the image.
-            var args = ["optimise"]
+            var args: [String] = []
             if lossless {
                 guard let config = Bundle.module.url(forResource: "oxvg-lossless", withExtension: "json") else {
-                    throw ToolError(tool: "oxvg", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
+                    throw ToolError(tool: "svg-optimise", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
                 }
                 args += ["--config", config.path]
             }
-            try await ToolRunner.run("oxvg", args + ["--", input.path], stdout: output, in: work)
+            try await ToolRunner.run("svg-optimise", args + [input.path], stdout: output, in: work)
             return true
         }
     }

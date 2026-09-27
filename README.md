@@ -66,6 +66,7 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Sources/just-smaller` | The command-line tool |
 | `Tools/build.sh` | Builds all optimizers from `Vendor/` (git submodules at release tags or a pinned commit) |
 | `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++) |
+| `Tools/svg-optimise` | The OXVG optimiser on its own, without the rest of the oxvg command (Rust) |
 | `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
 | `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients (C, libjpeg-turbo) |
 | `Tests/corpus` | Builds a local test corpus and runs the tool over it, checking every result |

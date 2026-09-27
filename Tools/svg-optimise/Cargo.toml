@@ -1,0 +1,21 @@
+[package]
+name = "svg-optimise"
+version = "1.0.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Optimises one SVG with the OXVG optimiser, without the rest of the oxvg command-line tool."
+publish = false
+
+[dependencies]
+oxvg_ast = { path = "../../Vendor/oxvg/crates/oxvg_ast", features = ["roxmltree", "serialize", "visitor"] }
+oxvg_optimiser = { path = "../../Vendor/oxvg/crates/oxvg_optimiser", features = ["serde"] }
+roxmltree = "0.21"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "s" # SVGs are small; size matters more than the last bit of speed
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
