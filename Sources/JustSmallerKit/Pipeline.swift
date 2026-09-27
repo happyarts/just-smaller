@@ -36,7 +36,8 @@ enum Pipeline {
         case .png:
             var stages: [[Candidate]] = []
             if s.lossy { stages.append([pngQuantize()]) }
-            stages.append([oxipng(effort: s.effort, strip: strip, lossy: s.lossy, facts: facts)])
+            if strip { stages.append([pngMetadata(orientation: facts.orientation)]) }
+            stages.append(pngCompressors(effort: s.effort, lossy: s.lossy, facts: facts))
             return stages
 
         case .jpeg:
@@ -88,29 +89,58 @@ enum Pipeline {
 
     // MARK: - PNG
 
-    /// Measured on the corpus (181 PNGs, 62 MB, 8 cores): -o2 saves 13.1 % in
-    /// 42 s, -o4 13.9 % in 87 s, -o6 14.1 % in 258 s; "max" is no better than 6.
-    /// Zopfli adds 0.1–1.8 % at 7–25 times the time: 72 s for a 1 MB PNG,
-    /// 5 minutes for 4 MB with no gain at all. So it only runs on smaller files.
-    static let zopfliByteLimit: Int64 = 1_500_000
+    /// Metadata is removed by our own filter before compressing: ECT's
+    /// --strip would drop the colour profile too.
+    static func pngMetadata(orientation: Int) -> Candidate {
+        Candidate(name: String(localized: "Metadata", bundle: .module)) { input, output, _ in
+            let data = try Data(contentsOf: input)
+            try PNGMetadataFilter.strip(data, orientation: orientation).write(to: output)
+            return true
+        }
+    }
 
-    /// Chunks that change how a PNG looks. oxipng's own "safe" set leaves out
-    /// gAMA and cHRM, which colour-managed viewers apply: an old Photoshop
-    /// export with gamma 1/1.8 looked different without it. mDCV and cLLI
-    /// describe HDR content.
-    static let pngDisplayChunks = "gAMA,cHRM,sBIT,mDCV,cLLI,display"
+    /// Maximum effort also tries every filter strategy, but only on files
+    /// small enough for that to end in practical time.
+    static let allFiltersByteLimit: Int64 = 256_000
 
-    static func oxipng(effort: Effort, strip: Bool, lossy: Bool, facts: FileFacts) -> Candidate {
-        let zopfli = effort == .maximum && facts.byteSize <= zopfliByteLimit
-        return Candidate(name: zopfli ? "OxiPNG + Zopfli" : "OxiPNG") { input, output, work in
-            let level = switch effort { case .fast: "2"; case .balanced: "4"; case .thorough, .maximum: "6" }
-            var args = ["-o", level, "-i", "0"]
+    /// ECT and OxiPNG each win on different images, so from Balanced on both
+    /// run in parallel and the smaller result is kept. ECT breaks animated
+    /// PNGs (it palette-reduces the first frame only); those get OxiPNG alone.
+    static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
+        if facts.isAnimated { return [oxipng(level: effort == .fast ? "2" : "4", lossy: lossy)] }
+        switch effort {
+        case .fast:
+            return [oxipng(level: "2", lossy: lossy)]
+        case .balanced:
+            return [ect(["-5"], lossy: lossy), oxipng(level: "2", lossy: lossy)]
+        case .thorough:
+            return [ect(["-7"], lossy: lossy), oxipng(level: "4", lossy: lossy)]
+        case .maximum:
+            var candidates = [ect(["-8"], lossy: lossy), ect(["-9"], lossy: lossy), oxipng(level: "6", lossy: lossy)]
+            if facts.byteSize <= allFiltersByteLimit { candidates.append(ect(["-9", "--allfilters-b"], lossy: lossy)) }
+            return candidates
+        }
+    }
+
+    /// ECT rewrites the file in place, so it works on a copy.
+    static func ect(_ options: [String], lossy: Bool) -> Candidate {
+        Candidate(name: "ECT") { input, output, work in
+            try FileManager.default.copyItem(at: input, to: output)
+            var args = options
+            // Without --strict ECT rewrites the colour of fully transparent
+            // pixels. Invisible, but not identical, so only in lossy mode.
+            if !lossy { args += ["--strict"] }
+            try await ToolRunner.run("ect-png", args + [output.path], in: work)
+            return true
+        }
+    }
+
+    static func oxipng(level: String, lossy: Bool) -> Candidate {
+        Candidate(name: "OxiPNG") { input, output, work in
+            var args = ["-o", level, "-i", "0", "--strip", "none"]
             // -a rewrites the colour of fully transparent pixels. Invisible,
-            // but not identical, so only in lossy mode (it gains ~0.1 %).
+            // but not identical, so only in lossy mode.
             if lossy { args += ["-a"] }
-            if zopfli { args += ["--zopfli"] }
-            // A rotated PNG keeps its eXIf chunk: the orientation is in it.
-            if strip { args += ["--keep", facts.orientation != 1 ? "eXIf," + pngDisplayChunks : pngDisplayChunks] }
             args += ["--out", output.path, "--", input.path]
             try await ToolRunner.run("oxipng", args, in: work)
             return true
@@ -118,8 +148,7 @@ enum Pipeline {
     }
 
     /// Palette reduction with quantizr (MIT) through our png-quantize, which
-    /// keeps the colour metadata. Measured against pngquant: same size, equal
-    /// or better SSIMULACRA2, twice as fast.
+    /// keeps the colour metadata.
     static func pngQuantize() -> Candidate {
         Candidate(name: "quantizr", isLossy: true) { input, output, work in
             do {
@@ -149,10 +178,7 @@ enum Pipeline {
         }
     }
 
-    /// jpegli (Google, BSD): at equal visual quality as small as jpegoptim
-    /// when recompressing JPEGs, 7× faster, and 16–21 % smaller than mozjpeg
-    /// from pristine sources (see docs/tools-research.md). It drops metadata,
-    /// so the original's is put back.
+    /// jpegli (Google, BSD). It drops metadata, so the original's is put back.
     static func jpegli(quality: Int) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
             let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")

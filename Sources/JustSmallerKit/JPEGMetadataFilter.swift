@@ -49,17 +49,22 @@ enum JPEGMetadataFilter {
         throw Malformed() // no image data
     }
 
-    /// APP1 "Exif" with a big-endian TIFF header and one IFD entry:
-    /// Orientation (0x0112), SHORT, count 1.
+    /// APP1 "Exif" holding the minimal TIFF block below.
     static func minimalEXIF(orientation: Int) -> Data {
+        let payload = Array("Exif\0\0".utf8) + minimalTIFF(orientation: orientation)
+        let length = payload.count + 2
+        return Data([0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
+    }
+
+    /// A big-endian TIFF header and one IFD entry: Orientation (0x0112),
+    /// SHORT, count 1. Also the payload of a PNG eXIf chunk.
+    static func minimalTIFF(orientation: Int) -> [UInt8] {
         var tiff: [UInt8] = Array("MM".utf8) + [0x00, 0x2A, 0x00, 0x00, 0x00, 0x08] // header, IFD0 at offset 8
         tiff += [0x00, 0x01]                                  // one entry
         tiff += [0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01] // tag, type SHORT, count 1
         tiff += [0x00, UInt8(orientation), 0x00, 0x00]        // value, left-aligned
         tiff += [0x00, 0x00, 0x00, 0x00]                      // no next IFD
-        let payload = Array("Exif\0\0".utf8) + tiff
-        let length = payload.count + 2
-        return Data([0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
+        return tiff
     }
 
     /// Puts the original's metadata into a freshly encoded JPEG. Encoders

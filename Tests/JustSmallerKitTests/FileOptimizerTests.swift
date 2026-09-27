@@ -74,7 +74,7 @@ struct FileOptimizerTests {
             Issue.record("not optimized"); return
         }
         #expect(after < before)
-        #expect(tools == ["OxiPNG"])
+        #expect(tools.contains("ECT") || tools.contains("OxiPNG"))
         #expect(identical)
         try await Verifier.verify(original: copy, result: url, format: .png, pixelsMustMatch: true)
     }
@@ -107,6 +107,38 @@ struct FileOptimizerTests {
         #expect(after[kCGImagePropertyOrientation] as? Int ?? 1 == orientation)
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
         try await Verifier.verify(original: reference, result: url, format: .jpeg, pixelsMustMatch: true)
+    }
+
+    @Test(arguments: [1, 6])
+    func pngStrippingKeepsProfileAndOrientation(orientation: Int) async throws {
+        let url = write(image(space: CGColorSpace.displayP3), "p3-\(orientation).png", type: .png,
+                        properties: [kCGImagePropertyOrientation: orientation,
+                                     kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: "private note"]])
+        let reference = dir.appending(path: "reference-\(orientation).png")
+        try FileManager.default.copyItem(at: url, to: reference)
+
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
+        let png = props(url)[kCGImagePropertyPNGDictionary] as? [CFString: Any]
+        #expect(png?[kCGImagePropertyPNGDescription] == nil)
+        #expect(props(url)[kCGImagePropertyOrientation] as? Int ?? 1 == orientation)
+        #expect(iccName(url) == CGColorSpace.displayP3 as String)
+        try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
+    }
+
+    @Test func animatedPNGGoesToOxiPNG() async throws {
+        let url = dir.appending(path: "animated.png")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 3, nil)!
+        for _ in 0..<3 {
+            CGImageDestinationAddImage(dest, image(), [kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.2]] as CFDictionary)
+        }
+        #expect(CGImageDestinationFinalize(dest))
+        let reference = dir.appending(path: "reference-animated.png")
+        try FileManager.default.copyItem(at: url, to: reference)
+
+        if case .optimized(_, _, let tools, _, _, _) = try await optimize(url) {
+            #expect(!tools.contains("ECT"))
+        }
+        try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
     }
 
     @Test func svgGetsSmallerAndLooksTheSame() async throws {

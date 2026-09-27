@@ -5,7 +5,14 @@ import Foundation
 /// only how much time is spent for the last few percent. It matters most for
 /// PNG; the JPEG, SVG and HEIC tools are fast at their best setting anyway.
 public enum Effort: String, CaseIterable, Codable, Sendable, Identifiable {
-    case fast, balanced, thorough, maximum
+    /// Most of the savings, quickly.
+    case fast
+    /// The default: nearly everything, in a reasonable time.
+    case balanced
+    /// For those who have the time: a little smaller still.
+    case thorough
+    /// Everything the tools can find, however long it takes.
+    case maximum
     public var id: Self { self }
 }
 

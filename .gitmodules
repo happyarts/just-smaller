@@ -22,3 +22,7 @@
 	path = Vendor/libjpeg-turbo
 	url = https://github.com/libjpeg-turbo/libjpeg-turbo.git
 	shallow = true
+[submodule "Vendor/ect"]
+	path = Vendor/ect
+	url = https://github.com/fhanau/Efficient-Compression-Tool.git
+	shallow = true

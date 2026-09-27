@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
-# Vendor/ (git submodules pinned to released versions; mozjpeg to its master
-# branch, which has had no release since 2022) and Tools/.
+# Vendor/ (git submodules pinned to released versions; mozjpeg and ECT to a
+# master commit, since their last releases lack years of fixes) and Tools/.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY]
 #
@@ -30,7 +30,7 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp mozjpeg libjpeg-turbo jpegli; do
+for dep in oxipng oxvg libwebp mozjpeg libjpeg-turbo jpegli ect; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
@@ -38,6 +38,9 @@ for dep in highway skcms libpng zlib lcms; do
 	[ -n "$(ls -A "$ROOT/Vendor/jpegli/third_party/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT/Vendor/jpegli" submodule update --init --depth 1 "third_party/$dep"
 done
+# ECT: only libpng; its mozjpeg is for JPEG, which ect-png leaves out.
+[ -n "$(ls -A "$ROOT/Vendor/ect/src/libpng" 2>/dev/null)" ] ||
+	git -C "$ROOT/Vendor/ect" submodule update --init --depth 1 src/libpng
 
 log() { printf '%s\n' "$*" >&2; }
 run() { # name, command… — output goes to build/work/NAME.log, shown on failure
@@ -94,6 +97,12 @@ run libwebp-configure cmake -S "$ROOT/Vendor/libwebp" -B "$WEBP" $CMAKE_COMMON \
 run libwebp cmake --build "$WEBP" -j "$JOBS" --target cwebp
 cp "$WEBP/cwebp" "$OUT/cwebp"
 
+# ECT's PNG optimizer only (Tools/ect-png): no mozjpeg, gzip or zip code.
+log "ect-png"
+run ect-configure cmake -S "$ROOT/Tools/ect-png" -B "$WORK/ect-png" $CMAKE_COMMON -DECT_SRC="$ROOT/Vendor/ect/src"
+run ect-png cmake --build "$WORK/ect-png" -j "$JOBS" --target ect-png
+cp "$WORK/ect-png/ect-png" "$OUT/ect-png"
+
 # Rust tools: an explicit target and Apple's ld as linker keep build scripts
 # and proc-macros apart from target-only flags (oxvg's .cargo/config adds
 # linker flags for its Node.js build that break proc-macros otherwise). Each
@@ -110,7 +119,7 @@ cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng
 cargo_tool oxvg "$ROOT/Vendor/oxvg/Cargo.toml" --locked -p oxvg
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml"
 
-for tool in jpegtran jpegcmp cjpegli cwebp oxipng oxvg png-quantize; do
+for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng oxvg png-quantize; do
 	codesign --force --sign "$IDENTITY" --timestamp=none "$OUT/$tool" 2>/dev/null
 done
 log "tools in $OUT"
