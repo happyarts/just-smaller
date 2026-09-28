@@ -271,6 +271,76 @@
         }
       }
     },
+    "Contains scripts": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält Skripte"
+          }
+        }
+      }
+    },
+    "Contains animation": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält Animationen"
+          }
+        }
+      }
+    },
+    "Contains embedded HTML": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält eingebettetes HTML"
+          }
+        }
+      }
+    },
+    "Contains CSS that can’t be checked": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält CSS, das sich nicht prüfen lässt"
+          }
+        }
+      }
+    },
+    "%@ – left unchanged, it can’t be checked safely": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ – unverändert gelassen, lässt sich nicht sicher prüfen"
+          }
+        }
+      }
+    },
+    "contains content that can’t be checked": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "enthält Inhalte, die sich nicht prüfen lassen"
+          }
+        }
+      }
+    },
+    "The optimized file couldn’t be put in place. The original is in the Trash as “%@”.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die optimierte Datei ließ sich nicht an ihren Platz legen. Das Original liegt im Papierkorb als „%@“."
+          }
+        }
+      }
+    },
     "unreadable": {
       "localizations": {
         "de": {

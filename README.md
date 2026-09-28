@@ -38,7 +38,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 | PNG | own metadata filter + the PNG part of [ECT](https://github.com/fhanau/Efficient-Compression-Tool) (`Tools/ect-png`); animated PNGs: [OxiPNG](https://github.com/oxipng/oxipng) | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
 | JPEG | own metadata filter + jpegtran ([mozjpeg](https://github.com/mozilla/mozjpeg)), proven by comparing DCT coefficients (`Tools/jpegcmp`, [libjpeg-turbo](https://libjpeg-turbo.org)) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
 | WebP | cwebp ([libwebp](https://chromium.googlesource.com/webm/libwebp)), lossless files only | — |
-| SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry | OXVG with its default approximations |
+| SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
 | HEIC | — | Apple ImageIO, keeping HDR gain maps and depth data |
 | GIF | comes in a later version | |
 
@@ -66,7 +66,7 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Sources/just-smaller` | The command-line tool |
 | `Tools/build.sh` | Builds all optimizers from `Vendor/` (git submodules at release tags or a pinned commit) |
 | `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++) |
-| `Tools/svg-optimise` | The OXVG optimiser on its own, without the rest of the oxvg command (Rust) |
+| `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |
 | `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
 | `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients (C, libjpeg-turbo) |
 | `Tests/corpus` | Builds a local test corpus and runs the tool over it, checking every result |

@@ -1,9 +1,9 @@
 [package]
-name = "svg-optimise"
+name = "svg-tool"
 version = "1.0.0"
 edition = "2024"
 license = "MPL-2.0"
-description = "Optimises one SVG with the OXVG optimiser, without the rest of the oxvg command-line tool."
+description = "Optimises an SVG with the OXVG optimiser and renders SVGs with resvg for checking, without the rest of either command-line tool."
 publish = false
 
 [dependencies]
@@ -12,6 +12,9 @@ oxvg_optimiser = { path = "../../Vendor/oxvg/crates/oxvg_optimiser", features = 
 roxmltree = "0.21"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# A master commit: the 0.48.1 release still uses roxmltree 0.20, oxvg 0.21.
+resvg = { git = "https://github.com/linebender/resvg", rev = "75b6bbadd7999d0516dcd7153b4a321bfdf8670a", default-features = false, features = ["text", "system-fonts", "memmap-fonts", "raster-images"] }
+log = "0.4"
 
 [profile.release]
 opt-level = "s" # SVGs are small; size matters more than the last bit of speed

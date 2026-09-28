@@ -34,13 +34,16 @@ public enum ToolRunner {
     /// Output goes to files, never to pipes, so a chatty tool cannot block on a
     /// full pipe buffer.
     @discardableResult
-    static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, in directory: URL) async throws -> Int32 {
+    /// `stderr`, if given, receives the tool's messages and is left for the
+    /// caller; otherwise they are only used for the error.
+    static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, stderr: URL? = nil,
+                    in directory: URL) async throws -> Int32 {
         guard let executable = executable(name) else {
             throw ToolError(tool: name, status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
         }
-        let errURL = directory.appending(path: "\(name)-\(UUID().uuidString).stderr")
+        let errURL = stderr ?? directory.appending(path: "\(name)-\(UUID().uuidString).stderr")
         FileManager.default.createFile(atPath: errURL.path, contents: nil)
-        defer { try? FileManager.default.removeItem(at: errURL) }
+        defer { if stderr == nil { try? FileManager.default.removeItem(at: errURL) } }
 
         let process = Process()
         process.executableURL = executable

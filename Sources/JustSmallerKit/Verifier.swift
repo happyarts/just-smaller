@@ -62,14 +62,18 @@ enum Verifier {
 
     // MARK: - SVG
 
-    /// Renders both SVGs the way a browser shows them and compares the
+    /// Renders both SVGs with resvg (Tools/svg-tool) at the original's own
+    /// size and proportions — the longer side at least 1024 and at most 4096
+    /// pixels, the result on exactly the same canvas — and compares the
     /// pictures. Rewritten shapes antialias a little differently, so edge
     /// pixels may change slightly: up to 0.1 % of the pixels in lossless mode,
     /// 1 % in lossy mode. Strong changes are what lost content looks like (a
-    /// missing island on a map, a different font): at most a handful of
-    /// pixels may change by more than a quarter of the range.
+    /// missing island on a map, a different font, a thin line): at most a
+    /// handful of pixels may change by more than a quarter of the range,
+    /// however large the picture.
     private static func compareRenderings(_ a: URL, _ b: URL, strict: Bool) async throws {
-        let ra = try await SVGRenderer.render(a), rb = try await SVGRenderer.render(b)
+        let ra = try await render(a, canvas: nil)
+        let rb = try await render(b, canvas: (ra.width, ra.height))
         guard ra.width == rb.width, ra.height == rb.height else {
             throw VerificationError(reason: String(localized: "different dimensions", bundle: .module))
         }
@@ -82,10 +86,35 @@ enum Verifier {
             if d > 64 { strong += 1 }
         }
         let pixels = ra.width * ra.height
-        guard differing <= pixels / (strict ? 1000 : 100),
-              strong <= max(4, pixels / (strict ? 100_000 : 10_000)) else {
+        guard differing <= pixels / (strict ? 1000 : 100), strong <= (strict ? 10 : 100) else {
             throw VerificationError(reason: String(localized: "looks different", bundle: .module))
         }
+    }
+
+    /// Renders an SVG into a square PNG next to it and loads it. Anything
+    /// resvg reports it can't draw means the comparison would prove nothing.
+    private static func render(_ svg: URL, canvas: (Int, Int)?) async throws -> CGImage {
+        let png = svg.deletingLastPathComponent().appending(path: "render-\(UUID().uuidString).png")
+        let log = svg.deletingLastPathComponent().appending(path: "render-\(UUID().uuidString).log")
+        defer { try? FileManager.default.removeItem(at: png); try? FileManager.default.removeItem(at: log) }
+        var args = ["render", svg.path, png.path]
+        if let canvas { args += ["--canvas", String(canvas.0), String(canvas.1)] }
+        do {
+            try await ToolRunner.run("svg-tool", args, stderr: log, in: svg.deletingLastPathComponent())
+        } catch {
+            throw VerificationError(reason: String(localized: "SVG could not be rendered", bundle: .module))
+        }
+        if let messages = try? String(contentsOf: log, encoding: .utf8), messages.contains("unsupported:") {
+            throw VerificationError(reason: String(localized: "contains content that can’t be checked", bundle: .module))
+        }
+        // Read into memory: ImageIO decodes lazily, and the file is deleted on return.
+        guard let data = try? Data(contentsOf: png),
+              let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
+        else {
+            throw VerificationError(reason: String(localized: "SVG could not be rendered", bundle: .module))
+        }
+        return image
     }
 
     private static func rgba(_ image: CGImage) throws -> [UInt8] {

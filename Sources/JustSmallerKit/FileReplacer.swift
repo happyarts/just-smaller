@@ -85,7 +85,12 @@ enum FileReplacer {
         do {
             try fm.moveItem(at: replacement, to: original)
         } catch {
-            if let trashed = trashed as URL? { try? fm.moveItem(at: trashed, to: original) }
+            guard let trashed = trashed as URL? else { throw error }
+            do {
+                try fm.moveItem(at: trashed, to: original)
+            } catch {
+                throw OriginalInTrash(name: trashed.lastPathComponent)
+            }
             throw error
         }
         var restored = URLResourceValues()
@@ -94,6 +99,15 @@ enum FileReplacer {
         var target = original
         try? target.setResourceValues(restored)
         return trashed as URL?
+    }
+
+    /// The result couldn't take the original's place, and the original
+    /// couldn't come back from the Trash either: say where it is.
+    struct OriginalInTrash: LocalizedError {
+        let name: String
+        var errorDescription: String? {
+            String(localized: "The optimized file couldn’t be put in place. The original is in the Trash as “\(name)”.", bundle: .module)
+        }
     }
 
     /// Writes an optimized file to a new place and leaves the original

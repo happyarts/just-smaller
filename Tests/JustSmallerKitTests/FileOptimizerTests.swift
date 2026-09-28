@@ -269,6 +269,61 @@ struct FileOptimizerTests {
         try await Verifier.verify(original: a, result: a, format: .svg, pixelsMustMatch: true)
     }
 
+    @Test(arguments: [
+        "<script>alert(1)</script>",
+        "<circle cx=\"50\" cy=\"50\" r=\"20\"><animate attributeName=\"r\" values=\"20;40\" dur=\"1s\"/></circle>",
+        "<foreignObject width=\"100\" height=\"50\"><div xmlns=\"http://www.w3.org/1999/xhtml\">Hi</div></foreignObject>",
+        "<style>@media (prefers-color-scheme: dark) { rect { fill: #000 } }</style><rect width=\"10\" height=\"10\"/>",
+        "<rect width=\"10\" height=\"10\" onclick=\"go()\"/>",
+    ])
+    func svgThatCantBeCheckedIsLeftAlone(content: String) async throws {
+        let url = dir.appending(path: "dynamic.svg")
+        let svg = "<?xml version=\"1.0\"?>\n<!-- comment -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">  \(content)  </svg>\n"
+        try Data(svg.utf8).write(to: url)
+        guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
+        #expect(try String(contentsOf: url, encoding: .utf8) == svg)
+    }
+
+    /// A thin line vanishing in a large drawing: at a small preview size it
+    /// is a fraction of a pixel, so the check renders at the drawing's size.
+    @Test func svgWithMissingHairlineIsRejected() async throws {
+        func svg(line: Bool) -> String {
+            let hairline = line ? "<path d=\"M1400 1200 L1500 1250\" stroke=\"#000\" stroke-width=\"1\"/>" : ""
+            return """
+            <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1400" viewBox="0 0 1600 1400">
+              <rect width="1600" height="1400" fill="#fff"/>
+              <rect x="100" y="100" width="1000" height="800" fill="#468"/>
+              \(hairline)
+            </svg>
+            """
+        }
+        let a = dir.appending(path: "line-a.svg"), b = dir.appending(path: "line-b.svg")
+        try Data(svg(line: true).utf8).write(to: a)
+        try Data(svg(line: false).utf8).write(to: b)
+        await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: a, result: b, format: .svg, pixelsMustMatch: true)
+        }
+    }
+
+    /// On a square canvas a wide banner is mostly white margin, which would
+    /// let a real change hide inside the allowed share of differing pixels.
+    @Test func changeInWideSVGIsRejected() async throws {
+        func svg(_ colour: String) -> String {
+            """
+            <svg xmlns="http://www.w3.org/2000/svg" width="4000" height="100" viewBox="0 0 4000 100">
+              <rect width="4000" height="100" fill="#fff"/>
+              <rect x="2000" y="20" width="60" height="60" fill="\(colour)"/>
+            </svg>
+            """
+        }
+        let a = dir.appending(path: "wide-a.svg"), b = dir.appending(path: "wide-b.svg")
+        try Data(svg("#135").utf8).write(to: a)
+        try Data(svg("#fff").utf8).write(to: b)
+        await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: a, result: b, format: .svg, pixelsMustMatch: true)
+        }
+    }
+
     @Test func jpegCoefficientsAreCompared() async throws {
         let a = write(image(), "coef-a.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.9])
         let b = write(image(), "coef-b.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.6])

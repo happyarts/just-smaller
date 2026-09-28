@@ -1,4 +1,3 @@
-import AppKit
 import ArgumentParser
 import Foundation
 import JustSmallerKit
@@ -56,8 +55,6 @@ struct JustSmallerCommand: AsyncParsableCommand {
 
     mutating func run() async throws {
         if let tools { ToolRunner.directory = URL(fileURLWithPath: tools) }
-        // Checking SVGs renders them with WebKit, which needs an application object.
-        await MainActor.run { _ = NSApplication.shared }
 
         var settings = OptimizationSettings()
         settings.lossy = lossy
@@ -131,6 +128,8 @@ struct Report: Sendable {
             (status, originalSize, newSize, self.result, self.tools, self.identical) = ("optimized", before, after, result, tools, identical)
         case .alreadyOptimal(let size, let copy):
             (status, originalSize, newSize, result, identical) = ("unchanged", size, size, copy, true)
+        case .unchanged(let reason, let size, let copy):
+            (status, originalSize, newSize, result, self.reason) = ("rejected", size, size, copy, reason)
         case .skipped(let reason, let size):
             (status, originalSize, newSize, self.reason) = ("skipped", size ?? 0, size ?? 0, reason)
         }
@@ -148,7 +147,7 @@ struct Report: Sendable {
             let percent = (Double(saved) / Double(max(originalSize, 1))).formatted(.percent.precision(.fractionLength(1)))
             return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  −\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : "")"
         case "unchanged": return "= \(name)  already optimal"
-        case "skipped": return "– \(name)  \(reason ?? "")"
+        case "skipped", "rejected": return "– \(name)  \(reason ?? "")"
         default: return "! \(name)  \(reason ?? "failed")"
         }
     }
