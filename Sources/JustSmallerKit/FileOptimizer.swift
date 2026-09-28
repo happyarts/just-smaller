@@ -71,6 +71,9 @@ public struct FileOptimizer: Sendable {
         try fm.copyItem(at: url, to: source) // a clone on APFS
 
         var best = source, bestSize = size, used: [String] = [], lastError: (any Error)?
+        // A smaller result that failed verification: the file is not
+        // "already optimal", and the list should say why it stayed as it is.
+        var rejected: VerificationError?
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
         var pixelIdentical = [.png, .gif, .webp, .jpeg].contains(format)
@@ -117,6 +120,7 @@ public struct FileOptimizer: Sendable {
                 } catch {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
                     lastError = error
+                    if let error = error as? VerificationError { rejected = error }
                     continue
                 }
                 best = output; bestSize = outSize; used.append(candidate.name)
@@ -127,11 +131,15 @@ public struct FileOptimizer: Sendable {
 
         guard best != source else {
             if let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
+            var copy: URL?
             if case .newFile(let target, includeUnchanged: true) = destination {
                 try FileReplacer.writeNew(source, to: target, attributesFrom: url)
-                return .alreadyOptimal(size: size, copy: target)
+                copy = target
             }
-            return .alreadyOptimal(size: size, copy: nil)
+            if let rejected {
+                return .skipped(reason: String(localized: "Unchanged – result rejected: \(rejected.reason)", bundle: .module), size: size)
+            }
+            return .alreadyOptimal(size: size, copy: copy)
         }
         try Task.checkCancellation()
 

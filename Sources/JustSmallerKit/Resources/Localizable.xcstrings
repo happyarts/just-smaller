@@ -261,6 +261,16 @@
         }
       }
     },
+    "Unchanged – result rejected: %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unverändert – Ergebnis verworfen: %@"
+          }
+        }
+      }
+    },
     "unreadable": {
       "localizations": {
         "de": {
