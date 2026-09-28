@@ -19,7 +19,8 @@ private let log = Logger(subsystem: "JustSmallerKit", category: "optimizer")
 
 /// Optimizes one file: runs the format's pipeline in a private work
 /// directory, verifies every result, and replaces the original only with a
-/// verified, smaller file.
+/// verified, smaller file — or one that no longer holds the private data the
+/// chosen metadata level removes.
 public struct FileOptimizer: Sendable {
     public let settings: OptimizationSettings
 
@@ -59,14 +60,22 @@ public struct FileOptimizer: Sendable {
             return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
                             size: size)
         }
-        if format == .jpeg, JPEGStructure.hasSecondaryImage(url) {
-            return .skipped(reason: String(localized: "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged", bundle: .module),
-                            size: size)
+        // Files with more images than the first get only their metadata
+        // filtered, and only when nothing else follows the indexed images.
+        var hasSecondaryImage = false
+        if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
+           case let bytes = [UInt8](data), JPEGStructure.hasSecondaryImage(bytes) {
+            hasSecondaryImage = true
+            if settings.metadata == .keep || !JPEGStructure.holdsOnlyIndexedImages(bytes) {
+                return .skipped(reason: String(localized: "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged", bundle: .module),
+                                size: size)
+            }
         }
         if format == .svg, let reason = SVGContent.uncheckableReason(url) {
             return .skipped(reason: String(localized: "\(reason) – left unchanged, it can’t be checked safely", bundle: .module), size: size)
         }
-        let facts = Self.facts(about: url, format: format, size: size)
+        var facts = Self.facts(about: url, format: format, size: size)
+        facts.hasSecondaryImage = hasSecondaryImage
         let stages = Pipeline.stages(for: format, facts: facts, settings: settings)
         guard !stages.isEmpty else {
             return .skipped(reason: Pipeline.reasonForNoStages(format, facts: facts, settings: settings), size: size)
@@ -82,7 +91,7 @@ public struct FileOptimizer: Sendable {
         var rejected: VerificationError?
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
-        var pixelIdentical = [.png, .gif, .webp, .jpeg].contains(format)
+        var pixelIdentical = [.png, .gif, .webp, .jpeg, .heic].contains(format)
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
@@ -125,7 +134,11 @@ public struct FileOptimizer: Sendable {
             results.sort { $0.2 < $1.2 }
             for (candidate, output, outSize) in results {
                 let limit = candidate.minimumGain > 0 ? Int64(Double(bestSize) * (1 - candidate.minimumGain)) : bestSize
-                guard outSize < limit else { continue }
+                // Removing private data is a promise, not an optimization: it
+                // counts even when the file grows (ImageIO writes metadata
+                // less compactly), as long as there was something to remove.
+                let promised = candidate.isRequired && MetadataCheck.hasFieldsToRemove(input, level: settings.metadata)
+                guard outSize < limit || promised else { continue }
                 do {
                     // Against this stage's input: after a lossy stage the
                     // following lossless ones must keep the lossy result's pixels.

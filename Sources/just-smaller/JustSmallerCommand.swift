@@ -165,8 +165,9 @@ struct Report: Sendable {
         let name = file.lastPathComponent
         switch status {
         case "optimized":
-            let percent = (Double(saved) / Double(max(originalSize, 1))).formatted(.percent.precision(.fractionLength(1)))
-            return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  −\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : "")"
+            // A file grows only when private metadata had to go.
+            let percent = (Double(abs(saved)) / Double(max(originalSize, 1))).formatted(.percent.precision(.fractionLength(1)))
+            return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  \(saved < 0 ? "+" : "−")\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : "")"
         case "unchanged": return "= \(name)  already optimal"
         case "skipped", "rejected": return "– \(name)  \(reason ?? "")"
         default: return "! \(name)  \(reason ?? "failed")"

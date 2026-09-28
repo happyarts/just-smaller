@@ -275,6 +275,49 @@ final class MetadataTests {
         #expect((artist == "Jane Doe") == (level != .removeAll))
     }
 
+    /// Private data goes even where the image itself can't be improved:
+    /// HEIC in lossless mode, and a JPEG with an HDR gain map.
+    @Test(arguments: [UTType.heic, .jpeg])
+    func privateDataGoesWhereTheImageStaysAsItIs(type: UTType) async throws {
+        let url = dir.appending(path: "gain-map.\(type.preferredFilenameExtension ?? "img")")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), [
+            kCGImageDestinationLossyCompressionQuality: 0.9,
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Jane Doe"],
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 48.1, kCGImagePropertyGPSLatitudeRef: "N"],
+        ] as CFDictionary)
+        let gainMap = CGImageMetadataCreateMutable()
+        CGImageMetadataRegisterNamespaceForPrefix(gainMap, "http://ns.apple.com/HDRGainMap/1.0/" as CFString, "HDRGainMap" as CFString, nil)
+        CGImageMetadataSetValueWithPath(gainMap, nil, "HDRGainMap:HDRGainMapVersion" as CFString, 65536 as CFNumber)
+        CGImageDestinationAddAuxiliaryDataInfo(dest, kCGImageAuxiliaryDataTypeHDRGainMap, [
+            kCGImageAuxiliaryDataInfoData: Data((0..<32 * 24).map { UInt8($0 % 251) }) as CFData,
+            kCGImageAuxiliaryDataInfoDataDescription: [kCGImagePropertyWidth: 32, kCGImagePropertyHeight: 24,
+                                                       kCGImagePropertyBytesPerRow: 32,
+                                                       kCGImagePropertyPixelFormat: 0x4C30_3038], // 'L008'
+            kCGImageAuxiliaryDataInfoMetadata: gainMap,
+        ] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
+        #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+        if type == .jpeg { #expect(JPEGStructure.holdsOnlyIndexedImages([UInt8](try Data(contentsOf: url)))) }
+
+        var settings = OptimizationSettings()
+        settings.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        guard case .optimized(_, _, _, _, _, let identical) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(identical)
+        let p = props(url)
+        #expect(p[kCGImagePropertyGPSDictionary] == nil)
+        #expect((p[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String == "Jane Doe")
+        #expect(ImageIOMetadata.auxiliaryImages(CGImageSourceCreateWithURL(url as CFURL, nil)!) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+
+        // Nothing to remove: the file stays as it is.
+        settings.metadata = .keep
+        let before = try Data(contentsOf: url)
+        _ = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        #expect(try Data(contentsOf: url) == before)
+    }
+
     @Test func settingsSavedBeforeTheLevelsBecomeTheDefault() throws {
         let decoded = try JSONDecoder().decode([MetadataHandling].self, from: Data(#"["strip","keep","copyright"]"#.utf8))
         #expect(decoded == [.removePrivate, .keep, .copyrightOnly])

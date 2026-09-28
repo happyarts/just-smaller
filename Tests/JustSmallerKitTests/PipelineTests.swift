@@ -13,14 +13,19 @@ struct PipelineTests {
         }
     }
 
-    @Test func heicOnlyInLossyMode() {
+    @Test func heicIsReencodedOnlyInLossyMode() {
         var settings = OptimizationSettings()
+        settings.metadata = .keep
         let facts = FileFacts(byteSize: 1_000_000)
         #expect(Pipeline.stages(for: .heic, facts: facts, settings: settings).isEmpty)
+        // Metadata is filtered without touching the image.
+        settings.metadata = .removePrivate
+        #expect(Pipeline.stages(for: .heic, facts: facts, settings: settings).flatMap { $0 }.map(\.isLossy) == [false])
         settings.lossy = true
-        #expect(!Pipeline.stages(for: .heic, facts: facts, settings: settings).isEmpty)
+        #expect(Pipeline.stages(for: .heic, facts: facts, settings: settings).flatMap { $0 }.map(\.isLossy) == [false, true])
         // 10-bit HDR photos would lose depth
-        #expect(Pipeline.stages(for: .heic, facts: FileFacts(byteSize: 1, bitsPerComponent: 10), settings: settings).isEmpty)
+        #expect(Pipeline.stages(for: .heic, facts: FileFacts(byteSize: 1, bitsPerComponent: 10), settings: settings)
+            .flatMap { $0 }.map(\.isLossy) == [false])
     }
 
     @Test func lossyWebPAndAnimationsAreLeftAlone() {

@@ -31,6 +31,62 @@ enum JPEGStructure {
         return false
     }
 
+    /// The images a multi-picture index (APP2 "MPF") lists, and where the
+    /// last of them ends. nil without a readable index. Offsets in the index
+    /// count from its own TIFF header; the first image starts at 0.
+    static func indexedImages(_ b: [UInt8]) -> (count: Int, end: Int)? {
+        guard b.count > 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
+        var i = 2
+        while i + 4 <= b.count, b[i] == 0xFF {
+            let marker = b[i + 1]
+            if marker == 0xFF { i += 1; continue }
+            if marker == 0xDA || marker == 0xD9 { return nil }
+            if marker == 0x01 || (0xD0...0xD7).contains(marker) { i += 2; continue }
+            let length = Int(b[i + 2]) << 8 | Int(b[i + 3])
+            guard length >= 2, i + 2 + length <= b.count else { return nil }
+            if marker == 0xE2, length >= 16, b[i + 4..<i + 8].elementsEqual(Array("MPF\0".utf8)) {
+                return mpEntries(b, tiff: i + 8, segmentEnd: i + 2 + length)
+            }
+            i += 2 + length
+        }
+        return nil
+    }
+
+    private static func mpEntries(_ b: [UInt8], tiff: Int, segmentEnd: Int) -> (count: Int, end: Int)? {
+        let bigEndian: Bool
+        switch (b[tiff], b[tiff + 1]) {
+        case (0x4D, 0x4D): bigEndian = true
+        case (0x49, 0x49): bigEndian = false
+        default: return nil
+        }
+        func u16(_ at: Int) -> Int { bigEndian ? Int(b[at]) << 8 | Int(b[at + 1]) : Int(b[at + 1]) << 8 | Int(b[at]) }
+        func u32(_ at: Int) -> Int { bigEndian ? u16(at) << 16 | u16(at + 2) : u16(at + 2) << 16 | u16(at) }
+        let ifd = tiff + u32(tiff + 4)
+        guard ifd + 2 <= segmentEnd else { return nil }
+        let n = u16(ifd)
+        guard ifd + 2 + n * 12 <= segmentEnd else { return nil }
+        for k in 0..<n {
+            let e = ifd + 2 + k * 12
+            guard u16(e) == 0xB002 else { continue } // MPEntry: 16 bytes per image
+            let length = u32(e + 4), start = tiff + u32(e + 8)
+            guard length >= 16, length % 16 == 0, start + length <= segmentEnd else { return nil }
+            var end = 0
+            for image in 0..<length / 16 {
+                let size = u32(start + image * 16 + 4), offset = u32(start + image * 16 + 8)
+                end = max(end, image == 0 ? size : tiff + offset + size)
+            }
+            return end <= b.count ? (length / 16, end) : nil
+        }
+        return nil
+    }
+
+    /// Only indexed images follow the first: no motion-photo video or other
+    /// trailer that a rewrite of the file could lose.
+    static func holdsOnlyIndexedImages(_ b: [UInt8]) -> Bool {
+        guard let index = indexedImages(b), index.count > 1 else { return false }
+        return !hasData(after: index.end, in: b)
+    }
+
     /// The position of the next marker after entropy-coded data: 0xFF
     /// followed by anything but a stuffed zero or a restart marker.
     private static func endOfScan(from start: Int, in b: [UInt8]) -> Int {

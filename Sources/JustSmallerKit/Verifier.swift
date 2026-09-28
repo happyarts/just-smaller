@@ -46,7 +46,7 @@ enum Verifier {
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
-        guard pixelsMustMatch, format != .heic else { return }
+        guard pixelsMustMatch else { return }
         if format == .jpeg {
             // ImageIO decodes identical JPEG data differently depending on the
             // Huffman tables, so JPEGs are compared where the image really

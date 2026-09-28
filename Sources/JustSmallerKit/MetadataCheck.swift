@@ -38,6 +38,13 @@ enum MetadataCheck {
         }
     }
 
+    /// Whether the file holds anything the level removes.
+    static func hasFieldsToRemove(_ url: URL, level: MetadataHandling) -> Bool {
+        level != .keep && fields(url).keys.contains {
+            !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level)
+        }
+    }
+
     /// ImageIO's own bookkeeping (e.g. whether the file had IIM data).
     private static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
 
@@ -114,10 +121,20 @@ enum MetadataCheck {
             flatten(CGImageMetadataTagCopyValue(value as! CGImageMetadataTag), into: &out)
         case let value?:
             let text = "\(value)"
-            out.text += text
+            out.text += reduced(text) ?? text
             out.leaves.append(text)
         case nil:
             break
         }
+    }
+
+    /// A rational in lowest terms: ImageIO writes -5253/1280 for a file's
+    /// -10506/2560. The same value either way.
+    private static func reduced(_ text: String) -> String? {
+        let parts = text.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2, let n = Int(parts[0]), let d = Int(parts[1]), d != 0 else { return nil }
+        var a = abs(n), b = abs(d)
+        while b != 0 { (a, b) = (b, a % b) }
+        return a > 1 ? "\(n / a)/\(d / a)" : nil
     }
 }

@@ -30,6 +30,8 @@ struct FileFacts: Sendable {
     var isLosslessWebP = false
     /// WebP with EXIF or XMP chunks.
     var hasWebPMetadata = false
+    /// JPEG with more images indexed after the first (gain map, depth).
+    var hasSecondaryImage = false
     var isAnimated = false
     var bitsPerComponent = 8
 }
@@ -52,6 +54,8 @@ enum Pipeline {
             // jpegtran rewrites the entropy coding (Huffman tables, progressive
             // scans) without touching the DCT coefficients: lossless. It keeps
             // whatever markers are left; filtering is done by our own filter.
+            // Our tools rewrite only the first image; ImageIO keeps them all.
+            if facts.hasSecondaryImage { return s.metadata == .keep ? [] : [[imageIOMetadata(s.metadata, required: true)]] }
             var stages: [[Candidate]] = []
             // Re-encode only when the original is of higher quality than the
             // target; otherwise re-encoding only adds generation loss and the
@@ -80,9 +84,15 @@ enum Pipeline {
             return [[oxvg(lossless: !s.lossy, metadata: s.metadata)]]
 
         case .heic:
-            // HEIC can only be re-encoded, which always loses a little.
-            guard s.lossy, facts.bitsPerComponent <= 8 else { return [] }
-            return [[heif(quality: s.jpegQuality, metadata: s.metadata)]]
+            // Metadata is filtered without touching the image. The image can
+            // only be re-encoded, which always loses a little.
+            // In lossy mode the re-encode, which writes only the metadata the
+            // level keeps, is the promise's second chance.
+            let reencode = s.lossy && facts.bitsPerComponent <= 8
+            var stages: [[Candidate]] = []
+            if s.metadata != .keep, !facts.isAnimated { stages.append([imageIOMetadata(s.metadata, required: !reencode)]) }
+            if reencode { stages.append([heif(quality: s.jpegQuality, metadata: s.metadata)]) }
+            return stages
         }
     }
 
@@ -203,6 +213,15 @@ enum Pipeline {
         }
     }
 
+    /// Metadata through ImageIO, for HEIC and multi-image JPEGs.
+    static func imageIOMetadata(_ level: MetadataHandling, required: Bool) -> Candidate {
+        Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: required) { input, output, _ in
+            guard try ImageIOMetadata.copy(input, to: output, level: level) else { return false }
+            try MetadataCheck.verify(original: input, result: output, level: level)
+            return true
+        }
+    }
+
     // MARK: - WebP
 
     static func webpMetadata(_ level: MetadataHandling) -> Candidate {
@@ -272,7 +291,7 @@ enum Pipeline {
     // MARK: - HEIC
 
     static func heif(quality: Int, metadata: MetadataHandling) -> Candidate {
-        Candidate(name: "ImageIO", isLossy: true, minimumGain: 0.05) { input, output, _ in
+        Candidate(name: "ImageIO", isLossy: true, minimumGain: 0.05, isRequired: metadata != .keep) { input, output, _ in
             guard try HEIFEncoder.recompress(input, to: output, quality: Double(quality) / 100, metadata: metadata) else { return false }
             try MetadataCheck.verify(original: input, result: output, level: metadata)
             return true
