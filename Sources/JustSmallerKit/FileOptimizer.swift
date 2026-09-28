@@ -83,7 +83,10 @@ public struct FileOptimizer: Sendable {
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
         var pixelIdentical = [.png, .gif, .webp, .jpeg].contains(format)
-        for (n, stage) in stages.enumerated() {
+        // Set when private metadata couldn't be removed as promised: then
+        // nothing about the file changes.
+        var metadataFailure: String?
+        stages: for (n, stage) in stages.enumerated() {
             try Task.checkCancellation()
             progress(stage.map(\.name).joined(separator: ", "))
             let input = best
@@ -99,7 +102,7 @@ public struct FileOptimizer: Sendable {
                             return .nothing
                         } catch {
                             log.error("\(candidate.name, privacy: .public) failed on \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
-                            return .failed(error)
+                            return .failed(error, required: candidate.isRequired)
                         }
                     }
                 }
@@ -111,7 +114,11 @@ public struct FileOptimizer: Sendable {
             for attempt in attempts {
                 switch attempt {
                 case .output(let candidate, let output, let size): results.append((candidate, output, size))
-                case .failed(let error): lastError = error
+                case .failed(let error, required: true):
+                    metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                    best = source
+                    break stages
+                case .failed(let error, _): lastError = error
                 case .nothing: break
                 }
             }
@@ -136,12 +143,27 @@ public struct FileOptimizer: Sendable {
             }
         }
 
+        // The whole chain against the original, not just the metadata stage:
+        // no later tool may have dropped the rights or brought back what went.
+        if best != source, format != .svg, format != .gif {
+            do {
+                try MetadataCheck.verify(original: source, result: best, level: settings.metadata)
+            } catch {
+                metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                best = source
+            }
+        }
+
         guard best != source else {
-            if let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
+            if metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {
                 copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
                                                  moveAsideToTrash: settings.moveOriginalsToTrash)
+            }
+            if let metadataFailure {
+                return .unchanged(reason: String(localized: "Unchanged – the metadata couldn’t be filtered safely: \(metadataFailure)", bundle: .module),
+                                  size: size, copy: copy)
             }
             if let rejected {
                 return .unchanged(reason: String(localized: "Unchanged – result rejected: \(rejected.reason)", bundle: .module),
@@ -172,7 +194,7 @@ public struct FileOptimizer: Sendable {
 
     private enum Attempt: Sendable {
         case output(Candidate, URL, Int64)
-        case failed(any Error)
+        case failed(any Error, required: Bool)
         case nothing
     }
 
@@ -281,11 +303,6 @@ public struct FileOptimizer: Sendable {
                 let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
                 facts.orientation = (1...8).contains(orientation) ? orientation : 1
                 facts.bitsPerComponent = props[kCGImagePropertyDepth] as? Int ?? 8
-                // Cameras set to Adobe RGB often say so only in EXIF (colour
-                // space "uncalibrated") instead of embedding a profile.
-                let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
-                facts.colourSpaceOnlyInEXIF = exif?[kCGImagePropertyExifColorSpace] as? Int == 0xFFFF
-                    && props[kCGImagePropertyProfileName] == nil
             }
         }
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
@@ -295,6 +312,7 @@ public struct FileOptimizer: Sendable {
             let chunks = WebPChunks(data)
             facts.isLosslessWebP = chunks.contains("VP8L") && !chunks.contains("VP8 ")
             facts.isAnimated = facts.isAnimated || chunks.contains("ANIM")
+            facts.hasWebPMetadata = chunks.contains("EXIF") || chunks.contains("XMP ")
         }
         return facts
     }
@@ -306,15 +324,27 @@ struct WebPChunks {
     private(set) var types: [String] = []
 
     init(_ data: Data) {
-        let bytes = [UInt8](data.prefix(64 * 1024 * 1024))
-        guard bytes.count >= 12 else { return }
-        var offset = 12 // "RIFF", size, "WEBP"
-        while offset + 8 <= bytes.count {
-            types.append(String(decoding: bytes[offset..<offset + 4], as: UTF8.self))
-            let size = Int(bytes[offset + 4]) | Int(bytes[offset + 5]) << 8 | Int(bytes[offset + 6]) << 16 | Int(bytes[offset + 7]) << 24
-            offset += 8 + size + (size & 1) // payloads are padded to an even length
-        }
+        types = Self.chunks([UInt8](data.prefix(64 * 1024 * 1024))).map(\.type)
     }
 
     func contains(_ type: String) -> Bool { types.contains(type) }
+
+    /// Each chunk's type and where its payload is. Stops at the first chunk
+    /// that doesn't fit; `complete` says whether the walk reached the end.
+    static func chunks(_ bytes: [UInt8]) -> [(type: String, payload: Range<Int>)] {
+        walk(bytes).chunks
+    }
+
+    static func walk(_ bytes: [UInt8]) -> (chunks: [(type: String, payload: Range<Int>)], complete: Bool) {
+        guard bytes.count >= 12 else { return ([], false) }
+        var out: [(type: String, payload: Range<Int>)] = []
+        var offset = 12 // "RIFF", size, "WEBP"
+        while offset + 8 <= bytes.count {
+            let size = Int(bytes[offset + 4]) | Int(bytes[offset + 5]) << 8 | Int(bytes[offset + 6]) << 16 | Int(bytes[offset + 7]) << 24
+            guard size <= bytes.count - offset - 8 else { return (out, false) }
+            out.append((String(decoding: bytes[offset..<offset + 4], as: UTF8.self), offset + 8..<offset + 8 + size))
+            offset += 8 + size + (size & 1) // payloads are padded to an even length
+        }
+        return (out, true)
+    }
 }

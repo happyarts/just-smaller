@@ -1,59 +1,137 @@
 import Foundation
 
-/// Removes metadata from a JPEG without touching the image data.
+/// Filters the metadata of a JPEG by `MetadataPolicy` without touching the
+/// image data.
 ///
-/// Kept: everything the decoder needs, the ICC profile (APP2) and the Adobe
-/// marker (APP14, it says how CMYK/YCCK data is to be interpreted). Removed:
-/// EXIF and XMP (APP1), IPTC (APP13), comments and all other APPn segments.
-/// If the photo is rotated, a minimal EXIF block holding only the orientation
-/// is written back, so it doesn't turn sideways.
+/// Always kept: everything the decoder needs, JFIF, the ICC profile (APP2)
+/// and the Adobe marker (APP14, it says how CMYK/YCCK data is to be
+/// interpreted). EXIF, XMP (with its extended part) and IPTC (APP13) are
+/// filtered field by field; comments and all other APPn segments go. At
+/// `.keep` only the XMP padding goes. If the photo is rotated and no EXIF is
+/// left, a minimal EXIF block holding only the orientation is written, so it
+/// doesn't turn sideways.
 enum JPEGMetadataFilter {
     struct Malformed: Error {}
 
-    static func strip(_ data: Data, orientation: Int) throws -> Data {
-        let b = [UInt8](data)
-        guard b.count > 4, b[0] == 0xFF, b[1] == 0xD8 else { throw Malformed() }
-        var out = Data([0xFF, 0xD8])
-        var wroteOrientation = false
-        var i = 2
-        while i + 4 <= b.count {
-            guard b[i] == 0xFF else { throw Malformed() }
-            let marker = b[i + 1]
-            if marker == 0xFF { i += 1; continue } // fill byte
-            let length = Int(b[i + 2]) << 8 | Int(b[i + 3])
-            guard length >= 2, i + 2 + length <= b.count else { throw Malformed() }
-            let segment = b[i..<i + 2 + length]
-            let payload = b[i + 4..<i + 2 + length]
+    private static let exifHeader = Array("Exif\0\0".utf8)
+    private static let xmpHeader = Array("http://ns.adobe.com/xap/1.0/\0".utf8)
+    private static let extendedXMPHeader = Array("http://ns.adobe.com/xmp/extension/\0".utf8)
+    private static let photoshopHeader = Array("Photoshop 3.0\0".utf8)
+    /// The largest payload of a segment: its length field counts itself.
+    private static let maxPayload = 0xFFFF - 2
 
-            // The orientation goes right after SOI/JFIF, before anything else.
-            if !wroteOrientation, marker != 0xE0 {
-                if orientation != 1 { out.append(minimalEXIF(orientation: orientation)) }
-                wroteOrientation = true
+    static func filter(_ data: Data, level: MetadataHandling, orientation: Int) throws -> Data {
+        let (headers, imageData) = try segments(data)
+        let payloads = headers.map { Array($0.bytes.dropFirst(4)) }
+        func isApp(_ k: Int, _ marker: UInt8, _ header: [UInt8]) -> Bool {
+            headers[k].marker == marker && payloads[k].starts(with: header)
+        }
+
+        if level == .keep {
+            var out = Data([0xFF, 0xD8])
+            for (k, s) in headers.enumerated() {
+                if isApp(k, 0xE1, xmpHeader) {
+                    out.append(segment(0xE1, xmpHeader + XMPFilter.withoutPadding(Array(payloads[k].dropFirst(xmpHeader.count)))))
+                } else {
+                    out.append(s.bytes)
+                }
             }
+            out.append(imageData)
+            return out
+        }
 
-            switch marker {
-            case 0xDA: // start of scan: the rest is entropy-coded data, copy verbatim
-                out.append(contentsOf: b[i...])
-                return out
-            case 0xE2 where payload.starts(with: Array("ICC_PROFILE\0".utf8)),
-                 0xEE where payload.starts(with: Array("Adobe".utf8)),
-                 0xE0 where payload.starts(with: Array("JFIF\0".utf8)):
-                out.append(contentsOf: segment)
-            case 0xE0...0xEF, 0xFE: // other APPn, comments
+        // IPTC: Photoshop splits large resource blocks over several APP13s.
+        let photoshop = headers.indices.filter { isApp($0, 0xED, photoshopHeader) }
+        let iptc = photoshop.isEmpty ? IPTCFilter.Result()
+            : IPTCFilter.filter(photoshop.flatMap { payloads[$0].dropFirst(photoshopHeader.count) }, level: level)
+
+        // XMP, with the extended part (JPEG's way around the 64 KB limit)
+        // merged in when it fits into one segment afterwards.
+        let xmpIndex = headers.indices.first { isApp($0, 0xE1, xmpHeader) }
+        var xmp: [UInt8]?
+        if let xmpIndex {
+            let packet = Array(payloads[xmpIndex].dropFirst(xmpHeader.count))
+            let extended = reassembleExtendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, extendedXMPHeader) }
+                .map { Array($0.element.dropFirst(extendedXMPHeader.count)) }, for: packet)
+            xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest)
+            if let merged = xmp, merged.count + xmpHeader.count > maxPayload {
+                xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
+            }
+            if let packet = xmp, packet.count + xmpHeader.count > maxPayload { xmp = nil }
+        }
+
+        let exifIndex = headers.indices.first { isApp($0, 0xE1, exifHeader) }
+        let exif = exifIndex.flatMap { EXIFFilter.filter(Array(payloads[$0].dropFirst(exifHeader.count)), level: level) }
+            .flatMap { $0.count + exifHeader.count <= maxPayload ? $0 : nil }
+
+        var out = Data([0xFF, 0xD8])
+        var wroteEXIF = false
+        for (k, s) in headers.enumerated() {
+            // EXIF goes right after SOI/JFIF, before anything else.
+            if !wroteEXIF, !isApp(k, 0xE0, Array("JFIF\0".utf8)) {
+                if let exif {
+                    out.append(segment(0xE1, exifHeader + exif))
+                } else if orientation != 1 {
+                    out.append(minimalEXIF(orientation: orientation))
+                }
+                wroteEXIF = true
+            }
+            switch s.marker {
+            case 0xE1 where k == xmpIndex:
+                if let xmp { out.append(segment(0xE1, xmpHeader + xmp)) }
+            case 0xED where k == photoshop.first:
+                if let resources = iptc.resources {
+                    for chunk in resources.chunked(maxPayload - photoshopHeader.count) {
+                        out.append(segment(0xED, photoshopHeader + chunk))
+                    }
+                }
+            case 0xE2 where payloads[k].starts(with: Array("ICC_PROFILE\0".utf8)),
+                 0xEE where payloads[k].starts(with: Array("Adobe".utf8)),
+                 0xE0 where payloads[k].starts(with: Array("JFIF\0".utf8)):
+                out.append(s.bytes)
+            case 0xE0...0xEF, 0xFE: // everything else in APPn (EXIF was written above), comments
                 break
             default: // tables, frame headers, restart intervals, …
-                out.append(contentsOf: segment)
+                out.append(s.bytes)
             }
-            i += 2 + length
         }
-        throw Malformed() // no image data
+        out.append(imageData)
+        return out
+    }
+
+    /// Extended XMP chunks: a 32-character GUID (the MD5 of the whole
+    /// extension), its full length and this chunk's offset, then the data.
+    /// Only the extension the main packet names is used.
+    static func reassembleExtendedXMP(_ chunks: [[UInt8]], for packet: [UInt8]) -> [UInt8]? {
+        var parts: [String: [(offset: Int, data: [UInt8])]] = [:]
+        var lengths: [String: Int] = [:]
+        for chunk in chunks where chunk.count > 40 {
+            let guid = String(decoding: chunk[0..<32], as: UTF8.self)
+            let length = chunk[32..<36].reduce(0) { $0 << 8 | Int($1) }
+            let offset = chunk[36..<40].reduce(0) { $0 << 8 | Int($1) }
+            parts[guid, default: []].append((offset, Array(chunk[40...])))
+            lengths[guid] = length
+        }
+        guard let guid = parts.keys.first(where: { packet.firstRange(of: Array($0.utf8)) != nil }),
+              let length = lengths[guid] else { return nil }
+        var whole = [UInt8](repeating: 0, count: length)
+        var filled = 0
+        for part in parts[guid] ?? [] {
+            guard part.offset + part.data.count <= length else { return nil }
+            whole.replaceSubrange(part.offset..<part.offset + part.data.count, with: part.data)
+            filled += part.data.count
+        }
+        return filled == length ? whole : nil
+    }
+
+    private static func segment(_ marker: UInt8, _ payload: [UInt8]) -> Data {
+        let length = payload.count + 2
+        return Data([0xFF, marker, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
     }
 
     /// APP1 "Exif" holding the minimal TIFF block below.
     static func minimalEXIF(orientation: Int) -> Data {
-        let payload = Array("Exif\0\0".utf8) + minimalTIFF(orientation: orientation)
-        let length = payload.count + 2
-        return Data([0xFF, 0xE1, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
+        segment(0xE1, exifHeader + minimalTIFF(orientation: orientation))
     }
 
     /// A big-endian TIFF header and one IFD entry: Orientation (0x0112),
@@ -87,7 +165,7 @@ enum JPEGMetadataFilter {
     }
 
     /// The segments before the image data, and the image data from SOS on.
-    private static func segments(_ data: Data) throws -> (headers: [(marker: UInt8, bytes: Data)], imageData: Data) {
+    static func segments(_ data: Data) throws -> (headers: [(marker: UInt8, bytes: Data)], imageData: Data) {
         let b = [UInt8](data)
         guard b.count > 4, b[0] == 0xFF, b[1] == 0xD8 else { throw Malformed() }
         var headers: [(marker: UInt8, bytes: Data)] = []
@@ -97,12 +175,24 @@ enum JPEGMetadataFilter {
             let marker = b[i + 1]
             if marker == 0xFF { i += 1; continue }
             if marker == 0xDA { return (headers, Data(b[i...])) }
+            if marker == 0x01 || (0xD0...0xD7).contains(marker) { // no length field
+                headers.append((marker, Data(b[i..<i + 2])))
+                i += 2
+                continue
+            }
             let length = Int(b[i + 2]) << 8 | Int(b[i + 3])
             guard length >= 2, i + 2 + length <= b.count else { throw Malformed() }
             headers.append((marker, Data(b[i..<i + 2 + length])))
             i += 2 + length
         }
         throw Malformed()
+    }
+}
+
+extension Array {
+    /// Consecutive slices of at most `size` elements.
+    func chunked(_ size: Int) -> [[Element]] {
+        stride(from: 0, to: count, by: size).map { Array(self[$0..<Swift.min($0 + size, count)]) }
     }
 }
 

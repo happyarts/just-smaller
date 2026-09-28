@@ -94,8 +94,8 @@ final class FileOptimizerTests {
     }
 
     @Test(arguments: [1, 6, 8])
-    func strippingRemovesPrivateDataButKeepsOrientationAndProfile(orientation: Int) async throws {
-        #expect(settings.metadata == .strip)
+    func removingPrivateDataKeepsOrientationAndProfile(orientation: Int) async throws {
+        #expect(settings.metadata == .removePrivate)
         let url = write(image(space: CGColorSpace.displayP3), "photo-\(orientation).jpg", type: .jpeg,
                         properties: [kCGImagePropertyOrientation: orientation,
                                      kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 48.1,
@@ -116,16 +116,18 @@ final class FileOptimizerTests {
     }
 
     @Test(arguments: [1, 6])
-    func pngStrippingKeepsProfileAndOrientation(orientation: Int) async throws {
+    func pngFilteringKeepsProfileAndOrientation(orientation: Int) async throws {
         let url = write(image(space: CGColorSpace.displayP3), "p3-\(orientation).png", type: .png,
                         properties: [kCGImagePropertyOrientation: orientation,
-                                     kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGDescription: "private note"]])
+                                     kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGSoftware: "SecretApp",
+                                                                     kCGImagePropertyPNGCopyright: "© Me"]])
         let reference = dir.appending(path: "reference-\(orientation).png")
         try FileManager.default.copyItem(at: url, to: reference)
 
         guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
         let png = props(url)[kCGImagePropertyPNGDictionary] as? [CFString: Any]
-        #expect(png?[kCGImagePropertyPNGDescription] == nil)
+        #expect(png?[kCGImagePropertyPNGSoftware] == nil)
+        #expect(png?[kCGImagePropertyPNGCopyright] as? String == "© Me")
         #expect(props(url)[kCGImagePropertyOrientation] as? Int ?? 1 == orientation)
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
         try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
@@ -428,7 +430,7 @@ final class FileOptimizerTests {
         #expect(try Data(contentsOf: url) == before)
     }
 
-    @Test func heicStripRemovesPrivateDataButKeepsOrientation() async throws {
+    @Test func heicRemovesPrivateDataButKeepsOrientation() async throws {
         var settings = self.settings
         settings.lossy = true
         settings.quality = 50
@@ -606,10 +608,10 @@ final class FileOptimizerTests {
 
     @Test func metadataFilterRejectsGarbage() {
         #expect(throws: JPEGMetadataFilter.Malformed.self) {
-            try JPEGMetadataFilter.strip(Data([0xFF, 0xD8, 0x00, 0x01, 0x02]), orientation: 1)
+            try JPEGMetadataFilter.filter(Data([0xFF, 0xD8, 0x00, 0x01, 0x02]), level: .removePrivate, orientation: 1)
         }
         #expect(throws: JPEGMetadataFilter.Malformed.self) {
-            try JPEGMetadataFilter.strip(Data("not a jpeg".utf8), orientation: 1)
+            try JPEGMetadataFilter.filter(Data("not a jpeg".utf8), level: .removePrivate, orientation: 1)
         }
     }
 
@@ -628,12 +630,24 @@ final class FileOptimizerTests {
             }
             return out
         }
-        #expect(types(try PNGMetadataFilter.strip(png, orientation: 1)) == ["IHDR", "iCCP", "cICP", "IDAT", "IEND"])
-        #expect(types(try PNGMetadataFilter.strip(png, orientation: 6)) == ["IHDR", "eXIf", "iCCP", "cICP", "IDAT", "IEND"])
+        #expect(types(try PNGMetadataFilter.filter(png, level: .removeAll, orientation: 1)) == ["IHDR", "iCCP", "cICP", "IDAT", "IEND"])
+        #expect(types(try PNGMetadataFilter.filter(png, level: .removeAll, orientation: 6))
+                == ["IHDR", "eXIf", "iCCP", "cICP", "IDAT", "IEND"])
+        // The author stays with the rights, the physical size with the image
+        // info; the time goes, and so does unreadable EXIF.
+        #expect(types(try PNGMetadataFilter.filter(png, level: .removePrivate, orientation: 1))
+                == ["IHDR", "iCCP", "tEXt", "pHYs", "cICP", "IDAT", "IEND"])
+        #expect(types(try PNGMetadataFilter.filter(png, level: .copyrightOnly, orientation: 1))
+                == ["IHDR", "iCCP", "tEXt", "cICP", "IDAT", "IEND"])
+        #expect(try PNGMetadataFilter.filter(png, level: .keep, orientation: 6) == png)
         // Known CRC of an empty IEND chunk.
         #expect(chunk("IEND").suffix(4) == Data([0xAE, 0x42, 0x60, 0x82]))
-        #expect(throws: PNGMetadataFilter.Malformed.self) { try PNGMetadataFilter.strip(Data("not a png".utf8), orientation: 1) }
-        #expect(throws: PNGMetadataFilter.Malformed.self) { try PNGMetadataFilter.strip(png.prefix(40), orientation: 1) }
+        #expect(throws: PNGMetadataFilter.Malformed.self) {
+            try PNGMetadataFilter.filter(Data("not a png".utf8), level: .removePrivate, orientation: 1)
+        }
+        #expect(throws: PNGMetadataFilter.Malformed.self) {
+            try PNGMetadataFilter.filter(png.prefix(40), level: .removePrivate, orientation: 1)
+        }
     }
 
     @Test func keepsPermissionsTagsAndCreationDate() async throws {

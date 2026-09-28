@@ -16,14 +16,30 @@ public enum Effort: String, CaseIterable, Codable, Sendable, Identifiable {
     public var id: Self { self }
 }
 
+/// Which metadata stays, named by what is kept. Orientation, colour profile
+/// and colour space always stay in every level: removing them changes how the
+/// image looks.
 public enum MetadataHandling: String, CaseIterable, Codable, Sendable, Identifiable {
-    /// Keep everything.
+    /// All information stays; only what carries none (XMP padding) goes.
     case keep
-    /// Remove camera data, location, comments and editing history. The colour
-    /// profile and the orientation are always kept: removing them changes how
-    /// the image looks.
-    case strip
+    /// The default: creator, copyright, contact, title, caption, keywords,
+    /// date, camera and exposure stay. Location, serial numbers, persons
+    /// shown, editing history and thumbnails go.
+    case removePrivate = "private"
+    /// Only who made the image and the rights: creator, copyright, credit,
+    /// usage terms, contact and the AI marks.
+    case copyrightOnly = "copyright"
+    /// Nothing beyond what the image needs to look right. Command line only:
+    /// the app never offers to remove the copyright.
+    case removeAll = "none"
     public var id: Self { self }
+
+    /// Settings saved before the levels existed said "strip" for removing
+    /// metadata; that becomes today's default.
+    public init(from decoder: any Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: raw) ?? .removePrivate
+    }
 }
 
 /// Where an optimized file goes.
@@ -43,7 +59,7 @@ public struct OptimizationSettings: Hashable, Codable, Sendable {
     public var lossy = false
     /// Lossy mode only: 1–100, translated into each format's own scale.
     public var quality = 85
-    public var metadata = MetadataHandling.strip
+    public var metadata = MetadataHandling.removePrivate
     public var effort = Effort.balanced
     public var disabledFormats: Set<ImageFormat> = []
     /// Replaced originals go to the Trash. The app always does this; the

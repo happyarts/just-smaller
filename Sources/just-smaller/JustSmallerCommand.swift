@@ -23,8 +23,12 @@ struct JustSmallerCommand: AsyncParsableCommand {
     @Option(help: "Quality for lossy compression, 1–100.")
     var quality = 85
 
-    @Flag(help: "Keep all metadata (default: remove private metadata; colour profile and orientation always stay).")
-    var keepMetadata = false
+    @Option(help: """
+        Which metadata stays: keep (everything), private (default: removes location, serial numbers, \
+        persons shown, editing history), copyright (only creator and rights) or none. \
+        Colour profile and orientation always stay.
+        """)
+    var metadata = MetadataHandling.removePrivate.rawValue
 
     @Option(help: "How long to search for the smallest file: fast, balanced, thorough, maximum.")
     var effort = "balanced"
@@ -50,6 +54,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
     mutating func validate() throws {
         guard (1...100).contains(quality) else { throw ValidationError("--quality must be between 1 and 100.") }
         guard Effort(rawValue: effort) != nil else { throw ValidationError("--effort must be fast, balanced, thorough or maximum.") }
+        guard MetadataHandling(rawValue: metadata) != nil else { throw ValidationError("--metadata must be keep, private, copyright or none.") }
         guard suffix == nil || output == nil else { throw ValidationError("Use either --suffix or --output.") }
         if let suffix {
             // An empty suffix would make "next to the original" mean "over it".
@@ -67,7 +72,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
         var settings = OptimizationSettings()
         settings.lossy = lossy
         settings.quality = quality
-        settings.metadata = keepMetadata ? .keep : .strip
+        settings.metadata = MetadataHandling(rawValue: metadata) ?? .removePrivate
         settings.effort = Effort(rawValue: effort) ?? .balanced
         settings.moveOriginalsToTrash = !noTrash
         if let suffix {
