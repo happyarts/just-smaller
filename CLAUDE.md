@@ -4,7 +4,9 @@
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
   tags (mozjpeg, ECT: a master commit); build.sh only fetches missing ones and never moves
   a checkout.
-- `swift build`, `swift test` (tests use `build/tools`).
+- `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
+  corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
+  when `xcode-select` points at the Command Line Tools.
 - `Tests/corpus/run.sh --quick|--full` checks every result on the local test
   corpus in `../Testkorpus` (never commit images). Run it before commits that
   touch the engine or a tool; `--update-baseline` after intended size changes.

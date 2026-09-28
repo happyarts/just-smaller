@@ -15,6 +15,7 @@
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
+. "$ROOT/Tools/xcode-env.sh"
 CORPUS=${JUST_SMALLER_CORPUS:-$(dirname "$ROOT")/Testkorpus}
 TIER=quick; UPDATE=no
 while [ $# -gt 0 ]; do

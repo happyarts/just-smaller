@@ -52,8 +52,12 @@ git clone --recurse-submodules https://github.com/happyarts/just-smaller.git
 cd just-smaller
 Tools/build.sh                 # builds the optimizers into build/tools (a few minutes)
 swift build -c release         # builds the just-smaller command
-swift test                     # unit and end-to-end tests against build/tools
+Tools/test.sh                  # unit and end-to-end tests against build/tools
 ```
+
+`Tools/test.sh` runs `swift test` with a full Xcode even if `xcode-select`
+points at the Command Line Tools (see `Tools/xcode-env.sh`). With Xcode
+selected, plain `swift build` and `swift test` work too.
 
 The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 `just-smaller-tools` folder next to it, or its own folder.
@@ -65,6 +69,7 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Sources/JustSmallerKit` | The engine: pipelines, verification, atomic replacement, folder scanning |
 | `Sources/just-smaller` | The command-line tool |
 | `Tools/build.sh` | Builds all optimizers from `Vendor/` (git submodules at release tags or a pinned commit) |
+| `Tools/test.sh`, `Tools/xcode-env.sh` | Runs the tests; finds a full Xcode for SwiftPM |
 | `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++) |
 | `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |
 | `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
