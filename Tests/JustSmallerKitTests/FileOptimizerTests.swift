@@ -536,7 +536,7 @@ final class FileOptimizerTests {
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
     }
 
-    @Test mutating func lossyPNGIsQuantizedWithoutLosingItsProfile() async throws {
+    @Test func lossyPNGIsQuantizedWithoutLosingItsProfile() async throws {
         settings.lossy = true
         // Photo-like: gradients with grain, which a palette stores in a third of the bytes
         let cs = CGColorSpace(name: CGColorSpace.displayP3)!
@@ -684,5 +684,45 @@ final class FileOptimizerTests {
         #expect(trashed.path.hasPrefix(Trash.testFolder!.path))
         #expect(trashed.lastPathComponent.hasPrefix("trash me ("))
         try? FileManager.default.removeItem(at: trashed.deletingLastPathComponent())
+    }
+
+    /// The backup name is longer than the original's; when it doesn't fit the
+    /// volume's name limit, the original must still survive.
+    @Test func originalSurvivesWhenTheBackupNameIsTooLong() throws {
+        let fm = FileManager.default
+        let url = dir.appending(path: String(repeating: "x", count: 245) + ".png")
+        let original = Data("original".utf8), optimized = Data("optimized".utf8)
+        try original.write(to: url)
+        let result = dir.appending(path: "result.png")
+        try optimized.write(to: result)
+
+        let trashed = try? FileReplacer.replace(url, with: result, moveOriginalToTrash: true, keepModificationDate: false)
+        let now = try Data(contentsOf: url)
+        if now == optimized {
+            let kept = try #require(trashed ?? nil, "the original went nowhere")
+            #expect(try Data(contentsOf: kept) == original)
+            try? fm.removeItem(at: kept.deletingLastPathComponent())
+        } else {
+            #expect(now == original)
+        }
+    }
+
+    /// Files that already carry the backup name, even a dangling symlink, are
+    /// never overwritten by the original.
+    @Test func backupNeverOverwritesAnExistingFile() throws {
+        let fm = FileManager.default
+        let url = dir.appending(path: "keep.png")
+        try Data("original".utf8).write(to: url)
+        try Data("precious".utf8).write(to: dir.appending(path: "keep (original).png"))
+        try fm.createSymbolicLink(atPath: dir.appending(path: "keep (original 2).png").path, withDestinationPath: "nowhere")
+        let result = dir.appending(path: "result.png")
+        try Data("optimized".utf8).write(to: result)
+
+        let trashed = try #require(try FileReplacer.replace(url, with: result, moveOriginalToTrash: true, keepModificationDate: false))
+        #expect(trashed.lastPathComponent == "keep (original 3).png")
+        #expect(try Data(contentsOf: trashed) == Data("original".utf8))
+        #expect(try Data(contentsOf: dir.appending(path: "keep (original).png")) == Data("precious".utf8))
+        #expect(try fm.destinationOfSymbolicLink(atPath: dir.appending(path: "keep (original 2).png").path) == "nowhere")
+        try? fm.removeItem(at: trashed.deletingLastPathComponent())
     }
 }

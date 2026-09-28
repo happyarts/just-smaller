@@ -400,6 +400,26 @@
           }
         }
       }
+    },
+    "The optimized file is in place, but the original couldn’t be kept next to it. Move it somewhere safe from “%@”.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die optimierte Datei ist an ihrem Platz, aber das Original ließ sich nicht daneben ablegen. Bring es von „%@“ in Sicherheit."
+          }
+        }
+      }
+    },
+    "The optimized file couldn’t be put in place. Move the original somewhere safe from “%@”.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die optimierte Datei ließ sich nicht an ihren Platz legen. Bring das Original von „%@“ in Sicherheit."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
