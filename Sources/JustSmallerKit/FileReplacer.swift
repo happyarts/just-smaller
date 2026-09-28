@@ -21,7 +21,7 @@ enum FileReplacer {
     static func replace(_ original: URL, with result: URL,
                         moveOriginalToTrash: Bool, keepModificationDate: Bool) throws -> URL? {
         let fm = FileManager.default
-        let dates = try original.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
+        let dates = try FileOptimizer.freshValues(of: original, [.creationDateKey, .contentModificationDateKey])
         // Decided up front, before anything is created next to the original:
         // in the sandbox a single dropped file's folder is off limits, and
         // replaceItemAt would swap the files first and only then fail to
@@ -154,9 +154,25 @@ enum FileReplacer {
         defer { try? fm.removeItem(at: staging) }
         _ = copyfile(original.path, staged.path, nil, copyfile_flags_t(COPYFILE_XATTR))
         if fm.fileExists(atPath: target.path) {
+            // Another spelling of the original's own path (a case-insensitive
+            // volume, a symlinked folder): never trash the original for a copy.
+            if isSameFile(target, original) { throw OutputIsOriginal() }
             try Trash.move(target)
         }
         try fm.moveItem(at: staged, to: target)
+    }
+
+    struct OutputIsOriginal: LocalizedError {
+        var errorDescription: String? {
+            String(localized: "The output would take the original’s place. Choose another output folder or suffix.", bundle: .module)
+        }
+    }
+
+    private static func isSameFile(_ a: URL, _ b: URL) -> Bool {
+        let key: Set<URLResourceKey> = [.fileResourceIdentifierKey]
+        guard let ia = try? FileOptimizer.freshValues(of: a, key).fileResourceIdentifier,
+              let ib = try? FileOptimizer.freshValues(of: b, key).fileResourceIdentifier else { return false }
+        return ia.isEqual(ib)
     }
 
     /// "photo (original).jpg", or "photo (original 2).jpg" if that is taken.

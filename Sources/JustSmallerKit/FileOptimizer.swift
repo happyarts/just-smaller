@@ -28,7 +28,7 @@ public struct FileOptimizer: Sendable {
     public func optimize(_ url: URL, to destination: Destination = .replace,
                   progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
         let fm = FileManager.default
-        let before = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey, .isWritableKey])
+        let before = try Self.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey, .isWritableKey])
         let size = Int64(before.fileSize ?? 0)
 
         guard size > 0 else {
@@ -57,6 +57,10 @@ public struct FileOptimizer: Sendable {
         }
         guard !(format == .png && Self.isAppleCgBI(url)) else {
             return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
+                            size: size)
+        }
+        if format == .jpeg, JPEGStructure.hasSecondaryImage(url) {
+            return .skipped(reason: String(localized: "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged", bundle: .module),
                             size: size)
         }
         if format == .svg, let reason = SVGContent.uncheckableReason(url) {
@@ -134,7 +138,8 @@ public struct FileOptimizer: Sendable {
         guard best != source else {
             if let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
-            if case .newFile(let target, includeUnchanged: true) = destination {
+            if case .newFile(let planned, includeUnchanged: true) = destination {
+                let target = OutputClaims.claim(planned, for: url)
                 try FileReplacer.writeNew(source, to: target, attributesFrom: url)
                 copy = target
             }
@@ -147,13 +152,14 @@ public struct FileOptimizer: Sendable {
         try Task.checkCancellation()
 
         switch destination {
-        case .newFile(let target, _):
+        case .newFile(let planned, _):
+            let target = OutputClaims.claim(planned, for: url)
             try FileReplacer.writeNew(best, to: target, attributesFrom: url)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: target, trashedOriginal: nil,
                               pixelIdentical: pixelIdentical)
         case .replace:
             // Don't overwrite changes someone made while we were working.
-            let now = try url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let now = try Self.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey])
             guard now.fileSize == before.fileSize, now.contentModificationDate == before.contentModificationDate else {
                 return .skipped(reason: String(localized: "The file changed while it was being optimized", bundle: .module), size: size)
             }
@@ -257,6 +263,14 @@ public struct FileOptimizer: Sendable {
         let error = error as NSError
         return (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
             || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))
+    }
+
+    /// A URL keeps the resource values it has read; the same URL asked again
+    /// later would report the old size and date. These are read afresh.
+    static func freshValues(of url: URL, _ keys: Set<URLResourceKey>) throws -> URLResourceValues {
+        var fresh = url
+        fresh.removeAllCachedResourceValues()
+        return try fresh.resourceValues(forKeys: keys)
     }
 
     static func facts(about url: URL, format: ImageFormat, size: Int64) -> FileFacts {

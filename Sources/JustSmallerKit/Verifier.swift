@@ -29,6 +29,13 @@ enum Verifier {
         guard pa.orientation == pb.orientation else {
             throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
         }
+        // Also in lossy mode: an animation must stay one, and no image of a
+        // multi-image file (e.g. MPO) may go missing. Merging identical frames
+        // is allowed and checked frame by frame below.
+        let framesA = CGImageSourceGetCount(a), framesB = CGImageSourceGetCount(b)
+        guard framesA <= 1 || framesB > 1, format == .gif || format == .png || format == .webp || framesB >= framesA else {
+            throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+        }
         // jpegtran copies the profile byte for byte. Other formats may store an
         // equivalent profile differently (oxipng writes an sRGB chunk instead of
         // an sRGB ICC profile), which the pixel comparison below catches.

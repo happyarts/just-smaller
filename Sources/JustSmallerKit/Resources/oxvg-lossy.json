@@ -1,0 +1,17 @@
+{
+  "optimise": {
+    "extends": "default",
+    "jobs": {
+      "cleanupIds": {
+        "remove": false,
+        "minify": false,
+        "preserve": null,
+        "preservePrefixes": null,
+        "force": false
+      }
+    },
+    "omit": [
+      "remove_hidden_elems"
+    ]
+  }
+}

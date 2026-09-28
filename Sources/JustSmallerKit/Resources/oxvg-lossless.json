@@ -32,8 +32,8 @@
         "usage": true
       },
       "cleanupIds": {
-        "remove": true,
-        "minify": true,
+        "remove": false,
+        "minify": false,
         "preserve": null,
         "preservePrefixes": null,
         "force": false
@@ -64,23 +64,6 @@
         "removeNone": false
       },
       "cleanupEnableBackground": true,
-      "removeHiddenElems": {
-        "isHidden": null,
-        "displayNone": null,
-        "opacityZero": null,
-        "circleRZero": null,
-        "ellipseRxZero": null,
-        "ellipseRyZero": null,
-        "rectWidthZero": null,
-        "rectHeightZero": null,
-        "patternWidthZero": null,
-        "patternHeightZero": null,
-        "imageWidthZero": null,
-        "imageHeightZero": null,
-        "pathEmptyD": null,
-        "polylineEmptyPoints": null,
-        "polygonEmptyPoints": null
-      },
       "removeEmptyText": {
         "text": null,
         "tspan": null,

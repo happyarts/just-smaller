@@ -326,6 +326,103 @@ struct FileOptimizerTests {
         }
     }
 
+    @Test func jpegWithASecondImageIsLeftAlone() async throws {
+        let plain = try Data(contentsOf: write(image(), "plain.jpg", type: .jpeg,
+                                               properties: [kCGImageDestinationLossyCompressionQuality: 0.95]))
+        #expect(!JPEGStructure.hasSecondaryImage([UInt8](plain)))
+
+        // A gain map, motion-photo video or trailer after the end of the image.
+        let trailing = dir.appending(path: "trailing.jpg")
+        try (plain + Data(repeating: 0x42, count: 3000)).write(to: trailing)
+        // A multi-picture index (APP2 "MPF") right after SOI.
+        let mpf = dir.appending(path: "mpf.jpg")
+        let segment: [UInt8] = [0xFF, 0xE2, 0x00, 0x0A] + Array("MPF\0".utf8) + [0, 0, 0, 0]
+        try (plain.prefix(2) + Data(segment) + plain.dropFirst(2)).write(to: mpf)
+
+        for url in [trailing, mpf] {
+            let before = try Data(contentsOf: url)
+            guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
+            #expect(try Data(contentsOf: url) == before)
+        }
+    }
+
+    @Test func fileChangedDuringOptimizationIsNotOverwritten() async throws {
+        let url = write(image(), "busy.png", type: .png)
+        let edited = Data("someone else's edit".utf8)
+        let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in
+            try? edited.write(to: url)
+        }
+        guard case .skipped = outcome else { Issue.record("replaced a changed file: \(outcome)"); return }
+        #expect(try Data(contentsOf: url) == edited)
+    }
+
+    @Test func lossyAnimatedPNGStaysAnimated() async throws {
+        var settings = self.settings
+        settings.lossy = true
+        settings.outputLossy = .replace
+        let url = dir.appending(path: "animated-lossy.png")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 3, nil)!
+        for _ in 0..<3 {
+            CGImageDestinationAddImage(dest, image(), [kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.2]] as CFDictionary)
+        }
+        #expect(CGImageDestinationFinalize(dest))
+        _ = try await FileOptimizer(settings: settings).optimize(url) { _ in }
+        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
+        #expect(CGImageSourceGetCount(source) == 3)
+    }
+
+    /// Sprites: symbols nothing in the file refers to are used by other files
+    /// and pages (<use href="icons.svg#x">); they and their ids must stay.
+    @Test(arguments: [false, true])
+    func svgSpriteKeepsItsSymbols(lossy: Bool) async throws {
+        var settings = self.settings
+        settings.lossy = lossy
+        settings.outputLossy = .replace
+        let url = dir.appending(path: "sprite-\(lossy).svg")
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg">
+              <!-- icons -->
+              <symbol id="icon-first" viewBox="0 0 10 10"><path d="M0 0h10v10z"/></symbol>
+              <symbol id="icon-second" viewBox="0 0 10 10"><circle cx="5" cy="5" r="3"/></symbol>
+            </svg>
+            """.utf8).write(to: url)
+        _ = try await FileOptimizer(settings: settings).optimize(url) { _ in }
+        let result = try String(contentsOf: url, encoding: .utf8)
+        #expect(result.contains("id=\"icon-first\"") && result.contains("id=\"icon-second\""))
+    }
+
+    @Test func sameNamesFromDifferentFoldersGetTheirOwnResults() async throws {
+        let fm = FileManager.default
+        let out = dir.appending(path: "out")
+        var results: [URL] = []
+        for folder in ["a", "b"] {
+            let sub = dir.appending(path: folder)
+            try fm.createDirectory(at: sub, withIntermediateDirectories: true)
+            let url = sub.appending(path: "IMG_1.png")
+            try fm.copyItem(at: write(image(), "\(folder)-src.png", type: .png), to: url)
+            guard case .optimized(_, _, _, let result, _, _) = try await FileOptimizer(settings: settings)
+                .optimize(url, to: .newFile(out.appending(path: "IMG_1.png"), includeUnchanged: false), progress: { _ in })
+            else { Issue.record("not optimized"); return }
+            results.append(result)
+        }
+        #expect(Set(results.map(\.lastPathComponent)) == ["IMG_1.png", "IMG_1 2.png"])
+        #expect(results.allSatisfy { fm.fileExists(atPath: $0.path) })
+    }
+
+    /// The same path in other letter case is the original itself on a
+    /// case-insensitive volume: it must never go to the Trash as "an earlier result".
+    @Test func outputThatIsTheOriginalIsRefused() async throws {
+        let url = write(image(), "Photo.png", type: .png)
+        let before = try Data(contentsOf: url)
+        let sameFile = url.deletingLastPathComponent().appending(path: "photo.png")
+        guard FileManager.default.fileExists(atPath: sameFile.path) else { return } // case-sensitive volume
+        await #expect(throws: FileReplacer.OutputIsOriginal.self) {
+            _ = try await FileOptimizer(settings: settings)
+                .optimize(url, to: .newFile(sameFile, includeUnchanged: false), progress: { _ in })
+        }
+        #expect(try Data(contentsOf: url) == before)
+    }
+
     @Test func jpegCoefficientsAreCompared() async throws {
         let a = write(image(), "coef-a.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.9])
         let b = write(image(), "coef-b.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.6])

@@ -35,7 +35,8 @@ enum Pipeline {
         switch format {
         case .png:
             var stages: [[Candidate]] = []
-            if s.lossy { stages.append([pngQuantize()]) }
+            // quantizr reads one frame; an animation would become a still image.
+            if s.lossy, !facts.isAnimated { stages.append([pngQuantize()]) }
             if strip { stages.append([pngMetadata(orientation: facts.orientation)]) }
             stages.append(pngCompressors(effort: s.effort, lossy: s.lossy, facts: facts))
             return stages
@@ -210,14 +211,13 @@ enum Pipeline {
     /// and never reads a configuration other than the one it is given.
     static func oxvg(lossless: Bool) -> Candidate {
         Candidate(name: "OXVG", isLossy: !lossless) { input, output, work in
-            var args = ["optimise"]
-            if lossless {
-                guard let config = Bundle.module.url(forResource: "oxvg-lossless", withExtension: "json") else {
-                    throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
-                }
-                args += ["--config", config.path]
+            // Both configurations keep every id: other files and pages refer to
+            // them (sprites, <use href="icons.svg#x">), which no rendering of
+            // this file can show.
+            guard let config = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json") else {
+                throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
             }
-            try await ToolRunner.run("svg-tool", args + [input.path], stdout: output, in: work)
+            try await ToolRunner.run("svg-tool", ["optimise", "--config", config.path, input.path], stdout: output, in: work)
             return true
         }
     }

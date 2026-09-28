@@ -25,6 +25,30 @@ public enum Destination: Equatable, Sendable {
     }
 }
 
+/// Output names claimed by the files of this process, so two different
+/// originals never write to the same result (e.g. two "IMG_1.jpg" from
+/// different folders into one output folder). The same original writing again
+/// gets its earlier name back.
+enum OutputClaims {
+    nonisolated(unsafe) private static var owners: [String: String] = [:]
+    private static let lock = NSLock()
+
+    /// `target`, or "name 2.ext", "name 3.ext" … if another original has it.
+    static func claim(_ target: URL, for original: URL) -> URL {
+        lock.lock(); defer { lock.unlock() }
+        let owner = original.standardizedFileURL.path
+        let stem = target.deletingPathExtension().lastPathComponent
+        let ext = target.pathExtension.isEmpty ? "" : "." + target.pathExtension
+        var candidate = target, n = 2
+        while let other = owners[candidate.path.lowercased()], other != owner {
+            candidate = target.deletingLastPathComponent().appending(path: "\(stem) \(n)\(ext)")
+            n += 1
+        }
+        owners[candidate.path.lowercased()] = owner
+        return candidate
+    }
+}
+
 public enum OutputPlanner {
     /// `root` is the dropped folder the file was found in. Its name and
     /// subfolders are mirrored in the output folder, so files from different

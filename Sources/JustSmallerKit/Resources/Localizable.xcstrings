@@ -341,6 +341,36 @@
         }
       }
     },
+    "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält ein zweites Bild (HDR-Gain-Map, Live-Foto oder Stereobild) – unverändert gelassen"
+          }
+        }
+      }
+    },
+    "animation or second image lost": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Animation oder zweites Bild verloren"
+          }
+        }
+      }
+    },
+    "The output would take the original’s place. Choose another output folder or suffix.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Ergebnis würde das Original ersetzen. Wähle einen anderen Ausgabeordner oder ein anderes Suffix."
+          }
+        }
+      }
+    },
     "unreadable": {
       "localizations": {
         "de": {
