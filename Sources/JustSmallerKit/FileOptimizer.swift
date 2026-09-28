@@ -122,7 +122,8 @@ public struct FileOptimizer: Sendable {
                 do {
                     // Against this stage's input: after a lossy stage the
                     // following lossless ones must keep the lossy result's pixels.
-                    try await Verifier.verify(original: input, result: output, format: format, pixelsMustMatch: !candidate.isLossy)
+                    try await Verifier.verify(original: input, result: output, format: format, pixelsMustMatch: !candidate.isLossy,
+                                              exactUnderAlpha: !candidate.changesHiddenColour)
                 } catch {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
                     lastError = error
@@ -139,9 +140,7 @@ public struct FileOptimizer: Sendable {
             if let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {
-                let target = OutputClaims.claim(planned, for: url)
-                try FileReplacer.writeNew(source, to: target, attributesFrom: url)
-                copy = target
+                copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url)
             }
             if let rejected {
                 return .unchanged(reason: String(localized: "Unchanged – result rejected: \(rejected.reason)", bundle: .module),
@@ -153,8 +152,7 @@ public struct FileOptimizer: Sendable {
 
         switch destination {
         case .newFile(let planned, _):
-            let target = OutputClaims.claim(planned, for: url)
-            try FileReplacer.writeNew(best, to: target, attributesFrom: url)
+            let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: target, trashedOriginal: nil,
                               pixelIdentical: pixelIdentical)
         case .replace:
@@ -278,8 +276,14 @@ public struct FileOptimizer: Sendable {
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
             facts.isAnimated = CGImageSourceGetCount(source) > 1
             if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-                facts.orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
+                let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
+                facts.orientation = (1...8).contains(orientation) ? orientation : 1
                 facts.bitsPerComponent = props[kCGImagePropertyDepth] as? Int ?? 8
+                // Cameras set to Adobe RGB often say so only in EXIF (colour
+                // space "uncalibrated") instead of embedding a profile.
+                let exif = props[kCGImagePropertyExifDictionary] as? [CFString: Any]
+                facts.colourSpaceOnlyInEXIF = exif?[kCGImagePropertyExifColorSpace] as? Int == 0xFFFF
+                    && props[kCGImagePropertyProfileName] == nil
             }
         }
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped) {

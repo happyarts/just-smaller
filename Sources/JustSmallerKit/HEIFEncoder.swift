@@ -28,12 +28,17 @@ enum HEIFEncoder {
 
         var properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
         if stripPrivateData {
-            // kCFNull removes the dictionary; orientation and profile stay.
-            properties[kCGImagePropertyGPSDictionary] = kCFNull
-            properties[kCGImagePropertyMakerAppleDictionary] = kCFNull
-            properties[kCGImagePropertyIPTCDictionary] = kCFNull
+            // The image goes in with empty metadata: removing single
+            // dictionaries left EXIF details and XMP behind. Only the
+            // orientation is carried over; the colour profile is part of the
+            // image itself.
+            guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
+            let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+            if let orientation = original?[kCGImagePropertyOrientation] { properties[kCGImagePropertyOrientation] = orientation }
+            CGImageDestinationAddImageAndMetadata(destination, image, CGImageMetadataCreateMutable(), properties as CFDictionary)
+        } else {
+            CGImageDestinationAddImageFromSource(destination, source, 0, properties as CFDictionary)
         }
-        CGImageDestinationAddImageFromSource(destination, source, 0, properties as CFDictionary)
         for type in auxiliaryTypes {
             if let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type) {
                 CGImageDestinationAddAuxiliaryDataInfo(destination, type, info)

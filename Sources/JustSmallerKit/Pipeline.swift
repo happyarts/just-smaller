@@ -7,6 +7,9 @@ struct Candidate: Sendable {
     let name: String
     /// Lossy candidates are never checked for identical pixels.
     var isLossy = false
+    /// Lossy mode lets lossless tools rewrite the colour of fully transparent
+    /// pixels (invisible); every visible pixel must still be identical.
+    var changesHiddenColour = false
     /// A lossy re-encode must save at least this fraction to be worth the
     /// generation loss.
     var minimumGain = 0.0
@@ -22,6 +25,9 @@ struct FileFacts: Sendable {
     var jpegQuality: Int?
     /// Only lossless WebP (VP8L) can be recompressed without loss.
     var isLosslessWebP = false
+    /// JPEG whose colour space is given only in EXIF (Adobe RGB without a
+    /// profile): stripping EXIF would change its colours.
+    var colourSpaceOnlyInEXIF = false
     var isAnimated = false
     var bitsPerComponent = 8
 }
@@ -50,7 +56,7 @@ enum Pipeline {
             // target; otherwise re-encoding only adds generation loss and the
             // lossless steps below are all it gets (jpegoptim's rule).
             if s.lossy, (facts.jpegQuality ?? 100) > s.jpegQuality { stages.append([jpegli(quality: s.jpegQuality)]) }
-            if strip { stages.append([jpegMetadata(orientation: facts.orientation)]) }
+            if strip, !facts.colourSpaceOnlyInEXIF { stages.append([jpegMetadata(orientation: facts.orientation)]) }
             stages.append([jpegtran()])
             return stages
 
@@ -67,7 +73,7 @@ enum Pipeline {
         case .svg:
             // Lossless keeps the geometry exact to five digits; lossy allows
             // oxvg's (svgo's) approximations such as curves turned into arcs.
-            return [[oxvg(lossless: !s.lossy)]]
+            return [[oxvg(lossless: !s.lossy, keepMetadata: !strip)]]
 
         case .heic:
             // HEIC can only be re-encoded, which always loses a little.
@@ -125,7 +131,7 @@ enum Pipeline {
 
     /// ECT rewrites the file in place, so it works on a copy.
     static func ect(_ options: [String], lossy: Bool) -> Candidate {
-        Candidate(name: "ECT") { input, output, work in
+        Candidate(name: "ECT", changesHiddenColour: lossy) { input, output, work in
             try FileManager.default.copyItem(at: input, to: output)
             var args = options
             // Without --strict ECT rewrites the colour of fully transparent
@@ -137,7 +143,7 @@ enum Pipeline {
     }
 
     static func oxipng(level: String, lossy: Bool) -> Candidate {
-        Candidate(name: "OxiPNG") { input, output, work in
+        Candidate(name: "OxiPNG", changesHiddenColour: lossy) { input, output, work in
             var args = ["-o", level, "-i", "0", "--strip", "none"]
             // -a rewrites the colour of fully transparent pixels. Invisible,
             // but not identical, so only in lossy mode.
@@ -209,18 +215,39 @@ enum Pipeline {
 
     /// The OXVG optimiser through Tools/svg-tool, which writes to stdout
     /// and never reads a configuration other than the one it is given.
-    static func oxvg(lossless: Bool) -> Candidate {
+    static func oxvg(lossless: Bool, keepMetadata: Bool) -> Candidate {
         Candidate(name: "OXVG", isLossy: !lossless) { input, output, work in
             // Both configurations keep every id: other files and pages refer to
             // them (sprites, <use href="icons.svg#x">), which no rendering of
             // this file can show.
-            guard let config = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json") else {
+            guard let bundled = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json") else {
                 throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
             }
+            let config = keepMetadata ? try keepingMetadata(bundled, in: work) : bundled
             try await ToolRunner.run("svg-tool", ["optimise", "--config", config.path, input.path], stdout: output, in: work)
             return true
         }
     }
+
+    /// The jobs that remove metadata, comments, titles and editor data.
+    private static let metadataJobs = ["removeMetadata", "removeComments", "removeEditorsNSData", "removeDesc", "removeTitle"]
+
+    /// A copy of the configuration without the metadata jobs, for "keep metadata".
+    private static func keepingMetadata(_ config: URL, in work: URL) throws -> URL {
+        guard var root = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any],
+              var optimise = root["optimise"] as? [String: Any] else { return config }
+        var jobs = optimise["jobs"] as? [String: Any] ?? [:]
+        for job in metadataJobs { jobs[job] = nil }
+        optimise["jobs"] = jobs
+        // Jobs from a preset ("extends") are left out by their snake_case name.
+        let snake = metadataJobs.map { $0.replacing(/([a-z])([A-Z])/) { "\($0.1)_\($0.2.lowercased())" }.lowercased() }
+        optimise["omit"] = (optimise["omit"] as? [String] ?? []) + snake
+        root["optimise"] = optimise
+        let url = work.appending(path: "oxvg-keep-metadata-\(UUID().uuidString).json")
+        try JSONSerialization.data(withJSONObject: root).write(to: url)
+        return url
+    }
+
 
     // MARK: - HEIC
 

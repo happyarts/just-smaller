@@ -58,9 +58,8 @@ CMAKE_COMMON="-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE
 # - libjpeg-turbo (actively maintained, current security fixes) for
 #   everything that reads untrusted JPEGs to check or decode them: jpegcmp
 #   and jpegli's JPEG input;
-# - mozjpeg only for jpegtran, whose trellis/scan optimization saves ~0.9
-#   percentage points more than libjpeg-turbo's. Its output is checked by
-#   the libjpeg-turbo based jpegcmp.
+# - mozjpeg only for jpegtran, for its scan optimization. Its output is
+#   checked by the libjpeg-turbo based jpegcmp.
 log "libjpeg-turbo"
 TURBO=$WORK/libjpeg-turbo
 run turbo-configure cmake -S "$ROOT/Vendor/libjpeg-turbo" -B "$TURBO" $CMAKE_COMMON -DENABLE_SHARED=OFF \
@@ -121,7 +120,7 @@ cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
-cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml"
+cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml" --locked
 
 for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng svg-tool png-quantize; do
 	if [ -n "$ENTITLEMENTS" ]; then

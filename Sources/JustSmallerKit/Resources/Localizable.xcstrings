@@ -371,6 +371,26 @@
         }
       }
     },
+    "The optimizer took too long and was stopped.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das Optimierungswerkzeug brauchte zu lange und wurde gestoppt."
+          }
+        }
+      }
+    },
+    "Couldn’t be read completely": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ließ sich nicht vollständig lesen"
+          }
+        }
+      }
+    },
     "unreadable": {
       "localizations": {
         "de": {

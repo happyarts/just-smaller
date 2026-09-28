@@ -17,7 +17,8 @@ enum SVGContent {
         let parser = XMLParser(data: data)
         parser.delegate = scanner
         parser.shouldResolveExternalEntities = false
-        parser.parse()
+        // What the parser can't read, it can't vouch for either.
+        guard parser.parse() else { return String(localized: "Couldn’t be read completely", bundle: .module) }
         if scanner.hasScript { return String(localized: "Contains scripts", bundle: .module) }
         if scanner.hasAnimation { return String(localized: "Contains animation", bundle: .module) }
         if scanner.hasHTML { return String(localized: "Contains embedded HTML", bundle: .module) }
@@ -53,6 +54,11 @@ enum SVGContent {
 
         func parser(_ parser: XMLParser, foundCharacters string: String) {
             if inStyle { styleText += string }
+        }
+
+        /// <?xml-stylesheet href="…"?>: CSS from another file.
+        func parser(_ parser: XMLParser, foundProcessingInstructionWithTarget target: String, data: String?) {
+            if target == "xml-stylesheet" { styleText += "@import" }
         }
 
         func parser(_ parser: XMLParser, foundCDATA block: Data) {

@@ -62,7 +62,7 @@ enum JPEGMetadataFilter {
         var tiff: [UInt8] = Array("MM".utf8) + [0x00, 0x2A, 0x00, 0x00, 0x00, 0x08] // header, IFD0 at offset 8
         tiff += [0x00, 0x01]                                  // one entry
         tiff += [0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01] // tag, type SHORT, count 1
-        tiff += [0x00, UInt8(orientation), 0x00, 0x00]        // value, left-aligned
+        tiff += [0x00, UInt8(clamping: orientation), 0x00, 0x00] // value, left-aligned
         tiff += [0x00, 0x00, 0x00, 0x00]                      // no next IFD
         return tiff
     }
@@ -141,7 +141,7 @@ enum JPEGQuality {
             if marker == 0xDA { return nil }
             if marker == 0xDB {
                 var j = i + 4
-                while j < i + 2 + length {
+                while j < i + 2 + length, j < b.count {
                     let precision = b[j] >> 4, id = b[j] & 0x0F
                     let size = precision == 0 ? 64 : 128
                     guard j + 1 + size <= b.count else { return nil }

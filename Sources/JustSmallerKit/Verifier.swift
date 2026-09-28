@@ -12,7 +12,11 @@ struct VerificationError: LocalizedError {
 /// it. Just Smaller never trusts a tool: a result that looks different, lost its
 /// colour profile or orientation, or can't be decoded is thrown away.
 enum Verifier {
-    static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool) async throws {
+    /// `exactUnderAlpha` false allows a different colour under fully
+    /// transparent pixels (lossy mode's lossless steps); visible pixels must
+    /// still match.
+    static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
+                       exactUnderAlpha: Bool = true) async throws {
         if format == .svg {
             try await compareRenderings(original, result, strict: pixelsMustMatch)
             return
@@ -51,7 +55,7 @@ enum Verifier {
         } else {
             // GIF transparency is on/off per palette entry and the colour behind
             // it carries no meaning, so only PNG and WebP must keep it too.
-            try comparePixels(a, b, exactUnderAlpha: format != .gif)
+            try comparePixels(a, b, exactUnderAlpha: format != .gif && exactUnderAlpha)
         }
     }
 

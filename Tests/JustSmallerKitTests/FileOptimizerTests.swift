@@ -424,6 +424,56 @@ struct FileOptimizerTests {
         #expect(try Data(contentsOf: url) == before)
     }
 
+    @Test func heicStripRemovesPrivateDataButKeepsOrientation() async throws {
+        var settings = self.settings
+        settings.lossy = true
+        settings.quality = 50
+        settings.outputLossy = .replace
+        let url = dir.appending(path: "private.heic")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        let xmp = CGImageMetadataCreateMutable()
+        CGImageMetadataSetValueWithPath(xmp, nil, "xmp:CreatorTool" as CFString, "SecretApp" as CFString)
+        CGImageDestinationAddImageAndMetadata(dest, image(width: 256, height: 256), xmp, [
+            kCGImageDestinationLossyCompressionQuality: 1.0,
+            kCGImagePropertyOrientation: 6,
+            kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 48.1, kCGImagePropertyGPSLatitudeRef: "N"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifBodySerialNumber: "SN999"],
+        ] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        guard case .optimized = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) else {
+            Issue.record("not optimized, nothing checked"); return
+        }
+        let after = props(url)
+        #expect(after[kCGImagePropertyGPSDictionary] == nil)
+        #expect((after[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifBodySerialNumber] == nil)
+        #expect(!(try Data(contentsOf: url)).contains(Data("SecretApp".utf8)))
+        #expect(after[kCGImagePropertyOrientation] as? Int == 6)
+    }
+
+    @Test func keptOriginalsAreNotOptimizedAgain() {
+        let settings = OptimizationSettings()
+        for name in ["photo (original).jpg", "photo (original 2).png", "photo (Original).jpg"] {
+            #expect(OutputPlanner.isOwnOutput(dir.appending(path: name), settings: settings), "\(name)")
+        }
+        #expect(!OutputPlanner.isOwnOutput(dir.appending(path: "holiday (2024).jpg"), settings: settings))
+    }
+
+    @Test func svgKeepsCommentsWhenMetadataIsKept() async throws {
+        var settings = self.settings
+        settings.metadata = .keep
+        let url = dir.appending(path: "licence.svg")
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">
+              <!-- Licence: CC BY 4.0, Jane Doe -->
+              <title>Blue square</title>
+              <rect x="10.000000" y="10.000000" width="80.000000" height="80.000000" fill="#0000ff"/>
+            </svg>
+            """.utf8).write(to: url)
+        _ = try await FileOptimizer(settings: settings).optimize(url) { _ in }
+        let result = try String(contentsOf: url, encoding: .utf8)
+        #expect(result.contains("CC BY 4.0") && result.contains("Blue square"))
+    }
+
     @Test func jpegCoefficientsAreCompared() async throws {
         let a = write(image(), "coef-a.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.9])
         let b = write(image(), "coef-b.jpg", type: .jpeg, properties: [kCGImageDestinationLossyCompressionQuality: 0.6])

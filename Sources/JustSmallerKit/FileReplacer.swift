@@ -141,10 +141,13 @@ enum FileReplacer {
     }
 
     /// Writes an optimized file (used up, like in `replace`) to a new place
-    /// and leaves the original untouched. Finder tags and comments carry over. A file already at
+    /// and leaves the original untouched. Returns where it went: `target`, or
+    /// "name 2.ext" on a drive without a Trash, where an earlier file of that
+    /// name can't be moved out of the way. Finder tags and comments carry over. A file already at
     /// `target` (usually an earlier result) goes to the Trash rather than
     /// being overwritten.
-    static func writeNew(_ result: URL, to target: URL, attributesFrom original: URL) throws {
+    @discardableResult
+    static func writeNew(_ result: URL, to target: URL, attributesFrom original: URL) throws -> URL {
         let fm = FileManager.default
         let folder = target.deletingLastPathComponent()
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -157,9 +160,16 @@ enum FileReplacer {
             // Another spelling of the original's own path (a case-insensitive
             // volume, a symlinked folder): never trash the original for a copy.
             if isSameFile(target, original) { throw OutputIsOriginal() }
-            try Trash.move(target)
+            do {
+                try Trash.move(target)
+            } catch where Trash.isUnavailable(error) {
+                let free = freeName(for: target)
+                try fm.moveItem(at: staged, to: free)
+                return free
+            }
         }
         try fm.moveItem(at: staged, to: target)
+        return target
     }
 
     struct OutputIsOriginal: LocalizedError {
@@ -173,6 +183,25 @@ enum FileReplacer {
         guard let ia = try? FileOptimizer.freshValues(of: a, key).fileResourceIdentifier,
               let ib = try? FileOptimizer.freshValues(of: b, key).fileResourceIdentifier else { return false }
         return ia.isEqual(ib)
+    }
+
+    /// "name 2.ext", "name 3.ext" … — the first that doesn't exist.
+    private static func freeName(for url: URL) -> URL {
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension.isEmpty ? "" : "." + url.pathExtension
+        var n = 2
+        var candidate = url
+        while FileManager.default.fileExists(atPath: candidate.path) {
+            candidate = url.deletingLastPathComponent().appending(path: "\(stem) \(n)\(ext)")
+            n += 1
+        }
+        return candidate
+    }
+
+    /// The word in "photo (original).jpg", localized, plus the English one:
+    /// both mark a kept original that must not be optimized again.
+    static var backupLabels: Set<String> {
+        ["original", String(localized: "original", bundle: .module, comment: "Suffix for the backup of an optimized file, as in 'photo (original).jpg'").lowercased()]
     }
 
     /// "photo (original).jpg", or "photo (original 2).jpg" if that is taken.

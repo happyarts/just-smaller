@@ -37,7 +37,7 @@ public enum ToolRunner {
     /// `stderr`, if given, receives the tool's messages and is left for the
     /// caller; otherwise they are only used for the error.
     static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, stderr: URL? = nil,
-                    in directory: URL) async throws -> Int32 {
+                    in directory: URL, timeout: Duration = .seconds(3600)) async throws -> Int32 {
         guard let executable = executable(name) else {
             throw ToolError(tool: name, status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
         }
@@ -65,18 +65,30 @@ public enum ToolRunner {
             process.standardOutput = FileHandle.nullDevice
         }
 
+        // Cancellation and the time limit may come before the process has
+        // started; the guard makes sure it is stopped either way.
+        let guardian = ProcessGuard(process)
+        let watchdog = Task {
+            try await Task.sleep(for: timeout)
+            guardian.stop(timedOut: true)
+        }
+        defer { watchdog.cancel() }
+        try Task.checkCancellation()
         let status: Int32 = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
-                do { try process.run() } catch {
+                do { try guardian.start() } catch {
                     process.terminationHandler = nil
                     continuation.resume(throwing: error)
                 }
             }
         } onCancel: {
-            if process.isRunning { process.terminate() }
+            guardian.stop(timedOut: false)
         }
         try Task.checkCancellation()
+        if guardian.timedOut {
+            throw ToolError(tool: name, status: status, message: String(localized: "The optimizer took too long and was stopped.", bundle: .module))
+        }
         if status != 0 {
             let message = (try? String(contentsOf: errURL, encoding: .utf8))?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -84,5 +96,30 @@ public enum ToolRunner {
             throw ToolError(tool: name, status: status, message: message)
         }
         return status
+    }
+}
+
+/// Starts and stops a process from any thread without racing: a stop that
+/// comes before the start stops it right after it has started.
+private final class ProcessGuard: @unchecked Sendable {
+    private let process: Process
+    private let lock = NSLock()
+    private var stopped = false
+    private(set) var timedOut = false
+
+    init(_ process: Process) { self.process = process }
+
+    func start() throws {
+        lock.lock(); defer { lock.unlock() }
+        try process.run()
+        if stopped { process.terminate() }
+    }
+
+    func stop(timedOut: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        guard !stopped else { return }
+        stopped = true
+        if timedOut { self.timedOut = true }
+        if process.isRunning { process.terminate() }
     }
 }

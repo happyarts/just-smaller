@@ -81,6 +81,12 @@ public enum OutputPlanner {
     /// Whether a file found while scanning a folder is one of Just Smaller's own
     /// results, which must not be optimized a second time.
     public static func isOwnOutput(_ file: URL, settings: OptimizationSettings) -> Bool {
+        // A kept original next to its result ("photo (original).jpg", on
+        // drives without a Trash) is not optimized again.
+        let stem = file.deletingPathExtension().lastPathComponent
+        if let match = stem.firstMatch(of: /\((\w+)( \d+)?\)$/), FileReplacer.backupLabels.contains(String(match.1).lowercased()) {
+            return true
+        }
         let modes = [settings.outputLossless, settings.outputLossy]
         if modes.contains(.suffix), file.deletingPathExtension().lastPathComponent.hasSuffix(settings.suffix) {
             return true
