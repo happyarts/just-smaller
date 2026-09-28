@@ -251,6 +251,16 @@
         }
       }
     },
+    "SVG could not be rendered": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "SVG ließ sich nicht darstellen"
+          }
+        }
+      }
+    },
     "unreadable": {
       "localizations": {
         "de": {

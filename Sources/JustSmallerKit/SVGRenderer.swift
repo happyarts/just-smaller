@@ -42,23 +42,40 @@ enum SVGRenderer {
     private final class Loader: NSObject, WKNavigationDelegate {
         private var continuation: CheckedContinuation<Void, any Error>?
 
-        func load(_ page: URL, readAccess: URL, in view: WKWebView) async throws {
+        /// WebKit never calls back when its web process can't start (in the
+        /// App Sandbox without the network entitlement), so loading gives up
+        /// after a while instead of waiting forever.
+        func load(_ page: URL, readAccess: URL, in view: WKWebView, timeout: Duration = .seconds(30)) async throws {
             try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
                 view.loadFileURL(page, allowingReadAccessTo: readAccess)
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: timeout)
+                    self?.finish(throwing: VerificationError(reason: String(localized: "SVG could not be rendered", bundle: .module)))
+                }
             }
         }
 
+        private func finish(throwing error: (any Error)? = nil) {
+            guard let continuation else { return }
+            self.continuation = nil
+            if let error { continuation.resume(throwing: error) } else { continuation.resume() }
+        }
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            finish(throwing: VerificationError(reason: String(localized: "SVG could not be rendered", bundle: .module)))
+        }
+
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            continuation?.resume(); continuation = nil
+            finish()
         }
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: any Error) {
-            continuation?.resume(throwing: error); continuation = nil
+            finish(throwing: error)
         }
 
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: any Error) {
-            continuation?.resume(throwing: error); continuation = nil
+            finish(throwing: error)
         }
     }
 }

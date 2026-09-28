@@ -5,7 +5,13 @@ import Foundation
 ///
 /// The swap is atomic: at every moment either the original or the finished
 /// result is at the original's path, even if the app crashes or the disk
-/// fills up. The result takes over the original's permissions, ACL, extended
+/// fills up. One exception: in the App Sandbox, a single file the user
+/// dropped may be written but nothing may be created next to it, so there is
+/// no room for a backup. Then the original goes to the Trash first and the
+/// result takes its place right after (see `replaceViaTrash`); in the moment
+/// between, the original is safe in the Trash.
+///
+/// The result takes over the original's permissions, ACL, extended
 /// attributes (Finder tags, comments, quarantine) and creation date. The
 /// modification date is "now" unless the user wants to keep it.
 enum FileReplacer {
@@ -24,6 +30,11 @@ enum FileReplacer {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
 
+        // Decided up front, not by trying: in the sandbox replaceItemAt swaps
+        // the files first and only then fails to create the backup.
+        if moveOriginalToTrash, !fm.isWritableFile(atPath: original.deletingLastPathComponent().path) {
+            return try replaceViaTrash(original, with: replacement, dates: dates, keepModificationDate: keepModificationDate)
+        }
         let backupName = moveOriginalToTrash ? uniqueBackupName(for: original) : nil
         let resulting: URL?
         do {
@@ -60,6 +71,29 @@ enum FileReplacer {
             // deleted.
             return backup
         }
+    }
+
+    /// For a single file in the App Sandbox: the original goes to the Trash
+    /// under its own name (so Finder's Put Back returns it to where it was),
+    /// then the result is moved to its path. If that fails, the original
+    /// comes back from the Trash.
+    private static func replaceViaTrash(_ original: URL, with replacement: URL,
+                                        dates: URLResourceValues, keepModificationDate: Bool) throws -> URL? {
+        let fm = FileManager.default
+        var trashed: NSURL?
+        try fm.trashItem(at: original, resultingItemURL: &trashed)
+        do {
+            try fm.moveItem(at: replacement, to: original)
+        } catch {
+            if let trashed = trashed as URL? { try? fm.moveItem(at: trashed, to: original) }
+            throw error
+        }
+        var restored = URLResourceValues()
+        restored.creationDate = dates.creationDate
+        restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
+        var target = original
+        try? target.setResourceValues(restored)
+        return trashed as URL?
     }
 
     /// Writes an optimized file to a new place and leaves the original

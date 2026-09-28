@@ -22,6 +22,8 @@ public struct FileOptimizer: Sendable {
 
     public init(settings: OptimizationSettings) { self.settings = settings }
 
+    static let isSandboxed = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+
     public func optimize(_ url: URL, to destination: Destination = .replace,
                   progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
         let fm = FileManager.default
@@ -31,9 +33,11 @@ public struct FileOptimizer: Sendable {
         guard size > 0 else {
             return .skipped(reason: String(localized: "Empty file", bundle: .module), size: 0)
         }
-        // Replacing the file needs write access to it and to its folder.
-        guard destination != .replace
-                || (before.isWritable == true && fm.isWritableFile(atPath: url.deletingLastPathComponent().path)) else {
+        // Replacing the file needs write access to it and to its folder. In
+        // the App Sandbox a single dropped file never has a writable folder;
+        // FileReplacer handles that case.
+        let folderWritable = Self.isSandboxed || fm.isWritableFile(atPath: url.deletingLastPathComponent().path)
+        guard destination != .replace || (before.isWritable == true && folderWritable) else {
             return .skipped(reason: String(localized: "The file or its folder is read-only", bundle: .module), size: size)
         }
         guard let format = ImageFormat.detect(at: url) else {
