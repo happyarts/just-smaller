@@ -25,19 +25,6 @@ public struct FileOptimizer: Sendable {
 
     public init(settings: OptimizationSettings) { self.settings = settings }
 
-    static let isSandboxed = ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
-
-    /// The folder's own permissions, ignoring the sandbox (which answers "no"
-    /// for the folder of every single dropped file).
-    static func permitsWriting(_ path: String) -> Bool {
-        var info = stat()
-        guard stat(path, &info) == 0 else { return false }
-        let mode = info.st_mode
-        if info.st_uid == getuid() { return mode & S_IWUSR != 0 }
-        if info.st_gid == getgid() { return mode & S_IWGRP != 0 }
-        return mode & S_IWOTH != 0
-    }
-
     public func optimize(_ url: URL, to destination: Destination = .replace,
                   progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
         let fm = FileManager.default
@@ -51,7 +38,7 @@ public struct FileOptimizer: Sendable {
         // the App Sandbox a single dropped file never has a writable folder;
         // FileReplacer handles that case.
         let folder = url.deletingLastPathComponent().path
-        let folderWritable = fm.isWritableFile(atPath: folder) || (Self.isSandboxed && Self.permitsWriting(folder))
+        let folderWritable = fm.isWritableFile(atPath: folder) || (Sandbox.isActive && Sandbox.permitsWriting(folder))
         guard destination != .replace || (before.isWritable == true && folderWritable) else {
             return .skipped(reason: String(localized: "The file or its folder is read-only", bundle: .module), size: size)
         }

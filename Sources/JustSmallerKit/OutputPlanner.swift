@@ -8,6 +8,12 @@ public enum Destination: Equatable, Sendable {
     /// copies files that were already optimal, so an output folder ends up
     /// complete.
     case newFile(URL, includeUnchanged: Bool)
+
+    /// The folder a new file is created in, which must be writable; nil
+    /// when the original is replaced.
+    public var createdIn: URL? {
+        if case .newFile(let target, _) = self { target.deletingLastPathComponent() } else { nil }
+    }
 }
 
 public enum OutputPlanner {
