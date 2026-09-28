@@ -51,10 +51,16 @@ public enum ToolRunner {
         process.currentDirectoryURL = directory
         process.qualityOfService = .utility
         process.standardInput = FileHandle.nullDevice
-        process.standardError = try FileHandle(forWritingTo: errURL)
+        // Closed as soon as the tool is done: some volumes (WebDAV) refuse to
+        // delete a file that is still open.
+        let errHandle = try FileHandle(forWritingTo: errURL)
+        var outHandle: FileHandle?
+        defer { try? errHandle.close(); try? outHandle?.close() }
+        process.standardError = errHandle
         if let stdout {
             FileManager.default.createFile(atPath: stdout.path, contents: nil)
-            process.standardOutput = try FileHandle(forWritingTo: stdout)
+            outHandle = try FileHandle(forWritingTo: stdout)
+            process.standardOutput = outHandle
         } else {
             process.standardOutput = FileHandle.nullDevice
         }

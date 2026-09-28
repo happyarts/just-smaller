@@ -14,6 +14,15 @@ public enum Destination: Equatable, Sendable {
     public var createdIn: URL? {
         if case .newFile(let target, _) = self { target.deletingLastPathComponent() } else { nil }
     }
+
+    /// The folder that must be writable to write the result for `file`.
+    /// Replacing a file only needs the file itself — except on a network
+    /// volume: without a Trash there, the original is kept next to the result.
+    public func folderNeeded(for file: URL) -> URL? {
+        if let createdIn { return createdIn }
+        let local = (try? file.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
+        return local ? nil : file.deletingLastPathComponent()
+    }
 }
 
 public enum OutputPlanner {

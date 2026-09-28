@@ -8,6 +8,13 @@ public enum Trash {
     /// the command line tool never set it.
     nonisolated(unsafe) public static var testFolder: URL?
 
+    /// The error means the volume has no Trash at all (most network shares),
+    /// not that something else went wrong.
+    public static func isUnavailable(_ error: any Error) -> Bool {
+        let error = error as NSError
+        return error.domain == NSCocoaErrorDomain && error.code == NSFeatureUnsupportedError
+    }
+
     /// Moves `url` to the Trash and returns where it ended up.
     @discardableResult
     public static func move(_ url: URL) throws -> URL? {

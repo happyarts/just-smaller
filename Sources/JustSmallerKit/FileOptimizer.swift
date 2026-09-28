@@ -68,12 +68,9 @@ public struct FileOptimizer: Sendable {
             return .skipped(reason: Pipeline.reasonForNoStages(format, facts: facts, settings: settings), size: size)
         }
 
-        // On the same volume as the file, so the final swap is a rename.
-        let work = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: url, create: true)
-        defer { try? fm.removeItem(at: work) }
         let ext = url.pathExtension.isEmpty ? format.rawValue : url.pathExtension
-        let source = work.appending(path: "source.\(ext)")
-        try fm.copyItem(at: url, to: source) // a clone on APFS
+        let (work, source) = try Self.workCopy(of: url, named: "source.\(ext)")
+        defer { try? fm.removeItem(at: work) }
 
         var best = source, bestSize = size, used: [String] = [], lastError: (any Error)?
         // A smaller result that failed verification: the file is not
@@ -229,6 +226,37 @@ public struct FileOptimizer: Sendable {
         case .svg, .heic:
             return true
         }
+    }
+
+    /// A private work folder with a copy of the file. On the file's own
+    /// volume when it is local (a clone on APFS, and the result moves back
+    /// with a rename); on the local disk for network volumes, so intermediate
+    /// files never travel over the network — unless the startup disk is full.
+    static func workCopy(of url: URL, named name: String) throws -> (work: URL, source: URL) {
+        let fm = FileManager.default
+        func copy(into work: URL) throws -> (work: URL, source: URL) {
+            try fm.copyItem(at: url, to: work.appending(path: name))
+            return (work, work.appending(path: name))
+        }
+        func onVolume() throws -> (work: URL, source: URL) {
+            try copy(into: fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: url, create: true))
+        }
+        let local = (try? url.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
+        if local { return try onVolume() }
+        let temp = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
+        do {
+            try fm.createDirectory(at: temp, withIntermediateDirectories: true)
+            return try copy(into: temp)
+        } catch where isOutOfSpace(error) {
+            try? fm.removeItem(at: temp)
+            return try onVolume()
+        }
+    }
+
+    private static func isOutOfSpace(_ error: any Error) -> Bool {
+        let error = error as NSError
+        return (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
+            || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))
     }
 
     static func facts(about url: URL, format: ImageFormat, size: Int64) -> FileFacts {

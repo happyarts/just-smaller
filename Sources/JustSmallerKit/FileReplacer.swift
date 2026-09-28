@@ -15,26 +15,33 @@ import Foundation
 /// attributes (Finder tags, comments, quarantine) and creation date. The
 /// modification date is "now" unless the user wants to keep it.
 enum FileReplacer {
-    /// `replacement` must live in the item replacement directory of
-    /// `original`, so the swap stays on one volume. Returns where the original
-    /// went when it was moved to the Trash.
-    static func replace(_ original: URL, with replacement: URL,
+    /// `result` may be anywhere and is used up: it is moved onto the
+    /// original's volume first, so the swap itself is a rename. Returns where
+    /// the original went when it was moved to the Trash.
+    static func replace(_ original: URL, with result: URL,
                         moveOriginalToTrash: Bool, keepModificationDate: Bool) throws -> URL? {
         let fm = FileManager.default
         let dates = try original.resourceValues(forKeys: [.creationDateKey, .contentModificationDateKey])
-
-        // replaceItemAt would reset the permissions to the replacement's
-        // (0600 for a temporary file), so copy the original's first and tell it
-        // to keep the replacement's metadata.
-        if copyfile(original.path, replacement.path, nil, copyfile_flags_t(COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR)) != 0 {
-            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
-        }
-
-        // Decided up front, not by trying: in the sandbox replaceItemAt swaps
-        // the files first and only then fails to create the backup.
+        // Decided up front, before anything is created next to the original:
+        // in the sandbox a single dropped file's folder is off limits, and
+        // replaceItemAt would swap the files first and only then fail to
+        // create the backup.
         if moveOriginalToTrash, !fm.isWritableFile(atPath: original.deletingLastPathComponent().path) {
-            return try replaceViaTrash(original, with: replacement, dates: dates, keepModificationDate: keepModificationDate)
+            // Staged when the system allows it (the volume's own temporary
+            // folder), so a half-copied file never appears under the
+            // original's name; otherwise moved over directly.
+            let staged = try? stage(result, onVolumeOf: original, as: original.lastPathComponent)
+            defer { if let staged { try? fm.removeItem(at: staged.folder) } }
+            let source = staged?.file ?? result
+            try copyMetadata(from: original, to: source)
+            let trashed = try replaceViaTrash(original, with: source)
+            restoreDates(dates, on: original, keepModificationDate: keepModificationDate)
+            return trashed
         }
+        let staged = try stage(result, onVolumeOf: original, as: original.lastPathComponent)
+        defer { try? fm.removeItem(at: staged.folder) }
+        let replacement = staged.file
+        try copyMetadata(from: original, to: replacement)
         let backupName = moveOriginalToTrash ? uniqueBackupName(for: original) : nil
         let resulting: URL?
         do {
@@ -51,23 +58,53 @@ enum FileReplacer {
             throw error
         }
 
-        var restored = URLResourceValues()
-        restored.creationDate = dates.creationDate
-        // copyfile carried the old dates over; the content did change, which
-        // backup and sync tools need to see unless asked otherwise.
-        restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
-        var target = resulting ?? original
-        try? target.setResourceValues(restored)
+        restoreDates(dates, on: resulting ?? original, keepModificationDate: keepModificationDate)
 
         guard let backupName else { return nil }
         let backup = original.deletingLastPathComponent().appending(path: backupName)
         do {
             return try Trash.move(backup)
         } catch {
-            // No Trash on this volume (e.g. some network shares): the original
-            // stays next to the result under its backup name rather than being
-            // deleted.
+            // No Trash on this volume (most network shares), or it refused:
+            // the replacement is already done, so the original stays next to
+            // the result under its backup name rather than being deleted.
             return backup
+        }
+    }
+
+    /// Moves `file` into a temporary folder on the volume of `place` (an
+    /// existing file or folder), named `name`, so the final step there is a
+    /// rename. The caller removes `folder`.
+    private static func stage(_ file: URL, onVolumeOf place: URL, as name: String) throws -> (folder: URL, file: URL) {
+        let fm = FileManager.default
+        let folder = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: place, create: true)
+        let staged = folder.appending(path: name)
+        do {
+            try fm.moveItem(at: file, to: staged)
+        } catch {
+            try? fm.removeItem(at: folder)
+            throw error
+        }
+        return (folder, staged)
+    }
+
+    /// The creation date stays the original's; the modification date is
+    /// "now" — the content did change, which backup and sync tools need to
+    /// see — unless the user wants to keep it.
+    private static func restoreDates(_ dates: URLResourceValues, on url: URL, keepModificationDate: Bool) {
+        var restored = URLResourceValues()
+        restored.creationDate = dates.creationDate
+        restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
+        var target = url
+        try? target.setResourceValues(restored)
+    }
+
+    /// replaceItemAt would reset the permissions to the replacement's (0600
+    /// for a temporary file), so the original's are copied first and the swap
+    /// keeps the replacement's metadata.
+    private static func copyMetadata(from original: URL, to replacement: URL) throws {
+        if copyfile(original.path, replacement.path, nil, copyfile_flags_t(COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR)) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
     }
 
@@ -75,14 +112,15 @@ enum FileReplacer {
     /// under its own name (so Finder's Put Back returns it to where it was),
     /// then the result is moved to its path. If that fails, the original
     /// comes back from the Trash.
-    private static func replaceViaTrash(_ original: URL, with replacement: URL,
-                                        dates: URLResourceValues, keepModificationDate: Bool) throws -> URL? {
+    private static func replaceViaTrash(_ original: URL, with replacement: URL) throws -> URL? {
         let fm = FileManager.default
         let trashed = try Trash.move(original)
         do {
             try fm.moveItem(at: replacement, to: original)
         } catch {
             guard let trashed else { throw error }
+            // A move across volumes may have left a partial copy; it is ours.
+            if fm.fileExists(atPath: original.path) { try? fm.removeItem(at: original) }
             do {
                 try fm.moveItem(at: trashed, to: original)
             } catch {
@@ -90,11 +128,6 @@ enum FileReplacer {
             }
             throw error
         }
-        var restored = URLResourceValues()
-        restored.creationDate = dates.creationDate
-        restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
-        var target = original
-        try? target.setResourceValues(restored)
         return trashed
     }
 
@@ -107,8 +140,8 @@ enum FileReplacer {
         }
     }
 
-    /// Writes an optimized file to a new place and leaves the original
-    /// untouched. Finder tags and comments carry over. A file already at
+    /// Writes an optimized file (used up, like in `replace`) to a new place
+    /// and leaves the original untouched. Finder tags and comments carry over. A file already at
     /// `target` (usually an earlier result) goes to the Trash rather than
     /// being overwritten.
     static func writeNew(_ result: URL, to target: URL, attributesFrom original: URL) throws {
@@ -117,10 +150,8 @@ enum FileReplacer {
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         // Staged on the target's volume, so the final step is a rename and a
         // half-written file never appears under the target's name.
-        let staging = try fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: folder, create: true)
+        let (staging, staged) = try stage(result, onVolumeOf: folder, as: target.lastPathComponent)
         defer { try? fm.removeItem(at: staging) }
-        let staged = staging.appending(path: target.lastPathComponent)
-        try fm.copyItem(at: result, to: staged)
         _ = copyfile(original.path, staged.path, nil, copyfile_flags_t(COPYFILE_XATTR))
         if fm.fileExists(atPath: target.path) {
             try Trash.move(target)
