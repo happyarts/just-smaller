@@ -3,15 +3,17 @@
 # Vendor/ (git submodules pinned to released versions; mozjpeg and ECT to a
 # master commit, since their last releases lack years of fixes) and Tools/.
 #
-#     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY]
+#     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
-# OUTPUT_DIR defaults to build/tools. Everything is linked statically, so the
-# tools only depend on macOS itself. Needs Rust (rustup) and CMake; without a
+# OUTPUT_DIR defaults to build/tools. ENTITLEMENTS (a plist) is given when the
+# tools go into a sandboxed app: they must inherit its sandbox. Everything is
+# linked statically, so the tools only depend on macOS itself. Needs Rust (rustup) and CMake; without a
 # CMake on the system a private copy is installed into .tools/.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 OUT=${1:-$ROOT/build/tools}
 IDENTITY=${2:--}
+ENTITLEMENTS=${3:-}
 WORK=$ROOT/build/work
 mkdir -p "$OUT" "$WORK"
 
@@ -122,6 +124,10 @@ cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml"
 
 for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng svg-tool png-quantize; do
-	codesign --force --sign "$IDENTITY" --timestamp=none "$OUT/$tool" 2>/dev/null
+	if [ -n "$ENTITLEMENTS" ]; then
+		codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
+	else
+		codesign --force --sign "$IDENTITY" --timestamp=none "$OUT/$tool" 2>/dev/null
+	fi
 done
 log "tools in $OUT"
