@@ -108,7 +108,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
                 if report.status == "failed" { failed += 1 }
                 if report.status == "skipped" || report.status == "rejected" { skipped += 1 }
                 saved += report.saved
-                total += report.originalSize
+                if report.status == "optimized" || report.status == "unchanged" { total += report.originalSize }
                 startNext()
             }
         }
