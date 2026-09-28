@@ -24,4 +24,18 @@ public enum Sandbox {
         }
         return FileManager.default.homeDirectoryForCurrentUser
     }
+
+    /// "~/Pictures" → the real home folder's Pictures (NSString's
+    /// expandingTildeInPath gives the container's in the sandbox).
+    public static func expandingTilde(_ path: String) -> String {
+        guard path == "~" || path.hasPrefix("~/") else { return path }
+        return realHome.path + path.dropFirst()
+    }
+
+    /// The real home folder shown as "~", also in the sandbox.
+    public static func abbreviatingTilde(_ path: String) -> String {
+        let home = realHome.path
+        guard path == home || path.hasPrefix(home + "/") else { return path }
+        return "~" + path.dropFirst(home.count)
+    }
 }

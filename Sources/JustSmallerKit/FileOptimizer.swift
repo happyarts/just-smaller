@@ -140,7 +140,8 @@ public struct FileOptimizer: Sendable {
             if let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {
-                copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url)
+                copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
+                                                 moveAsideToTrash: settings.moveOriginalsToTrash)
             }
             if let rejected {
                 return .unchanged(reason: String(localized: "Unchanged – result rejected: \(rejected.reason)", bundle: .module),
@@ -152,7 +153,8 @@ public struct FileOptimizer: Sendable {
 
         switch destination {
         case .newFile(let planned, _):
-            let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url)
+            let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
+                                                   moveAsideToTrash: settings.moveOriginalsToTrash)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: target, trashedOriginal: nil,
                               pixelIdentical: pixelIdentical)
         case .replace:

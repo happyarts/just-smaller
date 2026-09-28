@@ -12,7 +12,7 @@ let toolsDirectory = URL(fileURLWithPath: #filePath)
     .appending(path: "build/tools")
 
 @Suite(.serialized)
-struct FileOptimizerTests {
+final class FileOptimizerTests {
     let dir: URL
     var settings = OptimizationSettings()
 
@@ -24,6 +24,10 @@ struct FileOptimizerTests {
         // Never the user's Trash, also where a test uses the Trash on purpose.
         Trash.testFolder = FileManager.default.temporaryDirectory.appending(path: "JustSmallerTests-Trash")
     }
+    deinit {
+        try? FileManager.default.removeItem(at: dir)
+    }
+
 
     // MARK: - Fixtures
 

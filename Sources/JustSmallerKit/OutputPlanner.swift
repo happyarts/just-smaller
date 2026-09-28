@@ -88,7 +88,10 @@ public enum OutputPlanner {
             return true
         }
         let modes = [settings.outputLossless, settings.outputLossy]
-        if modes.contains(.suffix), file.deletingPathExtension().lastPathComponent.hasSuffix(settings.suffix) {
+        // The default suffix is localized; results made under another
+        // language ("-optimized", "-optimiert") are still our own.
+        let suffixes = [settings.suffix, "-optimized", OptimizationSettings.defaultSuffix]
+        if modes.contains(.suffix), suffixes.contains(where: { stem.hasSuffix($0) }) {
             return true
         }
         if modes.contains(.folder) {

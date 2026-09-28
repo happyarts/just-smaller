@@ -146,8 +146,11 @@ enum FileReplacer {
     /// name can't be moved out of the way. Finder tags and comments carry over. A file already at
     /// `target` (usually an earlier result) goes to the Trash rather than
     /// being overwritten.
+    /// `moveAsideToTrash` false (the command line's --no-trash) deletes an
+    /// earlier file at `target` instead.
     @discardableResult
-    static func writeNew(_ result: URL, to target: URL, attributesFrom original: URL) throws -> URL {
+    static func writeNew(_ result: URL, to target: URL, attributesFrom original: URL,
+                         moveAsideToTrash: Bool = true) throws -> URL {
         let fm = FileManager.default
         let folder = target.deletingLastPathComponent()
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -160,6 +163,11 @@ enum FileReplacer {
             // Another spelling of the original's own path (a case-insensitive
             // volume, a symlinked folder): never trash the original for a copy.
             if isSameFile(target, original) { throw OutputIsOriginal() }
+            if !moveAsideToTrash {
+                try fm.removeItem(at: target)
+                try fm.moveItem(at: staged, to: target)
+                return target
+            }
             do {
                 try Trash.move(target)
             } catch where Trash.isUnavailable(error) {

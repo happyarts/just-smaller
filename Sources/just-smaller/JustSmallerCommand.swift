@@ -41,7 +41,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
     @Flag(help: "Print one JSON object per file.")
     var json = false
 
-    @Option(help: "Files in parallel (default: twice the number of cores).")
+    @Option(help: "Files in parallel (default: twice the number of cores, at most one per GB of memory).")
     var jobs: Int?
 
     @Option(help: "Folder with the optimizer tools (default: next to this program).", completion: .directory)
@@ -84,7 +84,9 @@ struct JustSmallerCommand: AsyncParsableCommand {
         let found = await FolderScanner.imageFiles(in: paths.map { URL(fileURLWithPath: $0) }) {
             OutputPlanner.isOwnOutput($0, settings: fixed)
         }.filter { seen.insert($0.file.standardizedFileURL.path.lowercased()).inserted }
-        let limit = max(1, jobs ?? 2 * ProcessInfo.processInfo.activeProcessorCount)
+        // As in the app: twice the cores, but at most one file per GB of memory.
+        let gigabytes = Int(ProcessInfo.processInfo.physicalMemory >> 30)
+        let limit = max(1, jobs ?? min(2 * ProcessInfo.processInfo.activeProcessorCount, max(2, gigabytes)))
         let optimizer = FileOptimizer(settings: fixed)
         let asJSON = json
 
