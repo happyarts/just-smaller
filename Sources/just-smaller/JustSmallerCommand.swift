@@ -51,6 +51,14 @@ struct JustSmallerCommand: AsyncParsableCommand {
         guard (1...100).contains(quality) else { throw ValidationError("--quality must be between 1 and 100.") }
         guard Effort(rawValue: effort) != nil else { throw ValidationError("--effort must be fast, balanced, thorough or maximum.") }
         guard suffix == nil || output == nil else { throw ValidationError("Use either --suffix or --output.") }
+        if let suffix {
+            // An empty suffix would make "next to the original" mean "over it".
+            guard !suffix.trimmingCharacters(in: .whitespaces).isEmpty, !suffix.contains("/") else {
+                throw ValidationError("--suffix must not be empty or contain \"/\".")
+            }
+        }
+        let missing = paths.filter { !FileManager.default.fileExists(atPath: $0) }
+        guard missing.isEmpty else { throw ValidationError("Not found: \(missing.joined(separator: ", "))") }
     }
 
     mutating func run() async throws {
@@ -70,14 +78,17 @@ struct JustSmallerCommand: AsyncParsableCommand {
             settings.outputFolder = URL(fileURLWithPath: output).standardizedFileURL.path
         }
         let fixed = settings
+        // A file given twice, or given and also inside a given folder, is
+        // optimized once.
+        var seen = Set<String>()
         let found = await FolderScanner.imageFiles(in: paths.map { URL(fileURLWithPath: $0) }) {
             OutputPlanner.isOwnOutput($0, settings: fixed)
-        }
+        }.filter { seen.insert($0.file.standardizedFileURL.path.lowercased()).inserted }
         let limit = max(1, jobs ?? 2 * ProcessInfo.processInfo.activeProcessorCount)
         let optimizer = FileOptimizer(settings: fixed)
         let asJSON = json
 
-        var failed = 0, saved: Int64 = 0, total: Int64 = 0
+        var failed = 0, skipped = 0, saved: Int64 = 0, total: Int64 = 0
         await withTaskGroup(of: Report.self) { group in
             var pending = found[...]
             func startNext() {
@@ -95,6 +106,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
             for await report in group {
                 print(asJSON ? report.json : report.line)
                 if report.status == "failed" { failed += 1 }
+                if report.status == "skipped" || report.status == "rejected" { skipped += 1 }
                 saved += report.saved
                 total += report.originalSize
                 startNext()
@@ -104,7 +116,9 @@ struct JustSmallerCommand: AsyncParsableCommand {
             let percent = Double(saved) / Double(total)
             print("\(found.count == 1 ? "1 file" : "\(found.count) files"), \(saved.formatted(.byteCount(style: .file))) saved (\(percent.formatted(.percent.precision(.fractionLength(1)))))")
         }
+        // 0: all fine, 1: some files skipped or left unchanged for a reason, 2: errors.
         if failed > 0 { throw ExitCode(2) }
+        if skipped > 0 { throw ExitCode(1) }
     }
 }
 

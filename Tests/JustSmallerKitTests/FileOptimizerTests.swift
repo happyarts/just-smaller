@@ -85,7 +85,7 @@ struct FileOptimizerTests {
         let url = write(image(space: CGColorSpace.displayP3), "p3.jpg", type: .jpeg,
                         properties: [kCGImageDestinationLossyCompressionQuality: 0.95])
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
-        _ = try await optimize(url)
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized, nothing checked"); return }
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
     }
 
@@ -137,9 +137,10 @@ struct FileOptimizerTests {
         let reference = dir.appending(path: "reference-animated.png")
         try FileManager.default.copyItem(at: url, to: reference)
 
-        if case .optimized(_, _, let tools, _, _, _) = try await optimize(url) {
-            #expect(!tools.contains("ECT"))
+        guard case .optimized(_, _, let tools, _, _, _) = try await optimize(url) else {
+            Issue.record("not optimized, nothing checked"); return
         }
+        #expect(!tools.contains("ECT"))
         try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
     }
 
@@ -457,7 +458,7 @@ struct FileOptimizerTests {
         try FileManager.default.copyItem(at: url, to: reference)
         #expect(props(url)[kCGImagePropertyDepth] as? Int == 16)
 
-        _ = try await optimize(url)
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized, nothing checked"); return }
         #expect(props(url)[kCGImagePropertyDepth] as? Int == 16)
         #expect(props(url)[kCGImagePropertyHasAlpha] as? Bool == true)
         try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)

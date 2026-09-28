@@ -49,12 +49,14 @@ fi
 cp -p "$WORK/orig/"* "$WORK/run/"
 
 START=$(date +%s)
-"$CLI" --tools "$TOOLS" --no-trash --json "$@" "$WORK/run" > "$WORK/results.jsonl" || true
+# Exit status 1 (some files skipped) is expected: the corpus has broken files.
+STATUS=0
+"$CLI" --tools "$TOOLS" --no-trash --json "$@" "$WORK/run" > "$WORK/results.jsonl" || STATUS=$?
 ELAPSED=$(( $(date +%s) - START ))
 
-python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" <<'PY'
+python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" <<'PY'
 import json, os, re, subprocess, sys, collections
-work, imgcmp, jpegcmp, base_path, update, elapsed = sys.argv[1:]
+work, imgcmp, jpegcmp, base_path, update, elapsed, status = sys.argv[1:]
 orig, run = os.path.join(work, "orig"), os.path.join(work, "run")
 raster = {".png", ".gif", ".webp", ".heic"}
 baseline = {}
@@ -62,6 +64,14 @@ if os.path.exists(base_path):
     for line in open(base_path):
         n, s = line.rstrip("\n").split("\t"); baseline[n] = int(s)
 fails, regress, per = [], [], collections.defaultdict(lambda: [0, 0, 0, 0])
+# A crash or a run that did nothing must not pass: the tool has to exit
+# normally and report every file exactly once.
+if status not in ("0", "1", "2"):
+    fails.append(("—", f"THE TOOL CRASHED OR WAS KILLED (exit status {status})"))
+reported = [json.loads(l)["file"] for l in open(os.path.join(work, "results.jsonl")) if l.strip()]
+expected = len(os.listdir(os.path.join(work, "orig")))
+if len(reported) != expected or len(set(reported)) != len(reported):
+    fails.append(("—", f"REPORTED {len(reported)} RESULTS ({len(set(reported))} FILES) FOR {expected} FILES"))
 for line in open(os.path.join(work, "results.jsonl")):
     r = json.loads(line)
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
