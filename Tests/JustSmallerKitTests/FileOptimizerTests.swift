@@ -21,6 +21,8 @@ struct FileOptimizerTests {
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         settings.moveOriginalsToTrash = false
         ToolRunner.directory = toolsDirectory
+        // Never the user's Trash, also where a test uses the Trash on purpose.
+        Trash.testFolder = FileManager.default.temporaryDirectory.appending(path: "JustSmallerTests-Trash")
     }
 
     // MARK: - Fixtures
@@ -527,7 +529,8 @@ struct FileOptimizerTests {
         guard case .optimized(_, _, _, _, let trashed?, _) = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("no trashed original"); return }
         #expect(FileManager.default.fileExists(atPath: trashed.path))
+        #expect(trashed.path.hasPrefix(Trash.testFolder!.path))
         #expect(trashed.lastPathComponent.hasPrefix("trash me ("))
-        try? FileManager.default.removeItem(at: trashed)
+        try? FileManager.default.removeItem(at: trashed.deletingLastPathComponent())
     }
 }

@@ -61,10 +61,8 @@ enum FileReplacer {
 
         guard let backupName else { return nil }
         let backup = original.deletingLastPathComponent().appending(path: backupName)
-        var trashed: NSURL?
         do {
-            try fm.trashItem(at: backup, resultingItemURL: &trashed)
-            return trashed as URL?
+            return try Trash.move(backup)
         } catch {
             // No Trash on this volume (e.g. some network shares): the original
             // stays next to the result under its backup name rather than being
@@ -80,12 +78,11 @@ enum FileReplacer {
     private static func replaceViaTrash(_ original: URL, with replacement: URL,
                                         dates: URLResourceValues, keepModificationDate: Bool) throws -> URL? {
         let fm = FileManager.default
-        var trashed: NSURL?
-        try fm.trashItem(at: original, resultingItemURL: &trashed)
+        let trashed = try Trash.move(original)
         do {
             try fm.moveItem(at: replacement, to: original)
         } catch {
-            guard let trashed = trashed as URL? else { throw error }
+            guard let trashed else { throw error }
             do {
                 try fm.moveItem(at: trashed, to: original)
             } catch {
@@ -98,7 +95,7 @@ enum FileReplacer {
         restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
         var target = original
         try? target.setResourceValues(restored)
-        return trashed as URL?
+        return trashed
     }
 
     /// The result couldn't take the original's place, and the original
@@ -126,7 +123,7 @@ enum FileReplacer {
         try fm.copyItem(at: result, to: staged)
         _ = copyfile(original.path, staged.path, nil, copyfile_flags_t(COPYFILE_XATTR))
         if fm.fileExists(atPath: target.path) {
-            try fm.trashItem(at: target, resultingItemURL: nil)
+            try Trash.move(target)
         }
         try fm.moveItem(at: staged, to: target)
     }
