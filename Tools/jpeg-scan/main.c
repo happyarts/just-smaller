@@ -90,6 +90,7 @@ typedef struct {
     Component comp[4];
     int mcus_per_row, mcu_rows;   // for interleaved scans
     int blocks_in_mcu;
+    int out_of_range;             // a coefficient outside T.81's range for 8 bits
 } Image;
 
 static void load(Image *img, j_decompress_ptr src, jvirt_barray_ptr *coefs) {
@@ -135,9 +136,14 @@ static void load(Image *img, j_decompress_ptr src, jvirt_barray_ptr *coefs) {
                     k->neg = realloc(k->neg, capacity);
                     if (!k->pos || !k->mag || !k->neg) { fprintf(stderr, "jpeg-scan: out of memory\n"); exit(2); }
                 }
+                // 8-bit JPEG: DC values fit in -1024..1023 (their differences
+                // in 11 bits), AC values in 10 bits (T.81 F.1.2); anything
+                // beyond can't be written as a valid file.
+                if (z[0] > 1023 || z[0] < -1024) img->out_of_range = 1;
                 for (int i = 1; i < 64; i++) {
                     int v = z[natural[i]];
                     if (!v) continue;
+                    if (v > 1023 || v < -1023) img->out_of_range = 1;
                     k->pos[count] = (unsigned char)i;
                     k->mag[count] = (unsigned short)(v < 0 ? -v : v);
                     k->neg[count] = v < 0;
@@ -502,6 +508,7 @@ typedef struct {
 } Plan;
 
 static void add(Plan *p, int ncomp, const int *comps, int ss, int se, int ah, int al) {
+    if (p->n == (int)(sizeof p->scans / sizeof *p->scans)) { fprintf(stderr, "jpeg-scan: too many scans\n"); exit(2); }
     Scan *s = &p->scans[p->n++];
     s->comps_in_scan = ncomp;
     for (int i = 0; i < ncomp; i++) s->comp[i] = comps[i];
@@ -977,7 +984,7 @@ static Plan progressive_plan(const Image *img, int effort) {
         for (int c = 0; c < img->ncomp; c++) {
             unsigned char allowed[65] = {0};
             for (int i = 0; i < nccuts[c]; i++) allowed[ccuts[c][i]] = 1;
-            int chosen[200], nchosen = 0;
+            int chosen[4 * 65], nchosen = 0; // first pass and three refinement levels
             for (int b = 0; b <= ac[c].nbands; b++) chosen[nchosen++] = ac[c].start[b];
             for (int a = 0; a < max_al; a++)
                 for (int b = 0; b <= ac[c].nref[a]; b++) chosen[nchosen++] = ac[c].ref[a][b];
@@ -1406,18 +1413,6 @@ static double group_bytes(const Stats *h) {
     return (bits - (double)h->extra) / 8 + (table - 4);
 }
 
-// Scans a table can serve at once are limited by the four slots per class:
-// at no scan may more than four of a class's tables be in use.
-static int slots_fit(const Group *g, int ngroups, int nscans, int class_) {
-    for (int s = 0; s < nscans; s++) {
-        int live = 0;
-        for (int i = 0; i < ngroups; i++)
-            if (g[i].alive && g[i].class_ == class_ && g[i].first <= s && s <= g[i].last) live++;
-        if (live > 4) return 0;
-    }
-    return 1;
-}
-
 // Greedily lets needs share a table while that is cheaper: sharing saves a
 // table definition and costs the bits the shared table codes worse. The
 // estimate picks the most promising pair; the exact sizes decide, because
@@ -1425,33 +1420,47 @@ static int slots_fit(const Group *g, int ngroups, int nscans, int class_) {
 // predictable from its lengths alone.
 static void share_tables(Group *g, int ngroups, const Layout *L) {
     int nscans = L->p->n, nneeds = L->first_need[nscans];
-    unsigned char *tried = checked_malloc((size_t)ngroups * ngroups);
-    memset(tried, 0, (size_t)ngroups * ngroups);
+    size_t pairs = (size_t)ngroups * ngroups;
+    unsigned char *tried = checked_malloc(pairs);
+    memset(tried, 0, pairs);
+    double *gain = checked_malloc(pairs * sizeof *gain); // estimated, for a < b
+    // Tables in use per class and scan: at most four slots per class.
+    int *live = checked_malloc((size_t)2 * nscans * sizeof *live);
+    memset(live, 0, (size_t)2 * nscans * sizeof *live);
+    for (int i = 0; i < ngroups; i++)
+        for (int si = g[i].first; si <= g[i].last; si++) live[g[i].class_ * nscans + si]++;
     Group **group_of = checked_malloc((size_t)nneeds * sizeof *group_of);
     Group *trial = checked_malloc(sizeof *trial);
+    #define PAIR_GAIN(a, b) do { \
+        Stats m_ = g[a].hist; \
+        for (int i_ = 0; i_ < 256; i_++) m_.freq[i_] += g[b].hist.freq[i_]; \
+        gain[(size_t)(a) * ngroups + (b)] = g[a].bytes + g[b].bytes - group_bytes(&m_); \
+    } while (0)
+    for (int a = 0; a < ngroups; a++)
+        for (int b = a + 1; b < ngroups; b++)
+            if (g[a].class_ == g[b].class_) PAIR_GAIN(a, b);
+    // Merged, the two tables become one used from the first scan of either
+    // to the last: does that still fit into the slots?
+    #define FITS(a, b) ({ \
+        int lo_ = g[a].first < g[b].first ? g[a].first : g[b].first, hi_ = g[a].last > g[b].last ? g[a].last : g[b].last, ok_ = 1; \
+        for (int s_ = lo_; ok_ && s_ <= hi_; s_++) { \
+            int in_a = g[a].first <= s_ && s_ <= g[a].last, in_b = g[b].first <= s_ && s_ <= g[b].last; \
+            ok_ = live[g[a].class_ * nscans + s_] + 1 - in_a - in_b <= 4; \
+        } \
+        ok_; })
     for (;;) {
         int best_a = -1, best_b = -1;
         double best_gain = 0.5; // at least a byte
         for (int a = 0; a < ngroups; a++) {
             if (!g[a].alive) continue;
             for (int b = a + 1; b < ngroups; b++) {
-                if (!g[b].alive || g[b].class_ != g[a].class_ || tried[a * ngroups + b]) continue;
-                Stats m = g[a].hist;
-                for (int i = 0; i < 256; i++) m.freq[i] += g[b].hist.freq[i];
-                double gain = g[a].bytes + g[b].bytes - group_bytes(&m);
-                if (gain <= best_gain) continue;
-                Group save_a = g[a], save_b = g[b];
-                g[a].first = g[a].first < g[b].first ? g[a].first : g[b].first;
-                g[a].last = g[a].last > g[b].last ? g[a].last : g[b].last;
-                g[b].alive = 0;
-                int fits = slots_fit(g, ngroups, nscans, g[a].class_);
-                g[a] = save_a;
-                g[b] = save_b;
-                if (fits) { best_gain = gain; best_a = a; best_b = b; }
+                if (!g[b].alive || g[b].class_ != g[a].class_ || tried[(size_t)a * ngroups + b]) continue;
+                double e = gain[(size_t)a * ngroups + b];
+                if (e > best_gain && FITS(a, b)) { best_gain = e; best_a = a; best_b = b; }
             }
         }
         if (best_a < 0) break;
-        tried[best_a * ngroups + best_b] = 1;
+        tried[(size_t)best_a * ngroups + best_b] = 1;
         Group *a = &g[best_a], *b = &g[best_b];
 
         // Exact: the scans of both groups, coded apart and together.
@@ -1480,21 +1489,67 @@ static void share_tables(Group *g, int ngroups, const Layout *L) {
         }
         if (together >= apart) continue;
 
+        int lo = a->first < b->first ? a->first : b->first, hi = a->last > b->last ? a->last : b->last;
+        for (int si = lo; si <= hi; si++)
+            live[a->class_ * nscans + si] += 1 - (a->first <= si && si <= a->last) - (b->first <= si && si <= b->last);
         for (int i = 0; i < 256; i++) a->hist.freq[i] += b->hist.freq[i];
-        a->first = a->first < b->first ? a->first : b->first;
-        a->last = a->last > b->last ? a->last : b->last;
+        a->first = lo;
+        a->last = hi;
         a->bytes = group_bytes(&a->hist);
         a->table = trial->table;
         a->code = trial->code;
         a->built = 1;
         b->alive = 0;
         b->slot = best_a; // forwarding: needs of b now use a
-        memset(tried + (size_t)best_a * ngroups, 0, (size_t)ngroups); // a changed: its pairs are new
-        for (int k = 0; k < best_a; k++) tried[k * ngroups + best_a] = 0;
+        // a changed: its pairs are new.
+        for (int k = 0; k < ngroups; k++) {
+            if (k == best_a || !g[k].alive || g[k].class_ != a->class_) continue;
+            int x = k < best_a ? k : best_a, y = k < best_a ? best_a : k;
+            tried[(size_t)x * ngroups + y] = 0;
+            PAIR_GAIN(x, y);
+        }
     }
+    #undef PAIR_GAIN
+    #undef FITS
     free(tried);
+    free(gain);
+    free(live);
     free(group_of);
     free(trial);
+}
+
+// The rules libjpeg checks before it writes a progressive scan script
+// (jcmaster.c validate_script, T.81 G.1.1.1): DC and AC in separate scans,
+// only DC scans interleaved (at most 10 blocks per MCU), each coefficient
+// first sent once and then refined one bit at a time, AC only after the
+// component's DC — and at the end every bit of every coefficient sent.
+static int valid_plan(const Image *img, const Plan *p) {
+    int bit[4][64]; // lowest bit sent so far per coefficient, -1: not yet
+    for (int c = 0; c < 4; c++) for (int k = 0; k < 64; k++) bit[c][k] = -1;
+    for (int i = 0; i < p->n; i++) {
+        const Scan *s = &p->scans[i];
+        if (s->comps_in_scan < 1 || s->comps_in_scan > 4 || s->ss < 0 || s->ss > s->se || s->se > 63
+            || s->al < 0 || s->al > 13 || s->ah < 0 || s->ah > 13) return 0;
+        if (s->ss == 0 && s->se != 0) return 0;          // DC alone
+        if (s->comps_in_scan > 1) {
+            if (s->ss != 0) return 0;                     // AC scans have one component
+            int blocks = 0;
+            for (int j = 0; j < s->comps_in_scan; j++) blocks += img->comp[s->comp[j]].h * img->comp[s->comp[j]].v;
+            if (blocks > 10) return 0;
+        }
+        for (int j = 0; j < s->comps_in_scan; j++) {
+            int c = s->comp[j];
+            if (c < 0 || c >= img->ncomp) return 0;
+            for (int m = 0; m < j; m++) if (s->comp[m] == c) return 0;
+            if (s->ss > 0 && bit[c][0] < 0) return 0;     // AC before DC
+            for (int k = s->ss; k <= s->se; k++) {
+                if (s->ah == 0 ? bit[c][k] >= 0 : bit[c][k] != s->ah || s->al != s->ah - 1) return 0;
+                bit[c][k] = s->al;
+            }
+        }
+    }
+    for (int c = 0; c < img->ncomp; c++) for (int k = 0; k < 64; k++) if (bit[c][k] != 0) return 0;
+    return 1;
 }
 
 // Writes the file with the given scans (NULL: one sequential scan). `share`
@@ -1508,11 +1563,12 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
     }
     const Plan *p = plan ? plan : &seq;
     int sequential = plan == NULL;
+    if (!sequential && !valid_plan(img, p)) return 0;
 
     // The needs, scan by scan, with their symbols counted.
     int nneeds = 0, cap = p->n * 8;
     Need *needs = checked_malloc((size_t)cap * sizeof *needs);
-    int first_need[1100];
+    int *first_need = checked_malloc((size_t)(p->n + 1) * sizeof *first_need);
     for (int si = 0; si < p->n; si++) {
         const Scan *sc = &p->scans[si];
         first_need[si] = nneeds;
@@ -1572,7 +1628,7 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
     for (int i = 0; i < ngroups; i++) {
         if (!g[i].alive) continue;
         g[i].slot = -1;
-        if (!ensure_table(&g[i])) { free(needs); free(g); return 0; }
+        if (!ensure_table(&g[i])) { free(first_need); free(needs); free(g); return 0; }
     }
 
     Group **group_of = checked_malloc((size_t)(nneeds ? nneeds : 1) * sizeof *group_of);
@@ -1641,7 +1697,7 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
                 int o = owner[gr->class_][cand];
                 if (o < 0 || g[o].last < si) slot = cand;
             }
-            if (slot < 0) { free(group_of); free(needs); free(g); free(w.d); return 0; }
+            if (slot < 0) { free(group_of); free(first_need); free(needs); free(g); free(w.d); return 0; }
             gr->slot = slot;
             owner[gr->class_][slot] = needs[n].group;
             defs[ndefs++] = needs[n].group;
@@ -1689,6 +1745,7 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
     }
     put_u16(&w, 0xFFD9);
     free(group_of);
+    free(first_need);
     free(needs);
     free(g);
     out->data = w.d;
@@ -1775,6 +1832,13 @@ static int selftest(const Image *img) {
                 }
         }
     }
+    // Every plan the search can produce follows T.81's rules.
+    for (int effort = EFFORT_FAST; effort <= EFFORT_MAXIMUM; effort++) {
+        Plan plan = progressive_plan(img, effort);
+        if (!valid_plan(img, &plan)) { fprintf(stderr, "invalid plan at effort %d\n", effort); bad++; }
+    }
+    Plan simple = simple_plan(img);
+    if (!valid_plan(img, &simple)) { fprintf(stderr, "invalid standard plan\n"); bad++; }
     fprintf(stderr, "selftest: %d mismatches\n", bad);
     return bad ? 1 : 0;
 }
@@ -1840,6 +1904,10 @@ int main(int argc, char **argv) {
     memset(&img, 0, sizeof img);
     load(&img, &src, coefs);
     if (test) return selftest(&img);
+    if (img.out_of_range) {
+        fprintf(stderr, "jpeg-scan: coefficients out of range, left alone\n");
+        return 3;
+    }
 
     // Candidates, cheapest first by the model: sequential, libjpeg's
     // standard progression, and the searched plan.

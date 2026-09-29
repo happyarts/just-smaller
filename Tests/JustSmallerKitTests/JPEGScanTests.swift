@@ -69,13 +69,18 @@ final class JPEGScanTests {
 
     @Test func everyEffortKeepsTheCoefficients() throws {
         for input in hardCases {
-            // The model's fast costing matches counting every band on its own.
+            // The model's fast costing matches counting every band on its own,
+            // and every plan follows T.81's progression rules.
             #expect(try run("jpeg-scan", ["--selftest", input.path, "unused"]) == 0, "\(input.lastPathComponent)")
             for effort in Effort.allCases {
                 let output = dir.appending(path: "\(effort.rawValue)-\(input.lastPathComponent)")
                 #expect(try run("jpeg-scan", ["--effort", effort.rawValue, input.path, output.path]) == 0,
                         "\(input.lastPathComponent) \(effort)")
                 #expect(try run("jpegcmp", [input.path, output.path]) == 0, "\(input.lastPathComponent) \(effort)")
+                // A second, independent decoder reads the whole file too.
+                let source = CGImageSourceCreateWithURL(output as CFURL, nil)
+                #expect(source.map { CGImageSourceGetStatus($0) == .statusComplete && CGImageSourceCreateImageAtIndex($0, 0, nil) != nil } == true,
+                        "\(input.lastPathComponent) \(effort): ImageIO")
             }
         }
     }
