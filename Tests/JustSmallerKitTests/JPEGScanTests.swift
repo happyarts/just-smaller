@@ -80,6 +80,23 @@ final class JPEGScanTests {
         }
     }
 
+    /// The own writer writes what libjpeg writes: without shared tables, the
+    /// files are the same byte for byte from the frame header on.
+    @Test func ownWriterMatchesLibjpeg() throws {
+        for input in hardCases {
+            let own = dir.appending(path: "own-\(input.lastPathComponent)")
+            let lib = dir.appending(path: "lib-\(input.lastPathComponent)")
+            #expect(try run("jpeg-scan", ["--no-share", input.path, own.path]) == 0)
+            #expect(try run("jpeg-scan", ["--libjpeg", input.path, lib.path]) == 0)
+            func fromFrame(_ url: URL) throws -> Data {
+                let d = try Data(contentsOf: url)
+                let sof = [UInt8(0xC0), 0xC1, 0xC2].compactMap { d.range(of: Data([0xFF, $0]))?.lowerBound }.min() ?? 0
+                return d[sof...]
+            }
+            #expect(try fromFrame(own) == fromFrame(lib), "\(input.lastPathComponent)")
+        }
+    }
+
     /// EXIF must stay the first segment after JFIF, also in files whose
     /// Adobe marker libjpeg would otherwise write first (CMYK, RGB).
     @Test func exifStaysInFrontOfTheAdobeMarker() throws {

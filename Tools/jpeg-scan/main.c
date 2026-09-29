@@ -71,7 +71,7 @@ static void *checked_malloc(size_t n) {
 typedef struct {
     int h, v;               // sampling factors
     int wb, hb;             // width and height in blocks
-    int dc_table;           // 0 for the first component, 1 for the others (libjpeg's default)
+    int dc_table;           // libjpeg's default table number for this component
     short *dc;              // per block: the DC coefficient
     // The nonzero AC coefficients, block after block, in zigzag order: most
     // are zero, so the model only ever looks at these. Block b's are
@@ -79,6 +79,7 @@ typedef struct {
     size_t *off;
     unsigned char *pos;     // zigzag index, 1..63
     unsigned short *mag;    // absolute value
+    unsigned char *neg;     // 1 if negative
 } Component;
 
 typedef struct {
@@ -106,13 +107,17 @@ static void load(Image *img, j_decompress_ptr src, jvirt_barray_ptr *coefs) {
         k->v = ci->v_samp_factor;
         k->wb = (int)ci->width_in_blocks;
         k->hb = (int)ci->height_in_blocks;
-        k->dc_table = c == 0 ? 0 : 1;
+        // libjpeg's default tables (jcparam.c): the chroma components of
+        // YCbCr and YCCK share table 1, everything else uses table 0.
+        int ycc = src->jpeg_color_space == JCS_YCbCr || src->jpeg_color_space == JCS_YCCK;
+        k->dc_table = ycc && (c == 1 || c == 2) ? 1 : 0;
         img->blocks_in_mcu += k->h * k->v;
         size_t blocks = (size_t)k->wb * k->hb, count = 0, capacity = blocks * 8 + 64;
         k->dc = checked_malloc(blocks * sizeof(short));
         k->off = checked_malloc((blocks + 1) * sizeof(size_t));
         k->pos = checked_malloc(capacity);
         k->mag = checked_malloc(capacity * sizeof(unsigned short));
+        k->neg = checked_malloc(capacity);
         for (int row = 0; row < k->hb; row++) {
             JBLOCKARRAY buf = (*src->mem->access_virt_barray)((j_common_ptr)src, coefs[c], (JDIMENSION)row, 1, FALSE);
             for (int col = 0; col < k->wb; col++) {
@@ -124,13 +129,15 @@ static void load(Image *img, j_decompress_ptr src, jvirt_barray_ptr *coefs) {
                     capacity *= 2;
                     k->pos = realloc(k->pos, capacity);
                     k->mag = realloc(k->mag, capacity * sizeof(unsigned short));
-                    if (!k->pos || !k->mag) { fprintf(stderr, "jpeg-scan: out of memory\n"); exit(2); }
+                    k->neg = realloc(k->neg, capacity);
+                    if (!k->pos || !k->mag || !k->neg) { fprintf(stderr, "jpeg-scan: out of memory\n"); exit(2); }
                 }
                 for (int i = 1; i < 64; i++) {
                     int v = z[natural[i]];
                     if (!v) continue;
                     k->pos[count] = (unsigned char)i;
                     k->mag[count] = (unsigned short)(v < 0 ? -v : v);
+                    k->neg[count] = v < 0;
                     count++;
                 }
             }
@@ -145,12 +152,42 @@ static long total_blocks(const Image *img) {
     return blocks;
 }
 
-// MARK: - Symbol statistics
+// MARK: - Coding
+
+// The coding order of every scan type, written once and used twice: counted
+// (symbol frequencies and raw bits, for the model and for building tables)
+// and written (the real bitstream). So the model prices exactly what the
+// writer writes. Each follows libjpeg's encoder (jcphuff.c, jchuff.c).
 
 typedef struct {
     long freq[257];
     long extra;             // raw bits that are not Huffman coded
 } Stats;
+
+typedef struct Sink Sink;
+struct Sink {
+    // `table` is the scan's own table number: per component for DC and
+    // sequential scans, 0 for an AC scan.
+    void (*symbol)(Sink *, int table, int symbol);
+    void (*bits)(Sink *, unsigned value, int n);
+    Stats *stats;                   // counting: one Stats per table number
+    int last_table;                 // raw bits count with the symbol before them
+    struct Writer *writer;          // writing
+    const struct Code *code[8];
+};
+
+static void count_symbol(Sink *k, int table, int symbol) {
+    k->stats[table].freq[symbol]++;
+    k->last_table = table;
+}
+static void count_bits(Sink *k, unsigned value, int n) {
+    (void)value;
+    k->stats[k->last_table].extra += n;
+}
+
+static Sink counter(Stats *stats) {
+    return (Sink){.symbol = count_symbol, .bits = count_bits, .stats = stats};
+}
 
 static int nbits(int v) {
     int n = 0;
@@ -158,20 +195,15 @@ static int nbits(int v) {
     return n;
 }
 
-// An EOB run: symbol (n << 4) followed by n bits, n = floor(log2(run)).
-static void flush_eobrun(Stats *s, long *eobrun, long *be) {
-    if (*eobrun > 0) {
-        int n = nbits((int)*eobrun) - 1;
-        s->freq[n << 4]++;
-        s->extra += n + *be;
-        *eobrun = 0;
-        *be = 0;
-    }
+// The bits JPEG writes after a size symbol: the value itself if positive,
+// its complement if negative, `n` bits of it.
+static unsigned magnitude_bits(int v, int n) {
+    return (unsigned)(v < 0 ? v - 1 : v) & ((1U << n) - 1);
 }
 
-// AC first pass (jcphuff.c encode_mcu_AC_first) over one component.
-static void stats_ac_first(const Component *k, int ss, int se, int al, Stats *s) {
-    long eobrun = 0, be = 0;
+// AC first pass over one component's blocks in raster order.
+static void code_ac_first(const Component *k, int ss, int se, int al, Sink *out) {
+    long eobrun = 0;
     size_t blocks = (size_t)k->wb * k->hb;
     for (size_t b = 0; b < blocks; b++) {
         int prev = ss - 1;  // last position coded in this band
@@ -183,25 +215,55 @@ static void stats_ac_first(const Component *k, int ss, int se, int al, Stats *s)
             if (!v) continue;
             int r = i - prev - 1;
             prev = i;
-            flush_eobrun(s, &eobrun, &be);
-            while (r > 15) { s->freq[0xF0]++; r -= 16; }
+            if (eobrun > 0) {  // an EOB run: symbol (n << 4) and n bits, n = floor(log2(run))
+                int n = nbits((int)eobrun) - 1;
+                out->symbol(out, 0, n << 4);
+                if (n) out->bits(out, (unsigned)eobrun, n);
+                eobrun = 0;
+            }
+            while (r > 15) { out->symbol(out, 0, 0xF0); r -= 16; }
             int n = nbits(v);
-            s->freq[(r << 4) + n]++;
-            s->extra += n;
+            out->symbol(out, 0, (r << 4) + n);
+            out->bits(out, magnitude_bits(k->neg[j] ? -v : v, n), n);
         }
-        if (prev < se) {  // trailing zeros: one more block in the EOB run
-            if (++eobrun == 0x7FFF) flush_eobrun(s, &eobrun, &be);
+        if (prev < se && ++eobrun == 0x7FFF) {  // trailing zeros: one more block in the run
+            out->symbol(out, 0, 14 << 4);
+            out->bits(out, 0x7FFF, 14);
+            eobrun = 0;
         }
     }
-    flush_eobrun(s, &eobrun, &be);
+    if (eobrun > 0) {
+        int n = nbits((int)eobrun) - 1;
+        out->symbol(out, 0, n << 4);
+        if (n) out->bits(out, (unsigned)eobrun, n);
+    }
 }
 
-// AC refinement (jcphuff.c encode_mcu_AC_refine): Ah = al + 1. Coefficients
-// that were nonzero before (value > 1 now) only add a correction bit and
-// don't end a zero run.
-static void stats_ac_refine(const Component *k, int ss, int se, int al, Stats *s) {
-    long eobrun = 0, be = 0;
+// AC refinement from bit al + 1 to al. Coefficients that were nonzero
+// before only add a correction bit and don't end a zero run; correction
+// bits wait for the next symbol, or ride along with the EOB run (libjpeg
+// writes the run early once more than 937 of them are waiting).
+typedef struct {
+    long eobrun;
+    int be;
+    unsigned char pending[1100];    // correction bits waiting for the EOB run
+} Refine;
+
+static void refine_flush(Refine *st, Sink *out) {
+    if (st->eobrun > 0) {
+        int n = nbits((int)st->eobrun) - 1;
+        out->symbol(out, 0, n << 4);
+        if (n) out->bits(out, (unsigned)st->eobrun, n);
+        for (int i = 0; i < st->be; i++) out->bits(out, st->pending[i], 1);
+        st->eobrun = 0;
+        st->be = 0;
+    }
+}
+
+static void code_ac_refine(const Component *k, int ss, int se, int al, Sink *out) {
+    Refine st = {0};
     size_t blocks = (size_t)k->wb * k->hb;
+    unsigned char br_bits[64];
     for (size_t b = 0; b < blocks; b++) {
         size_t first = k->off[b], end = k->off[b + 1];
         while (first < end && k->pos[first] < ss) first++;
@@ -219,109 +281,152 @@ static void stats_ac_refine(const Component *k, int ss, int se, int al, Stats *s
             r += i - prev - 1;
             prev = i;
             while (r > 15 && i - ss <= eob) {
-                flush_eobrun(s, &eobrun, &be);
-                s->freq[0xF0]++;
+                refine_flush(&st, out);
+                out->symbol(out, 0, 0xF0);
                 r -= 16;
-                s->extra += br;
+                for (int m = 0; m < br; m++) out->bits(out, br_bits[m], 1);
                 br = 0;
             }
-            if (t > 1) { br++; continue; }
-            flush_eobrun(s, &eobrun, &be);
-            s->freq[(r << 4) + 1]++;
-            s->extra += 1 + br;
+            if (t > 1) { br_bits[br++] = t & 1; continue; }
+            refine_flush(&st, out);
+            out->symbol(out, 0, (r << 4) + 1);
+            out->bits(out, !k->neg[j], 1);
+            for (int m = 0; m < br; m++) out->bits(out, br_bits[m], 1);
             br = 0;
             r = 0;
         }
         r += se - prev;
         if (r > 0 || br > 0) {
-            eobrun++;
-            be += br;
-            if (eobrun == 0x7FFF || be > 1000 - 64 + 1) flush_eobrun(s, &eobrun, &be);
+            st.eobrun++;
+            memcpy(st.pending + st.be, br_bits, (size_t)br);
+            st.be += br;
+            if (st.eobrun == 0x7FFF || st.be > 1000 - 64 + 1) refine_flush(&st, out);
         }
     }
-    flush_eobrun(s, &eobrun, &be);
+    refine_flush(&st, out);
 }
 
-// DC first pass over the given components; interleaved scans walk MCUs,
-// with the padding blocks libjpeg adds at the right and bottom edges (their
-// DC repeats the previous block's, so they cost one "difference 0" symbol).
-// Returns the number of blocks coded, for the refinement pass's bit count.
-static long stats_dc_first(const Image *img, const int *comps, int n, int al, Stats *tables) {
-    long blocks = 0;
+// Visits the blocks of a scan over `n` components (`comps`) in coding order.
+// Interleaved scans walk MCUs, with the padding blocks libjpeg adds at the
+// right and bottom edges: their DC repeats the previous block's and their
+// AC is zero. `real` is 0 for those. Returns the number of blocks.
+typedef void (*BlockVisitor)(void *ctx, int j, const Component *k, size_t b, int real);
+
+static long visit_blocks(const Image *img, const int *comps, int n, BlockVisitor visit, void *ctx) {
     if (n == 1) {
         const Component *k = &img->comp[comps[0]];
-        Stats *s = &tables[k->dc_table];
-        int last = 0;
-        for (size_t b = 0; b < (size_t)k->wb * k->hb; b++) {
-            int v = k->dc[b] >> al;
-            int d = v - last;
-            last = v;
-            int m = nbits(d < 0 ? -d : d);
-            s->freq[m]++;
-            s->extra += m;
-        }
-        return (long)k->wb * k->hb;
+        size_t blocks = (size_t)k->wb * k->hb;
+        for (size_t b = 0; b < blocks; b++) visit(ctx, 0, k, b, 1);
+        return (long)blocks;
     }
-    int last[4] = {0, 0, 0, 0};
-    for (int mr = 0; mr < img->mcu_rows; mr++) {
-        for (int mc = 0; mc < img->mcus_per_row; mc++) {
+    long count = 0;
+    for (int mr = 0; mr < img->mcu_rows; mr++)
+        for (int mc = 0; mc < img->mcus_per_row; mc++)
             for (int j = 0; j < n; j++) {
                 const Component *k = &img->comp[comps[j]];
-                Stats *s = &tables[k->dc_table];
-                for (int y = 0; y < k->v; y++) {
+                for (int y = 0; y < k->v; y++)
                     for (int x = 0; x < k->h; x++) {
                         int row = mr * k->v + y, col = mc * k->h + x;
-                        blocks++;
-                        if (row >= k->hb || col >= k->wb) { s->freq[0]++; continue; }
-                        int v = k->dc[(size_t)row * k->wb + col] >> al;
-                        int d = v - last[j];
-                        last[j] = v;
-                        int m = nbits(d < 0 ? -d : d);
-                        s->freq[m]++;
-                        s->extra += m;
+                        int real = row < k->hb && col < k->wb;
+                        visit(ctx, j, k, real ? (size_t)row * k->wb + col : 0, real);
+                        count++;
                     }
-                }
             }
-        }
-    }
-    return blocks;
+    return count;
 }
 
-// Sequential (baseline) coding of everything in one interleaved scan
-// (jchuff.c encode_one_block), with libjpeg's default table assignment.
-static void stats_baseline(const Image *img, Stats *dc, Stats *ac) {
-    int last[4] = {0, 0, 0, 0};
-    int single = img->ncomp == 1;
-    for (int mr = 0; mr < (single ? 1 : img->mcu_rows); mr++) {
-        for (int mc = 0; mc < (single ? 1 : img->mcus_per_row); mc++) {
-            for (int c = 0; c < img->ncomp; c++) {
-                const Component *k = &img->comp[c];
-                int t = k->dc_table;
-                int ny = single ? k->hb : k->v, nx = single ? k->wb : k->h;
-                for (int y = 0; y < ny; y++) {
-                    for (int x = 0; x < nx; x++) {
-                        int row = single ? y : mr * k->v + y, col = single ? x : mc * k->h + x;
-                        if (row >= k->hb || col >= k->wb) { dc[t].freq[0]++; ac[t].freq[0]++; continue; }
-                        size_t b = (size_t)row * k->wb + col;
-                        int d = k->dc[b] - last[c];
-                        last[c] = k->dc[b];
-                        int m = nbits(d < 0 ? -d : d);
-                        dc[t].freq[m]++;
-                        dc[t].extra += m;
-                        int prev = 0;
-                        for (size_t j = k->off[b]; j < k->off[b + 1]; j++) {
-                            int r = k->pos[j] - prev - 1;
-                            prev = k->pos[j];
-                            while (r > 15) { ac[t].freq[0xF0]++; r -= 16; }
-                            int n = nbits(k->mag[j]);
-                            ac[t].freq[(r << 4) + n]++;
-                            ac[t].extra += n;
-                        }
-                        if (prev < 63) ac[t].freq[0]++;
-                    }
-                }
-            }
+typedef struct {
+    Sink *out;
+    const int *table;   // table number per component in the scan
+    int al, refine, sequential;
+    int last[4];        // previous block's DC per component (raw, and shifted for the first pass)
+    int raw[4];
+} DCWalk;
+
+static void dc_block(void *ctx, int j, const Component *k, size_t b, int real) {
+    DCWalk *w = ctx;
+    int raw = real ? k->dc[b] : w->raw[j]; // padding repeats the previous DC
+    w->raw[j] = raw;
+    if (w->refine) {
+        w->out->bits(w->out, (unsigned)(raw >> w->al) & 1, 1);
+        return;
+    }
+    int v = raw >> w->al, d = v - w->last[j];
+    w->last[j] = v;
+    int n = nbits(d < 0 ? -d : d);
+    w->out->symbol(w->out, w->table[j], n);
+    if (n) w->out->bits(w->out, magnitude_bits(d, n), n);
+    if (!w->sequential) return;
+    // Sequential scans code the AC coefficients right after the DC.
+    int t = w->table[j] + 4, prev = 0;
+    if (real) {
+        for (size_t m = k->off[b]; m < k->off[b + 1]; m++) {
+            int r = k->pos[m] - prev - 1;
+            prev = k->pos[m];
+            while (r > 15) { w->out->symbol(w->out, t, 0xF0); r -= 16; }
+            int s = nbits(k->mag[m]);
+            w->out->symbol(w->out, t, (r << 4) + s);
+            w->out->bits(w->out, magnitude_bits(k->neg[m] ? -k->mag[m] : k->mag[m], s), s);
         }
+    }
+    if (prev < 63) w->out->symbol(w->out, t, 0x00);
+}
+
+// DC first pass or refinement. Returns the number of blocks coded.
+static long code_dc(const Image *img, const int *comps, int n, int al, int refine, const int *table, Sink *out) {
+    DCWalk w = {.out = out, .table = table, .al = al, .refine = refine};
+    return visit_blocks(img, comps, n, dc_block, &w);
+}
+
+// One sequential scan over all components: DC tables are numbered as given,
+// AC tables four higher.
+static void code_sequential(const Image *img, const int *table, Sink *out) {
+    int all[4] = {0, 1, 2, 3};
+    DCWalk w = {.out = out, .table = table, .sequential = 1};
+    visit_blocks(img, all, img->ncomp, dc_block, &w);
+}
+
+// An EOB run in the fast costing: symbol (n << 4) followed by n bits.
+static void flush_eobrun(Stats *s, long *eobrun, long *be) {
+    if (*eobrun > 0) {
+        int n = nbits((int)*eobrun) - 1;
+        s->freq[n << 4]++;
+        s->extra += n + *be;
+        *eobrun = 0;
+        *be = 0;
+    }
+}
+
+// Counting wrappers for the model.
+static void stats_ac_first(const Component *k, int ss, int se, int al, Stats *s) {
+    Sink c = counter(s);
+    code_ac_first(k, ss, se, al, &c);
+}
+
+static void stats_ac_refine(const Component *k, int ss, int se, int al, Stats *s) {
+    Sink c = counter(s);
+    code_ac_refine(k, ss, se, al, &c);
+}
+
+// DC tables with libjpeg's default assignment (0 for the first component,
+// 1 for the others); returns the number of blocks.
+static long stats_dc_first(const Image *img, const int *comps, int n, int al, Stats *tables) {
+    int table[4];
+    for (int j = 0; j < n; j++) table[j] = img->comp[comps[j]].dc_table;
+    Sink c = counter(tables);
+    return code_dc(img, comps, n, al, 0, table, &c);
+}
+
+static void stats_baseline(const Image *img, Stats *dc, Stats *ac) {
+    Stats all[8];
+    memset(all, 0, sizeof all);
+    int table[4];
+    for (int c = 0; c < img->ncomp; c++) table[c] = img->comp[c].dc_table;
+    Sink c = counter(all);
+    code_sequential(img, table, &c);
+    for (int t = 0; t < 2; t++) {
+        dc[t] = all[t];
+        ac[t] = all[t + 4];
     }
 }
 
@@ -1074,6 +1179,405 @@ static int encode(j_decompress_ptr src, jvirt_barray_ptr *coefs, const Plan *pla
     return 1;
 }
 
+// MARK: - Own writer
+
+// Writes the file itself instead of through libjpeg, for two things libjpeg
+// can't do: scans that share a Huffman table (a table defined once stays in
+// its slot for later scans), and exact sizes (the 0x00 after every 0xFF in
+// the data is counted, not estimated). Everything else is what libjpeg
+// writes: the same symbols in the same order (the coding functions above),
+// the input's markers in their order, the same quantization tables and
+// frame. From thorough on, every file it writes is read back with libjpeg
+// and compared coefficient by coefficient; if anything differs, libjpeg
+// writes the file. (Every result is compared by the caller's jpegcmp too.)
+
+typedef struct Code {
+    unsigned short code[256];
+    unsigned char size[256];
+} Code;
+
+typedef struct Writer {
+    unsigned char *d;
+    size_t n, cap;
+    unsigned long long acc;
+    int nacc;
+} Writer;
+
+static void put_byte(Writer *w, int v) {
+    if (w->n == w->cap) {
+        w->cap = w->cap ? w->cap * 2 : 1 << 16;
+        w->d = realloc(w->d, w->cap);
+        if (!w->d) { fprintf(stderr, "jpeg-scan: out of memory\n"); exit(2); }
+    }
+    w->d[w->n++] = (unsigned char)v;
+}
+
+static void put_u16(Writer *w, int v) {
+    put_byte(w, v >> 8);
+    put_byte(w, v & 0xFF);
+}
+
+// Entropy-coded bits, most significant first; a 0xFF byte gets a 0x00 after it.
+static void put_bits(Writer *w, unsigned v, int n) {
+    w->acc = w->acc << n | (v & ((1ULL << n) - 1));
+    w->nacc += n;
+    while (w->nacc >= 8) {
+        int byte = (int)(w->acc >> (w->nacc - 8)) & 0xFF;
+        put_byte(w, byte);
+        if (byte == 0xFF) put_byte(w, 0);
+        w->nacc -= 8;
+    }
+}
+
+// The end of a scan: the last byte is filled up with 1 bits.
+static void put_flush(Writer *w) {
+    if (w->nacc > 0) put_bits(w, 0x7F, 8 - w->nacc);
+    w->acc = 0;
+    w->nacc = 0;
+}
+
+static void write_symbol(Sink *k, int table, int symbol) {
+    const Code *c = k->code[table];
+    put_bits(k->writer, c->code[symbol], c->size[symbol]);
+}
+static void write_bits(Sink *k, unsigned value, int n) { put_bits(k->writer, value, n); }
+
+// libjpeg's table for a histogram; 0 if it can't be built.
+static int build_table(const Stats *s, JHUFF_TBL *t) {
+    long freq[257];
+    for (int i = 0; i < 256; i++) freq[i] = s->freq[i];
+    freq[256] = 0;
+    memset(t, 0, sizeof *t);
+    struct jpeg_compress_struct cinfo;
+    struct error_manager errors;
+    cinfo.err = jpeg_std_error(&errors.pub);
+    errors.pub.error_exit = on_error;
+    errors.pub.output_message = silent;
+    if (setjmp(errors.jump)) return 0;
+    jpeg_gen_optimal_table(&cinfo, t, freq);
+    return 1;
+}
+
+// Canonical codes from the lengths (T.81 Annex C).
+static void make_code(const JHUFF_TBL *t, Code *c) {
+    memset(c, 0, sizeof *c);
+    unsigned code = 0;
+    int p = 0;
+    for (int len = 1; len <= 16; len++) {
+        for (int j = 0; j < t->bits[len]; j++, p++) {
+            c->code[t->huffval[p]] = (unsigned short)code++;
+            c->size[t->huffval[p]] = (unsigned char)len;
+        }
+        code <<= 1;
+    }
+}
+
+// A table need: one scan's symbols for one table (a component's DC table
+// in a DC scan, the AC table of an AC scan, or either in a sequential scan).
+typedef struct {
+    int scan, class_, slot_hint;    // class 0: DC, 1: AC; slot_hint: libjpeg's table number
+    int group;
+    Stats hist;
+} Need;
+
+typedef struct {
+    int class_, first, last, alive, slot;
+    Stats hist;
+    double bytes;       // symbols and table
+    JHUFF_TBL table;
+    Code code;
+} Group;
+
+static double group_bytes(const Stats *h) {
+    double bits;
+    long table;
+    price(h, &bits, &table);
+    // Inside a shared DHT marker a table costs its class/id byte, the 16
+    // counts and its symbols; the raw bits belong to the scans either way.
+    return (bits - (double)h->extra) / 8 + (table - 4);
+}
+
+// Scans a table can serve at once are limited by the four slots per class:
+// at no scan may more than four of a class's tables be in use.
+static int slots_fit(const Group *g, int ngroups, int nscans, int class_) {
+    for (int s = 0; s < nscans; s++) {
+        int live = 0;
+        for (int i = 0; i < ngroups; i++)
+            if (g[i].alive && g[i].class_ == class_ && g[i].first <= s && s <= g[i].last) live++;
+        if (live > 4) return 0;
+    }
+    return 1;
+}
+
+// Greedily lets needs share a table while that is cheaper: sharing saves a
+// table definition and costs the bits the shared table codes worse.
+static void share_tables(Group *g, int ngroups, int nscans) {
+    for (;;) {
+        int best_a = -1, best_b = -1;
+        double best_gain = 0.5; // at least a byte
+        for (int a = 0; a < ngroups; a++) {
+            if (!g[a].alive) continue;
+            for (int b = a + 1; b < ngroups; b++) {
+                if (!g[b].alive || g[b].class_ != g[a].class_) continue;
+                Stats m = g[a].hist;
+                for (int i = 0; i < 256; i++) m.freq[i] += g[b].hist.freq[i];
+                double gain = g[a].bytes + g[b].bytes - group_bytes(&m);
+                if (gain <= best_gain) continue;
+                Group save_a = g[a], save_b = g[b];
+                g[a].first = g[a].first < g[b].first ? g[a].first : g[b].first;
+                g[a].last = g[a].last > g[b].last ? g[a].last : g[b].last;
+                g[b].alive = 0;
+                int fits = slots_fit(g, ngroups, nscans, g[a].class_);
+                g[a] = save_a;
+                g[b] = save_b;
+                if (fits) { best_gain = gain; best_a = a; best_b = b; }
+            }
+        }
+        if (best_a < 0) return;
+        Group *a = &g[best_a], *b = &g[best_b];
+        for (int i = 0; i < 256; i++) a->hist.freq[i] += b->hist.freq[i];
+        a->first = a->first < b->first ? a->first : b->first;
+        a->last = a->last > b->last ? a->last : b->last;
+        a->bytes = group_bytes(&a->hist);
+        b->alive = 0;
+        b->slot = best_a; // forwarding: needs of b now use a
+    }
+}
+
+// Writes the file with the given scans (NULL: one sequential scan). `share`
+// lets scans share tables. Returns 0 if it can't (a table can't be built).
+static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, int share, Buffer *out) {
+    Plan seq;
+    int all[4] = {0, 1, 2, 3};
+    if (!plan) {
+        memset(&seq, 0, sizeof seq);
+        add(&seq, img->ncomp, all, 0, 63, 0, 0);
+    }
+    const Plan *p = plan ? plan : &seq;
+    int sequential = plan == NULL;
+
+    // The needs, scan by scan, with their symbols counted.
+    int nneeds = 0, cap = p->n * 8;
+    Need *needs = checked_malloc((size_t)cap * sizeof *needs);
+    int first_need[1100];
+    for (int si = 0; si < p->n; si++) {
+        const Scan *sc = &p->scans[si];
+        first_need[si] = nneeds;
+        if (sequential) {
+            Stats st[8];
+            memset(st, 0, sizeof st);
+            Sink c = counter(st);
+            int table[4] = {0, 1, 2, 3};
+            code_sequential(img, table, &c);
+            for (int j = 0; j < img->ncomp; j++)
+                for (int cls = 0; cls < 2; cls++)
+                    needs[nneeds++] = (Need){.scan = si, .class_ = cls, .slot_hint = img->comp[j].dc_table, .hist = st[j + 4 * cls]};
+        } else if (sc->ss == 0 && sc->ah == 0) {
+            Stats st[4];
+            memset(st, 0, sizeof st);
+            Sink c = counter(st);
+            code_dc(img, sc->comp, sc->comps_in_scan, sc->al, 0, all, &c);
+            for (int j = 0; j < sc->comps_in_scan; j++)
+                needs[nneeds++] = (Need){.scan = si, .class_ = 0, .slot_hint = img->comp[sc->comp[j]].dc_table, .hist = st[j]};
+        } else if (sc->ss > 0) {
+            Stats st;
+            memset(&st, 0, sizeof st);
+            Sink c = counter(&st);
+            if (sc->ah == 0) code_ac_first(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &c);
+            else code_ac_refine(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &c);
+            needs[nneeds++] = (Need){.scan = si, .class_ = 1, .slot_hint = img->comp[sc->comp[0]].dc_table, .hist = st};
+        }
+    }
+    first_need[p->n] = nneeds;
+
+    // One group per need, except what libjpeg shares by default: components
+    // with the same default table number share it within a scan.
+    Group *g = checked_malloc((size_t)(nneeds ? nneeds : 1) * sizeof *g);
+    int ngroups = 0;
+    for (int n = 0; n < nneeds; n++) {
+        int join = -1;
+        for (int m = first_need[needs[n].scan]; m < n; m++)
+            if (needs[m].class_ == needs[n].class_ && needs[m].slot_hint == needs[n].slot_hint)
+                join = needs[m].group;
+        if (join >= 0) {
+            needs[n].group = join;
+            for (int i = 0; i < 256; i++) g[join].hist.freq[i] += needs[n].hist.freq[i];
+            continue;
+        }
+        needs[n].group = ngroups;
+        g[ngroups++] = (Group){.class_ = needs[n].class_, .first = needs[n].scan, .last = needs[n].scan,
+                               .alive = 1, .slot = -1, .hist = needs[n].hist};
+    }
+    for (int i = 0; i < ngroups; i++) g[i].bytes = group_bytes(&g[i].hist);
+    if (share && ngroups <= 160) share_tables(g, ngroups, p->n);
+    for (int n = 0; n < nneeds; n++) { // follow merges to the surviving group
+        int k = needs[n].group;
+        while (!g[k].alive) k = g[k].slot;
+        needs[n].group = k;
+    }
+    for (int i = 0; i < ngroups; i++) {
+        if (!g[i].alive) continue;
+        g[i].slot = -1;
+        if (!build_table(&g[i].hist, &g[i].table)) { free(needs); free(g); return 0; }
+        make_code(&g[i].table, &g[i].code);
+    }
+
+    Writer w = {0};
+    put_u16(&w, 0xFFD8);
+    for (jpeg_saved_marker_ptr m = src->marker_list; m; m = m->next) {
+        put_byte(&w, 0xFF);
+        put_byte(&w, m->marker);
+        put_u16(&w, (int)m->data_length + 2);
+        for (unsigned i = 0; i < m->data_length; i++) put_byte(&w, m->data[i]);
+    }
+    // Quantization tables, in one marker.
+    int used[4] = {0, 0, 0, 0}, dqt = 0;
+    const JQUANT_TBL *qt[4] = {0};
+    for (int c = 0; c < img->ncomp; c++) {
+        int q = src->comp_info[c].quant_tbl_no;
+        used[q] = 1;
+        qt[q] = src->comp_info[c].quant_table;
+    }
+    int wide_any = 0;
+    for (int q = 0; q < 4; q++) {
+        if (!used[q]) continue;
+        int wide = 0;
+        for (int i = 0; i < 64; i++) wide |= qt[q]->quantval[i] > 255;
+        wide_any |= wide;
+        dqt += 1 + 64 * (wide ? 2 : 1);
+    }
+    put_u16(&w, 0xFFDB);
+    put_u16(&w, dqt + 2);
+    for (int q = 0; q < 4; q++) {
+        if (!used[q]) continue;
+        int wide = 0;
+        for (int i = 0; i < 64; i++) wide |= qt[q]->quantval[i] > 255;
+        put_byte(&w, (wide << 4) | q);
+        for (int i = 0; i < 64; i++) {
+            if (wide) put_u16(&w, qt[q]->quantval[natural[i]]);
+            else put_byte(&w, qt[q]->quantval[natural[i]]);
+        }
+    }
+    // Frame: progressive, baseline, or extended sequential (16-bit tables).
+    put_u16(&w, sequential ? (wide_any ? 0xFFC1 : 0xFFC0) : 0xFFC2);
+    put_u16(&w, 8 + 3 * img->ncomp);
+    put_byte(&w, 8);
+    put_u16(&w, (int)src->image_height);
+    put_u16(&w, (int)src->image_width);
+    put_byte(&w, img->ncomp);
+    for (int c = 0; c < img->ncomp; c++) {
+        put_byte(&w, src->comp_info[c].component_id);
+        put_byte(&w, img->comp[c].h << 4 | img->comp[c].v);
+        put_byte(&w, src->comp_info[c].quant_tbl_no);
+    }
+
+    int owner[2][4] = {{-1, -1, -1, -1}, {-1, -1, -1, -1}}; // group in each slot
+    for (int si = 0; si < p->n; si++) {
+        const Scan *sc = &p->scans[si];
+        // Slots for the tables this scan defines, then one DHT for all of them.
+        int defs[8], ndefs = 0;
+        for (int n = first_need[si]; n < first_need[si + 1]; n++) {
+            Group *gr = &g[needs[n].group];
+            if (gr->slot >= 0) continue;
+            int hint = needs[n].slot_hint, slot = -1;
+            // libjpeg's table number if that slot is free, else any free one.
+            for (int t = 0; t < 4 && slot < 0; t++) {
+                int cand = t == 0 ? hint : (t <= hint ? t - 1 : t);
+                int o = owner[gr->class_][cand];
+                if (o < 0 || g[o].last < si) slot = cand;
+            }
+            if (slot < 0) { free(needs); free(g); free(w.d); return 0; }
+            gr->slot = slot;
+            owner[gr->class_][slot] = needs[n].group;
+            defs[ndefs++] = needs[n].group;
+        }
+        if (ndefs) {
+            int length = 2;
+            for (int d = 0; d < ndefs; d++) {
+                int count = 0;
+                for (int len = 1; len <= 16; len++) count += g[defs[d]].table.bits[len];
+                length += 17 + count;
+            }
+            put_u16(&w, 0xFFC4);
+            put_u16(&w, length);
+            for (int d = 0; d < ndefs; d++) {
+                const Group *gr = &g[defs[d]];
+                put_byte(&w, gr->class_ << 4 | gr->slot);
+                int count = 0;
+                for (int len = 1; len <= 16; len++) { put_byte(&w, gr->table.bits[len]); count += gr->table.bits[len]; }
+                for (int i = 0; i < count; i++) put_byte(&w, gr->table.huffval[i]);
+            }
+        }
+        // Scan header.
+        put_u16(&w, 0xFFDA);
+        put_u16(&w, 6 + 2 * sc->comps_in_scan);
+        put_byte(&w, sc->comps_in_scan);
+        Sink out = {.symbol = write_symbol, .bits = write_bits, .writer = &w};
+        for (int j = 0; j < sc->comps_in_scan; j++) {
+            int c = sc->comp[j], td = 0, ta = 0;
+            for (int n = first_need[si]; n < first_need[si + 1]; n++) {
+                const Group *gr = &g[needs[n].group];
+                int mine = sequential ? (n - first_need[si]) / 2 == j : sc->ss == 0 ? n - first_need[si] == j : 1;
+                if (!mine) continue;
+                if (gr->class_ == 0) { td = gr->slot; out.code[j] = &gr->code; }
+                else { ta = gr->slot; out.code[sequential ? j + 4 : 0] = &gr->code; }
+            }
+            put_byte(&w, src->comp_info[c].component_id);
+            put_byte(&w, td << 4 | ta);
+        }
+        put_byte(&w, sc->ss);
+        put_byte(&w, sc->se);
+        put_byte(&w, sc->ah << 4 | sc->al);
+        // Entropy-coded data.
+        int tables[4] = {0, 1, 2, 3};
+        if (sequential) code_sequential(img, tables, &out);
+        else if (sc->ss == 0) code_dc(img, sc->comp, sc->comps_in_scan, sc->al, sc->ah > 0, tables, &out);
+        else if (sc->ah == 0) code_ac_first(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &out);
+        else code_ac_refine(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &out);
+        put_flush(&w);
+    }
+    put_u16(&w, 0xFFD9);
+    free(needs);
+    free(g);
+    out->data = w.d;
+    out->size = w.n;
+    return 1;
+}
+
+// Reads a written file back with libjpeg and compares every coefficient,
+// the frame and the quantization tables with the input (as jpegcmp does).
+static int same_image(j_decompress_ptr a, jvirt_barray_ptr *ca, const Buffer *buf) {
+    struct jpeg_decompress_struct b;
+    struct error_manager errors;
+    b.err = jpeg_std_error(&errors.pub);
+    errors.pub.error_exit = on_error;
+    errors.pub.output_message = silent;
+    jpeg_create_decompress(&b);
+    if (setjmp(errors.jump)) {
+        jpeg_destroy_decompress(&b);
+        return 0;
+    }
+    jpeg_mem_src(&b, buf->data, buf->size);
+    jpeg_read_header(&b, TRUE);
+    jvirt_barray_ptr *cb = jpeg_read_coefficients(&b);
+    int same = b.err->num_warnings == 0 && a->image_width == b.image_width && a->image_height == b.image_height
+               && a->num_components == b.num_components && a->jpeg_color_space == b.jpeg_color_space;
+    for (int c = 0; same && c < a->num_components; c++) {
+        jpeg_component_info *x = &a->comp_info[c], *y = &b.comp_info[c];
+        same = x->width_in_blocks == y->width_in_blocks && x->height_in_blocks == y->height_in_blocks
+               && x->h_samp_factor == y->h_samp_factor && x->v_samp_factor == y->v_samp_factor
+               && x->quant_table && y->quant_table
+               && !memcmp(x->quant_table->quantval, y->quant_table->quantval, sizeof x->quant_table->quantval);
+        for (JDIMENSION row = 0; same && row < x->height_in_blocks; row++) {
+            JBLOCKARRAY ra = (*a->mem->access_virt_barray)((j_common_ptr)a, ca[c], row, 1, FALSE);
+            JBLOCKARRAY rb = (*b.mem->access_virt_barray)((j_common_ptr)&b, cb[c], row, 1, FALSE);
+            same = !memcmp(ra[0], rb[0], x->width_in_blocks * sizeof(JBLOCK));
+        }
+    }
+    jpeg_destroy_decompress(&b);
+    return same;
+}
+
 static void print_plan(const char *name, const Plan *p) {
     fprintf(stderr, "%s:", name);
     for (int i = 0; i < p->n; i++) {
@@ -1124,10 +1628,12 @@ static int selftest(const Image *img) {
 }
 
 int main(int argc, char **argv) {
-    int effort = EFFORT_BALANCED, report = 0, test = 0, arg = 1;
+    int effort = EFFORT_BALANCED, report = 0, test = 0, force_libjpeg = 0, share = 1, arg = 1;
     for (; arg < argc && !strncmp(argv[arg], "--", 2); arg++) {
         if (!strcmp(argv[arg], "--report")) report = 1;
         else if (!strcmp(argv[arg], "--selftest")) test = 1;
+        else if (!strcmp(argv[arg], "--libjpeg")) force_libjpeg = 1;   // development: compare writers
+        else if (!strcmp(argv[arg], "--no-share")) share = 0;
         else if (!strcmp(argv[arg], "--effort") && arg + 1 < argc) {
             const char *e = argv[++arg];
             effort = !strcmp(e, "thorough") ? EFFORT_THOROUGH
@@ -1195,20 +1701,44 @@ int main(int argc, char **argv) {
     searched = progressive_plan(&img, effort);
     if (searched.bytes < best_bytes) { best = &searched; best_bytes = searched.bytes; }
 
-    Buffer out;
+    // Writing: our own writer (shared tables, exact sizes), read back and
+    // compared; libjpeg if it can't or the comparison fails.
+    const Plan *cands[3] = {best, NULL, NULL};
+    int ncands = 1;
     if (effort == EFFORT_MAXIMUM || total_blocks(&img) <= SMALL_IMAGE_BLOCKS) {
-        // Write all three for real and keep the smallest (the model's byte
-        // stuffing is an estimate; on small files it can tip the choice).
-        const Plan *cands[3] = {&simple, &searched, NULL};
-        Buffer b;
-        out.data = NULL;
-        for (int i = 0; i < 2 + can_baseline; i++) {
+        // All three for real: the exact sizes decide.
+        cands[0] = &simple;
+        cands[1] = &searched;
+        ncands = 2 + can_baseline;
+    }
+    Buffer out = {0};
+    const char *writer = "own";
+    if (!force_libjpeg) {
+        for (int i = 0; i < ncands; i++) {
+            Buffer b;
+            if (!write_own(&src, &img, cands[i], share, &b)) continue;
+            if (!out.data || b.size < out.size) { free(out.data); out = b; best = cands[i]; }
+            else free(b.data);
+        }
+        // The caller proves every result with jpegcmp anyway; reading it back
+        // here only buys the fallback to libjpeg, worth its time at the
+        // higher efforts.
+        if (out.data && effort >= EFFORT_THOROUGH && !same_image(&src, coefs, &out)) {
+            fprintf(stderr, "jpeg-scan: own writer differs, libjpeg writes instead\n");
+            free(out.data);
+            out.data = NULL;
+        }
+    }
+    if (!out.data) {
+        writer = "libjpeg";
+        for (int i = 0; i < ncands; i++) {
+            Buffer b;
             if (!encode(&src, coefs, cands[i], &b)) continue;
             if (!out.data || b.size < out.size) { free(out.data); out = b; best = cands[i]; }
             else free(b.data);
         }
-        if (!out.data) { fprintf(stderr, "jpeg-scan: writing failed\n"); return 2; }
-    } else if (!encode(&src, coefs, best, &out)) {
+    }
+    if (!out.data) {
         fprintf(stderr, "jpeg-scan: writing failed\n");
         return 2;
     }
@@ -1216,7 +1746,8 @@ int main(int argc, char **argv) {
     if (report) {
         fprintf(stderr, "model: baseline %.0f, simple %.0f", baseline, simple.bytes);
         fprintf(stderr, ", searched %.0f", searched.bytes);
-        fprintf(stderr, "; chose %s; file %lu\n", best == NULL ? "baseline" : best == &simple ? "simple" : "searched", out.size);
+        fprintf(stderr, "; chose %s; %s writer; file %lu\n", best == NULL ? "baseline" : best == &simple ? "simple" : "searched",
+                writer, out.size);
         if (best) print_plan("scans", best);
     }
 
