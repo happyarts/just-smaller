@@ -37,7 +37,8 @@ enum XMPFilter {
         }
     }
 
-    private static let lock = NSLock()
+    /// Guards XMLDocument here and the XMLParser of StructureCheck.
+    static let lock = NSLock()
 
     private static func filterLocked(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]?,
                                      digest: (old: String, new: String)?, documents: inout [XMLDocument]) -> [UInt8]? {

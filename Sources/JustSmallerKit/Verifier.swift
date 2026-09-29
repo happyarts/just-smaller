@@ -17,6 +17,7 @@ enum Verifier {
     /// still match.
     static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
                        exactUnderAlpha: Bool = true) async throws {
+        try StructureCheck.verify(original: original, result: result, format: format)
         if format == .svg {
             try await compareRenderings(original, result, strict: pixelsMustMatch)
             return
@@ -46,12 +47,25 @@ enum Verifier {
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
-        guard pixelsMustMatch else { return }
+        // Every image of the file must read to its end.
+        guard CGImageSourceGetStatus(b) == .statusComplete,
+              (0..<framesB).allSatisfy({ CGImageSourceGetStatusAtIndex(b, $0) == .statusComplete })
+        else { throw VerificationError(reason: String(localized: "unreadable", bundle: .module)) }
+        guard pixelsMustMatch else {
+            // libjpeg reads the whole JPEG without a warning; other formats
+            // are decoded once by ImageIO.
+            if format == .jpeg {
+                try await compareJPEGCoefficients(original: nil, result)
+            } else if CGImageSourceCreateImageAtIndex(b, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) == nil {
+                throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
+            }
+            return
+        }
         if format == .jpeg {
             // ImageIO decodes identical JPEG data differently depending on the
             // Huffman tables, so JPEGs are compared where the image really
             // lives: the quantized DCT coefficients, read with libjpeg.
-            try await compareJPEGCoefficients(original, result)
+            try await compareJPEGCoefficients(original: original, result)
         } else {
             // GIF transparency is on/off per palette entry and the colour behind
             // it carries no meaning, so only PNG and WebP must keep it too.
@@ -61,13 +75,16 @@ enum Verifier {
 
     // MARK: - JPEG
 
-    private static func compareJPEGCoefficients(_ a: URL, _ b: URL) async throws {
+    /// Without an original, only reads the result.
+    private static func compareJPEGCoefficients(original: URL?, _ result: URL) async throws {
         do {
-            try await ToolRunner.run("jpegcmp", [a.path, b.path], in: b.deletingLastPathComponent())
+            try await ToolRunner.run("jpegcmp", [original?.path ?? "--check", result.path], in: result.deletingLastPathComponent())
         } catch let error as ToolError where error.status == 1 {
             throw VerificationError(reason: String(localized: "pixels changed", bundle: .module))
         } catch let error as ToolError where error.status == 2 {
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
+        } catch let error as ToolError where error.status == 3 {
+            throw VerificationError(reason: String(localized: "the decoder reports damaged data", bundle: .module))
         }
     }
 

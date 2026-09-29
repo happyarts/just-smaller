@@ -1,4 +1,5 @@
 import Foundation
+import zlib
 
 /// Filters the metadata of a PNG by `MetadataPolicy` without touching the
 /// image data.
@@ -102,15 +103,8 @@ enum PNGMetadataFilter {
         [UInt8(v >> 24), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)]
     }
 
-    private static let crcTable: [UInt32] = (0..<256).map { n in
-        var c = UInt32(n)
-        for _ in 0..<8 { c = c & 1 != 0 ? 0xEDB8_8320 ^ (c >> 1) : c >> 1 }
-        return c
-    }
-
-    static func crc32(_ bytes: [UInt8]) -> UInt32 {
-        var c: UInt32 = 0xFFFF_FFFF
-        for byte in bytes { c = crcTable[Int((c ^ UInt32(byte)) & 0xFF)] ^ (c >> 8) }
-        return c ^ 0xFFFF_FFFF
+    static func crc32(_ bytes: some Collection<UInt8>) -> UInt32 {
+        bytes.withContiguousStorageIfAvailable { UInt32(zlib.crc32(0, $0.baseAddress, uInt($0.count))) }
+            ?? UInt32(Array(bytes).withUnsafeBufferPointer { zlib.crc32(0, $0.baseAddress, uInt($0.count)) })
     }
 }

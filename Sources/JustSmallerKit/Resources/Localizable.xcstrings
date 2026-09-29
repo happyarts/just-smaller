@@ -271,6 +271,16 @@
         }
       }
     },
+    "invalid file structure (%@)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ungültiger Dateiaufbau (%@)"
+          }
+        }
+      }
+    },
     "pixels changed": {
       "localizations": {
         "de": {
@@ -427,6 +437,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Unverändert – die Metadaten ließen sich nicht sicher filtern: %@"
+          }
+        }
+      }
+    },
+    "the decoder reports damaged data": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "der Decoder meldet beschädigte Daten"
           }
         }
       }

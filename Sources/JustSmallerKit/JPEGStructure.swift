@@ -35,6 +35,11 @@ enum JPEGStructure {
     /// last of them ends. nil without a readable index. Offsets in the index
     /// count from its own TIFF header; the first image starts at 0.
     static func indexedImages(_ b: [UInt8]) -> (count: Int, end: Int)? {
+        imageIndex(b).map { ($0.starts.count, $0.end) }
+    }
+
+    /// Where each indexed image starts (the first at 0), and where the last ends.
+    static func imageIndex(_ b: [UInt8]) -> (starts: [Int], end: Int)? {
         guard b.count > 4, b[0] == 0xFF, b[1] == 0xD8 else { return nil }
         var i = 2
         while i + 4 <= b.count, b[i] == 0xFF {
@@ -52,7 +57,7 @@ enum JPEGStructure {
         return nil
     }
 
-    private static func mpEntries(_ b: [UInt8], tiff: Int, segmentEnd: Int) -> (count: Int, end: Int)? {
+    private static func mpEntries(_ b: [UInt8], tiff: Int, segmentEnd: Int) -> (starts: [Int], end: Int)? {
         let bigEndian: Bool
         switch (b[tiff], b[tiff + 1]) {
         case (0x4D, 0x4D): bigEndian = true
@@ -70,12 +75,13 @@ enum JPEGStructure {
             guard u16(e) == 0xB002 else { continue } // MPEntry: 16 bytes per image
             let length = u32(e + 4), start = tiff + u32(e + 8)
             guard length >= 16, length % 16 == 0, start + length <= segmentEnd else { return nil }
-            var end = 0
+            var end = 0, starts: [Int] = []
             for image in 0..<length / 16 {
                 let size = u32(start + image * 16 + 4), offset = u32(start + image * 16 + 8)
+                starts.append(image == 0 ? 0 : tiff + offset)
                 end = max(end, image == 0 ? size : tiff + offset + size)
             }
-            return end <= b.count ? (length / 16, end) : nil
+            return end <= b.count ? (starts, end) : nil
         }
         return nil
     }
@@ -99,7 +105,11 @@ enum JPEGStructure {
     }
 
     /// Anything but padding (zeros or 0xFF fill) after the end of the image.
-    private static func hasData(after end: Int, in b: [UInt8]) -> Bool {
-        b[min(end, b.count)...].contains { $0 != 0x00 && $0 != 0xFF }
+    static func hasData(after end: Int, in b: [UInt8]) -> Bool {
+        hasData(in: b[min(end, b.count)...])
+    }
+
+    static func hasData(in bytes: ArraySlice<UInt8>) -> Bool {
+        bytes.contains { $0 != 0x00 && $0 != 0xFF }
     }
 }

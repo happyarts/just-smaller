@@ -13,10 +13,10 @@ import Foundation
 enum JPEGMetadataFilter {
     struct Malformed: Error {}
 
-    private static let exifHeader = Array("Exif\0\0".utf8)
-    private static let xmpHeader = Array("http://ns.adobe.com/xap/1.0/\0".utf8)
-    private static let extendedXMPHeader = Array("http://ns.adobe.com/xmp/extension/\0".utf8)
-    private static let photoshopHeader = Array("Photoshop 3.0\0".utf8)
+    static let exifHeader = Array("Exif\0\0".utf8)
+    static let xmpHeader = Array("http://ns.adobe.com/xap/1.0/\0".utf8)
+    static let extendedXMPHeader = Array("http://ns.adobe.com/xmp/extension/\0".utf8)
+    static let photoshopHeader = Array("Photoshop 3.0\0".utf8)
     /// The largest payload of a segment: its length field counts itself.
     private static let maxPayload = 0xFFFF - 2
 
