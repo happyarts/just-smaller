@@ -31,7 +31,8 @@
 // prices the ones the encoder will pay.
 extern void jpeg_gen_optimal_table(j_compress_ptr cinfo, JHUFF_TBL *htbl, long freq[]);
 
-enum { EFFORT_FAST, EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
+// "fast" searches like balanced: writing the file takes most of the time.
+enum { EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
 
 // Up to this many blocks (about 0.8 megapixels in colour) an image gets the
 // full search and a real-encode check at every effort: milliseconds there,
@@ -717,7 +718,7 @@ static Plan progressive_plan(const Image *img, int effort) {
     for (int i = 0; i < 63; i++) all_cuts[i] = i + 1;
     all_cuts[63] = 64;
     const int *cuts = balanced_cuts;
-    int ncuts = sizeof balanced_cuts / sizeof *cuts, max_al = effort == EFFORT_FAST ? 2 : 3;
+    int ncuts = sizeof balanced_cuts / sizeof *cuts, max_al = 3;
     if (effort >= EFFORT_THOROUGH) { cuts = thorough_cuts; ncuts = thorough_n; }
     // Every boundary costs time in proportion to the image; beyond this it
     // stops being worth the wait.
@@ -861,6 +862,54 @@ typedef struct {
     unsigned long size;
 } Buffer;
 
+// libjpeg writes every Huffman and quantization table into a marker of its
+// own; one DHT or DQT marker may hold several tables. Merging neighbouring
+// ones saves four bytes (marker and length) per table. Walks the whole file:
+// progressive files define new tables between scans.
+static void merge_tables(Buffer *buf) {
+    unsigned char *b = buf->data, *out = checked_malloc(buf->size);
+    size_t n = buf->size, i = 2, o = 2;
+    memcpy(out, b, 2);
+    long open = -1;      // where the length of the marker being extended is
+    int open_marker = 0;
+    while (i + 4 <= n && b[i] == 0xFF) {
+        int marker = b[i + 1];
+        size_t length = (size_t)b[i + 2] << 8 | b[i + 3];
+        if (marker == 0xD9 || length < 2 || i + 2 + length > n) break;
+        if ((marker == 0xC4 || marker == 0xDB) && marker == open_marker) {
+            size_t total = ((size_t)out[open] << 8 | out[open + 1]) + length - 2;
+            if (total <= 0xFFFF) {
+                memcpy(out + o, b + i + 4, length - 2);
+                o += length - 2;
+                out[open] = (unsigned char)(total >> 8);
+                out[open + 1] = (unsigned char)(total & 0xFF);
+                i += 2 + length;
+                continue;
+            }
+        }
+        memcpy(out + o, b + i, 2 + length);
+        open = (long)o + 2;
+        open_marker = marker;
+        o += 2 + length;
+        i += 2 + length;
+        if (marker == 0xDA) {
+            // Entropy-coded data up to the next marker that isn't a stuffed
+            // zero or a restart marker.
+            size_t j = i;
+            while (j + 1 < n && !(b[j] == 0xFF && b[j + 1] != 0 && !(b[j + 1] >= 0xD0 && b[j + 1] <= 0xD7))) j++;
+            memcpy(out + o, b + i, j - i);
+            o += j - i;
+            i = j;
+            open_marker = 0;
+        }
+    }
+    memcpy(out + o, b + i, n - i); // EOI (or anything unexpected, as it was)
+    o += n - i;
+    free(buf->data);
+    buf->data = out;
+    buf->size = o;
+}
+
 // Writes the coefficients with the plan's scans (NULL: sequential) into memory.
 static int encode(j_decompress_ptr src, jvirt_barray_ptr *coefs, const Plan *plan, Buffer *out) {
     struct jpeg_compress_struct dst;
@@ -912,6 +961,7 @@ static int encode(j_decompress_ptr src, jvirt_barray_ptr *coefs, const Plan *pla
     jpeg_finish_compress(&dst);
     jpeg_destroy_compress(&dst);
     free(script);
+    merge_tables(out);
     return 1;
 }
 
@@ -971,7 +1021,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[arg], "--selftest")) test = 1;
         else if (!strcmp(argv[arg], "--effort") && arg + 1 < argc) {
             const char *e = argv[++arg];
-            effort = !strcmp(e, "fast") ? EFFORT_FAST : !strcmp(e, "thorough") ? EFFORT_THOROUGH
+            effort = !strcmp(e, "thorough") ? EFFORT_THOROUGH
                    : !strcmp(e, "maximum") ? EFFORT_MAXIMUM : EFFORT_BALANCED;
         } else break;
     }
