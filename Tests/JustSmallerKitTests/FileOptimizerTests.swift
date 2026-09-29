@@ -336,7 +336,7 @@ final class FileOptimizerTests {
     @Test func jpegWithASecondImageIsLeftAlone() async throws {
         let plain = try Data(contentsOf: write(image(), "plain.jpg", type: .jpeg,
                                                properties: [kCGImageDestinationLossyCompressionQuality: 0.95]))
-        #expect(!JPEGStructure.hasSecondaryImage([UInt8](plain)))
+        #expect(!JPEGStructure.hasSecondaryImage(ByteView(plain)))
 
         // A gain map, motion-photo video or trailer after the end of the image.
         let trailing = dir.appending(path: "trailing.jpg")

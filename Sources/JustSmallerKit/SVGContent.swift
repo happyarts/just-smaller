@@ -19,11 +19,8 @@ enum SVGContent {
             data = converted
         }
         let scanner = Scanner()
-        let parser = XMLParser(data: data)
-        parser.delegate = scanner
-        parser.shouldResolveExternalEntities = false
         // What the parser can't read, it can't vouch for either.
-        guard parser.parse() else { return String(localized: "Couldn’t be read completely", bundle: .module) }
+        guard XML.parse(data, delegate: scanner) else { return String(localized: "Couldn’t be read completely", bundle: .module) }
         if scanner.hasScript { return String(localized: "Contains scripts", bundle: .module) }
         if scanner.hasAnimation { return String(localized: "Contains animation", bundle: .module) }
         if scanner.hasHTML { return String(localized: "Contains embedded HTML", bundle: .module) }

@@ -25,20 +25,16 @@ enum XMPFilter {
     /// Unparseable XMP is dropped: better no data than stray data.
     static func filter(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]? = nil,
                        digest: (old: String, new: String)? = nil) -> [UInt8]? {
-        // Foundation's XML classes are not safe to use from several threads
-        // at once, even on separate documents. Removed nodes still point into
-        // their document, so the documents must outlive them: they are
+        // Under the engine's XML lock (see XML). Removed nodes still point
+        // into their document, so the documents must outlive them: they are
         // released only after the autorelease pool that holds the nodes.
-        lock.withLock {
+        XML.lock.withLock {
             var documents: [XMLDocument] = []
             let result = autoreleasepool { filterLocked(packet, level: level, merging: extended, digest: digest, documents: &documents) }
             withExtendedLifetime(documents) {}
             return result
         }
     }
-
-    /// Guards XMLDocument here and the XMLParser of StructureCheck.
-    static let lock = NSLock()
 
     private static func filterLocked(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]?,
                                      digest: (old: String, new: String)?, documents: inout [XMLDocument]) -> [UInt8]? {
@@ -81,7 +77,7 @@ enum XMPFilter {
         // The packet may carry trailing NULs or junk after the trailer.
         var bytes = packet
         if let end = bytes.lastRange(of: Array("?>".utf8)) { bytes = Array(bytes[..<end.upperBound]) }
-        return try? XMLDocument(data: Data(bytes), options: [.nodePreserveCDATA])
+        return try? XMLDocument(data: Data(bytes), options: [.nodePreserveCDATA, .nodeLoadExternalEntitiesNever])
     }
 
     private static func findRDF(_ element: XMLElement?) -> XMLElement? {

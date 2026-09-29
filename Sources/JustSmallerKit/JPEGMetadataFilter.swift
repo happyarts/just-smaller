@@ -17,6 +17,30 @@ enum JPEGMetadataFilter {
     static let xmpHeader = Array("http://ns.adobe.com/xap/1.0/\0".utf8)
     static let extendedXMPHeader = Array("http://ns.adobe.com/xmp/extension/\0".utf8)
     static let photoshopHeader = Array("Photoshop 3.0\0".utf8)
+    /// What an APPn or COM segment holds, by its marker and signature. The
+    /// filter rewrites EXIF, XMP and IPTC (Photoshop); the structure check
+    /// checks what was rewritten and requires the rest unchanged.
+    enum Part {
+        case jfif, jfifExtension, exif, xmp, extendedXMP, photoshop, iccProfile, multiPicture, adobe, comment, other
+    }
+
+    static func part(_ marker: UInt8, payload: some Collection<UInt8>) -> Part {
+        func has(_ header: [UInt8]) -> Bool { payload.starts(with: header) }
+        switch marker {
+        case 0xE0 where has(Array("JFIF\0".utf8)): return .jfif
+        case 0xE0 where has(Array("JFXX\0".utf8)): return .jfifExtension
+        case 0xE1 where has(exifHeader): return .exif
+        case 0xE1 where has(xmpHeader): return .xmp
+        case 0xE1 where has(extendedXMPHeader): return .extendedXMP
+        case 0xE2 where has(Array("ICC_PROFILE\0".utf8)): return .iccProfile
+        case 0xE2 where has(Array("MPF\0".utf8)): return .multiPicture
+        case 0xED where has(photoshopHeader): return .photoshop
+        case 0xEE where has(Array("Adobe".utf8)): return .adobe
+        case 0xFE: return .comment
+        default: return .other
+        }
+    }
+
     /// The largest payload of a segment: its length field counts itself.
     private static let maxPayload = 0xFFFF - 2
 
@@ -124,7 +148,7 @@ enum JPEGMetadataFilter {
         return filled == length ? whole : nil
     }
 
-    private static func segment(_ marker: UInt8, _ payload: [UInt8]) -> Data {
+    static func segment(_ marker: UInt8, _ payload: [UInt8]) -> Data {
         let length = payload.count + 2
         return Data([0xFF, marker, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
     }

@@ -64,7 +64,7 @@ public struct FileOptimizer: Sendable {
         // filtered, and only when nothing else follows the indexed images.
         var hasSecondaryImage = false
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
-           case let bytes = [UInt8](data), JPEGStructure.hasSecondaryImage(bytes) {
+           case let bytes = ByteView(data), JPEGStructure.hasSecondaryImage(bytes) {
             hasSecondaryImage = true
             if settings.metadata == .keep || !JPEGStructure.holdsOnlyIndexedImages(bytes) {
                 return .skipped(reason: String(localized: "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged", bundle: .module),
@@ -141,6 +141,8 @@ public struct FileOptimizer: Sendable {
                 }
             }
             results.sort { $0.2 < $1.2 }
+            // Read once, for the first candidate that gets verified.
+            var structure: StructureCheck.Reference?
             for (candidate, output, outSize) in results {
                 let limit = candidate.minimumGain > 0 ? Int64(Double(bestSize) * (1 - candidate.minimumGain)) : bestSize
                 // Removing private data is a promise, not an optimization: it
@@ -148,11 +150,12 @@ public struct FileOptimizer: Sendable {
                 // less compactly), as long as there was something to remove.
                 let promised = candidate.isRequired && MetadataCheck.hasFieldsToRemove(input, level: settings.metadata)
                 guard outSize < limit || promised else { continue }
+                if structure == nil { structure = StructureCheck.Reference(original: input, format: format) }
                 do {
                     // Against this stage's input: after a lossy stage the
                     // following lossless ones must keep the lossy result's pixels.
                     try await Verifier.verify(original: input, result: output, format: format, pixelsMustMatch: !candidate.isLossy,
-                                              exactUnderAlpha: !candidate.changesHiddenColour)
+                                              exactUnderAlpha: !candidate.changesHiddenColour, structure: structure)
                 } catch {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
                     lastError = error

@@ -11,6 +11,12 @@ enum WebPMetadataFilter {
     private static let imageChunks: Set<String> = ["VP8X", "ICCP", "ANIM", "ANMF", "ALPH", "VP8 ", "VP8L"]
     private static let exifFlag: UInt8 = 0x08, xmpFlag: UInt8 = 0x04
 
+    /// Where the TIFF data of an EXIF chunk starts: some writers put JPEG's
+    /// "Exif\0\0" in front of it.
+    static func tiffOffset(_ payload: some Collection<UInt8>) -> Int {
+        payload.starts(with: JPEGMetadataFilter.exifHeader) ? JPEGMetadataFilter.exifHeader.count : 0
+    }
+
     static func filter(_ data: Data, level: MetadataHandling) throws -> Data {
         let b = [UInt8](data)
         guard b.count >= 12, b[0..<4].elementsEqual(Array("RIFF".utf8)), b[8..<12].elementsEqual(Array("WEBP".utf8))
@@ -25,9 +31,7 @@ enum WebPMetadataFilter {
                 if level == .keep {
                     chunks.append((type, payload))
                 } else {
-                    // Some writers put JPEG's "Exif\0\0" in front of the TIFF data.
-                    let header = Array("Exif\0\0".utf8)
-                    let tiff = payload.starts(with: header) ? Array(payload.dropFirst(header.count)) : payload
+                    let tiff = Array(payload.dropFirst(tiffOffset(payload)))
                     if let exif = EXIFFilter.filter(tiff, level: level) { chunks.append((type, exif)) }
                 }
             case "XMP ":

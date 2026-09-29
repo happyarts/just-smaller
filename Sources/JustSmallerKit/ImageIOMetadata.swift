@@ -50,8 +50,8 @@ enum ImageIOMetadata {
               auxiliaryImages(source).allSatisfy({ auxiliaryData(source, $0) == auxiliaryData(result, $0) }) else {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
-        if let before = JPEGStructure.indexedImages([UInt8](try Data(contentsOf: input, options: .alwaysMapped))) {
-            guard JPEGStructure.indexedImages([UInt8](try Data(contentsOf: output)))?.count == before.count else {
+        if let before = JPEGStructure.imageIndex(ByteView(try Data(contentsOf: input, options: .alwaysMapped))) {
+            guard JPEGStructure.imageIndex(ByteView(try Data(contentsOf: output)))?.starts.count == before.starts.count else {
                 throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
             }
         }

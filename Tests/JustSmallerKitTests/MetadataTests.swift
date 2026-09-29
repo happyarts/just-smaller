@@ -299,7 +299,7 @@ final class MetadataTests {
         #expect(CGImageDestinationFinalize(dest))
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
-        if type == .jpeg { #expect(JPEGStructure.holdsOnlyIndexedImages([UInt8](try Data(contentsOf: url)))) }
+        if type == .jpeg { #expect(JPEGStructure.holdsOnlyIndexedImages(ByteView(try Data(contentsOf: url)))) }
 
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false

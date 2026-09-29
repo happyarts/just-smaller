@@ -12,9 +12,13 @@ enum EXIFFilter {
         var value: [UInt8] // raw bytes in the block's byte order
     }
 
-    private static let sizes: [UInt16: Int] = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4]
+    /// Bytes per value of each TIFF type.
+    static let sizes: [UInt16: Int] = [1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 6: 1, 7: 1, 8: 2, 9: 4, 10: 8, 11: 4, 12: 8, 13: 4]
     private static let exifPointer: UInt16 = 0x8769
+    private static let gpsPointer: UInt16 = 0x8825
     private static let interopPointer: UInt16 = 0xA005
+    /// Tags whose value is the offset of another IFD.
+    static let ifdPointers: Set<UInt16> = [exifPointer, gpsPointer, interopPointer]
 
     /// The filtered TIFF block, or nil when nothing worth keeping is left.
     /// Unreadable EXIF is dropped as a whole: better no data than stray data.

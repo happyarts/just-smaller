@@ -1,0 +1,295 @@
+import Foundation
+
+/// JPEG after ITU T.81: markers and lengths, tables defined before use, one
+/// frame, scans that follow the progression rules, restart markers in
+/// sequence and in the right number, nothing unexpected after the end — and
+/// every image a multi-picture index lists, sound in the same way.
+enum JPEGCheck {
+    typealias Invalid = StructureCheck.Invalid
+
+    /// What the original contributes.
+    struct Reference {
+        /// Its frame type, which stays allowed (arithmetic, 12-bit, lossless).
+        let frame: UInt8?
+        /// Whether all its coefficients are coded; nil if it isn't strictly valid.
+        let complete: Bool?
+        /// The APPn and COM segments of all its images, whole.
+        let segments: Set<Data>
+        /// What follows its end of image.
+        let trailer: Data
+
+        init(_ a: ByteView) {
+            let lenient = (try? JPEGMetadataFilter.segments(a.bytes))?.headers ?? []
+            let frame = lenient.first { JPEGCheck.isFrame($0.marker) }?.marker
+            self.frame = frame
+            let strict = try? JPEGCheck.parse(a, allowing: frame)
+            complete = strict?.complete
+            var segments = Set(strict?.segments ?? lenient.filter { JPEGCheck.isMetadata($0.marker) }.map(\.bytes))
+            // Those of the images a multi-picture index lists, too.
+            for start in JPEGStructure.imageIndex(a)?.starts.dropFirst() ?? [] {
+                if let image = try? a.view(from: start), let s = try? JPEGMetadataFilter.segments(image.bytes) {
+                    segments.formUnion(s.headers.filter { JPEGCheck.isMetadata($0.marker) }.map(\.bytes))
+                }
+            }
+            self.segments = segments
+            trailer = strict.flatMap { try? a.view(from: $0.end).bytes } ?? Data()
+        }
+    }
+
+    /// What the strict parse of one image found.
+    struct Image {
+        var frame: UInt8 = 0
+        /// Every coefficient of every component is in some scan, to full precision.
+        var complete = false
+        /// APPn and COM segments, whole.
+        var segments: [Data] = []
+        /// Where the image ends (after EOI).
+        var end = 0
+    }
+
+    private struct Component {
+        var id: Int, h: Int, v: Int, table: Int
+    }
+
+    static let arithmetic: Set<UInt8> = [0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF]
+    static let lossless: Set<UInt8> = [0xC3, 0xC7, 0xCB, 0xCF]
+    static func isFrame(_ marker: UInt8) -> Bool { (0xC0...0xCF).contains(marker) && ![0xC4, 0xC8, 0xCC].contains(marker) }
+    /// APPn and COM: metadata, not image data.
+    static func isMetadata(_ marker: UInt8) -> Bool { (0xE0...0xEF).contains(marker) || marker == 0xFE }
+
+    static func check(_ b: ByteView, against reference: Reference) throws {
+        let image = try parse(b, allowing: reference.frame)
+        if reference.complete != false, !image.complete { throw Invalid("image data incomplete") }
+        try metadata(image.segments, original: reference.segments)
+
+        // After EOI: the images a multi-picture index lists, each a sound
+        // JPEG right after the one before it, and nothing else — or exactly
+        // what the original had there.
+        if let index = JPEGStructure.imageIndex(b), index.starts.count > 1 {
+            var end = image.end
+            for (n, start) in index.starts.enumerated().dropFirst() {
+                guard start >= end, try b.view(end, start - end).isPadding else { throw Invalid("images overlap or have data between them") }
+                end = try Invalid.within("image \(n + 1)") {
+                    let image = try parse(b, from: start)
+                    try metadata(image.segments, original: reference.segments)
+                    return image.end
+                }
+            }
+            guard try b.view(from: index.end).isPadding else { throw Invalid("data after the last image") }
+        } else {
+            let trailer = try b.view(from: image.end)
+            guard trailer.isEmpty || trailer.bytes == reference.trailer else { throw Invalid("data after the end of the image") }
+        }
+    }
+
+    /// Parses one image from `start` to its EOI. Only the frame types libjpeg
+    /// writes are accepted, and the original's own.
+    static func parse(_ b: ByteView, from start: Int = 0, allowing originalFrame: UInt8? = nil) throws -> Image {
+        var image = Image()
+        guard try b.be(start, 2) == 0xFFD8 else { throw Invalid("no SOI") }
+        var i = start + 2
+        var quant = [Bool](repeating: false, count: 4)
+        var dc = [Bool](repeating: false, count: 4), ac = [Bool](repeating: false, count: 4)
+        var components: [Component] = []
+        var width = 0, height = 0, restartInterval = 0, scans = 0
+        // Progressive: the last Al each coefficient was coded with, -1 before
+        // its first scan. Other frames: [0] says whether the component had its scan.
+        var coded: [[Int]] = []
+
+        while true {
+            guard try b.u8(i) == 0xFF else { throw Invalid("data between segments") }
+            let marker = UInt8(try b.u8(i + 1))
+            if marker == 0xFF { i += 1; continue } // fill byte
+            if marker == 0xD9 {
+                guard scans > 0 else { throw Invalid("no scan") }
+                image.end = i + 2
+                image.complete = image.frame == 0xC2
+                    ? coded.allSatisfy { $0.allSatisfy { $0 == 0 } }
+                    : coded.allSatisfy { $0[0] == 0 }
+                return image
+            }
+            guard marker != 0x01, marker != 0xD8, !(0xD0...0xD7).contains(marker) else {
+                throw Invalid(String(format: "marker %02X out of place", marker))
+            }
+            let length = try b.be(i + 2, 2)
+            guard length >= 2 else { throw Invalid("segment length") }
+            let s = try b.view(i + 4, length - 2) // the payload
+            let end = i + 2 + length
+            switch marker {
+            case _ where isMetadata(marker):
+                image.segments.append(try b.view(i, 2 + length).bytes)
+            case 0xDB: // DQT
+                var k = 0
+                while k < s.count {
+                    let pq = try s.u8(k) >> 4, tq = try s.u8(k) & 15
+                    guard pq <= 1, tq <= 3 else { throw Invalid("DQT") }
+                    for n in 0..<64 {
+                        let step = try pq == 0 ? s.u8(k + 1 + n) : s.be(k + 1 + 2 * n, 2)
+                        guard step > 0 else { throw Invalid("DQT zero step") }
+                    }
+                    quant[tq] = true
+                    k += 1 + 64 * (pq + 1)
+                }
+                guard k == s.count else { throw Invalid("DQT") }
+            case 0xC4: // DHT
+                var k = 0
+                while k < s.count {
+                    let tc = try s.u8(k) >> 4, th = try s.u8(k) & 15
+                    guard tc <= 1, th <= 3 else { throw Invalid("DHT class") }
+                    let counts = try (1...16).map { try s.u8(k + $0) }
+                    let total = counts.reduce(0, +)
+                    guard total > 0, total <= 256 else { throw Invalid("DHT size") }
+                    // Canonical codes must fit their lengths, and the all-ones
+                    // code stays unused (libjpeg's test in jdhuff.c).
+                    var code = 0
+                    for (n, count) in counts.enumerated() {
+                        code += count
+                        guard code < 1 << (n + 1) else { throw Invalid("DHT code lengths") }
+                        code <<= 1
+                    }
+                    // DC symbols count bits: up to 16 (lossless 16-bit).
+                    if tc == 0, try s.view(k + 17, total).bytes.contains(where: { $0 > 16 }) { throw Invalid("DHT DC symbol") }
+                    if tc == 0 { dc[th] = true } else { ac[th] = true }
+                    k += 17 + total
+                }
+                guard k == s.count else { throw Invalid("DHT size") }
+            case 0xDD: // DRI
+                guard s.count == 2 else { throw Invalid("DRI") }
+                restartInterval = try s.be(0, 2)
+            case 0xCC: // DAC, arithmetic coding only
+                guard let originalFrame, arithmetic.contains(originalFrame) else { throw Invalid("DAC") }
+            case _ where isFrame(marker):
+                guard image.frame == 0 else { throw Invalid("second frame") }
+                guard [0xC0, 0xC1, 0xC2].contains(marker) || marker == originalFrame else {
+                    throw Invalid(String(format: "frame type %02X", marker))
+                }
+                image.frame = marker
+                let precision = try s.u8(0)
+                height = try s.be(1, 2); width = try s.be(3, 2)
+                let n = try s.u8(5)
+                guard (1...4).contains(n), s.count == 6 + 3 * n, width > 0, height > 0 else { throw Invalid("SOF") }
+                guard precision == 8 || marker == originalFrame else { throw Invalid("SOF precision") }
+                for c in 0..<n {
+                    let id = try s.u8(6 + 3 * c), hv = try s.u8(7 + 3 * c), t = try s.u8(8 + 3 * c)
+                    let h = hv >> 4, v = hv & 15
+                    guard (1...4).contains(h), (1...4).contains(v), t <= 3, !components.contains(where: { $0.id == id })
+                    else { throw Invalid("SOF component") }
+                    components.append(Component(id: id, h: h, v: v, table: t))
+                }
+                coded = Array(repeating: Array(repeating: -1, count: 64), count: n)
+            case 0xDA: // SOS
+                guard image.frame != 0 else { throw Invalid("scan before frame") }
+                let ns = try s.u8(0)
+                guard (1...4).contains(ns), s.count == 4 + 2 * ns else { throw Invalid("SOS") }
+                var members: [Int] = []
+                for c in 0..<ns {
+                    let id = try s.u8(1 + 2 * c)
+                    guard let index = components.firstIndex(where: { $0.id == id }), index > (members.last ?? -1)
+                    else { throw Invalid("SOS component") }
+                    guard quant[components[index].table] else { throw Invalid("quantization table used before it is defined") }
+                    members.append(index)
+                }
+                let ss = try s.u8(1 + 2 * ns), se = try s.u8(2 + 2 * ns)
+                let ah = try s.u8(3 + 2 * ns) >> 4, al = try s.u8(3 + 2 * ns) & 15
+                try checkScan(frame: image.frame, members: members, tables: s, ss: ss, se: se, ah: ah, al: al,
+                              dc: dc, ac: ac, coded: &coded)
+                scans += 1
+                // The entropy-coded data, up to the next real marker.
+                var k = end, restarts = 0
+                while true {
+                    guard let next = b.index(of: 0xFF, from: k) else { throw Invalid("scan runs to the end of the file") }
+                    let m = try b.u8(next + 1)
+                    if m == 0x00 { k = next + 2; continue }
+                    if m == 0xFF { k = next + 1; continue } // fill before a marker
+                    if (0xD0...0xD7).contains(m) {
+                        guard restartInterval > 0, m - 0xD0 == restarts % 8 else { throw Invalid("restart marker out of sequence") }
+                        restarts += 1
+                        k = next + 2
+                        continue
+                    }
+                    i = next
+                    break
+                }
+                if restartInterval > 0, !lossless.contains(image.frame) {
+                    let hMax = components.map(\.h).max()!, vMax = components.map(\.v).max()!
+                    let mcus: Int
+                    if ns == 1 {
+                        let c = components[members[0]]
+                        mcus = divUp(divUp(width * c.h, hMax), 8) * divUp(divUp(height * c.v, vMax), 8)
+                    } else {
+                        mcus = divUp(width, 8 * hMax) * divUp(height, 8 * vMax)
+                    }
+                    guard restarts == divUp(mcus, restartInterval) - 1 else { throw Invalid("wrong number of restart markers") }
+                }
+                continue
+            case 0xDC: throw Invalid("DNL")
+            default: throw Invalid(String(format: "marker %02X", marker))
+            }
+            i = end
+        }
+    }
+
+    /// APPn and COM segments: those the metadata filter writes are checked,
+    /// every other one must be the original's.
+    private static func metadata(_ segments: [Data], original: Set<Data>) throws {
+        var photoshop = Data(), photoshopChanged = false
+        for s in segments {
+            let v = ByteView(s), marker = s[s.startIndex + 1], payload = try v.view(from: 4)
+            let part = JPEGMetadataFilter.part(marker, payload: payload.bytes)
+            let changed = !original.contains(s)
+            if part == .photoshop {
+                // Resources may continue from one APP13 to the next.
+                photoshop += payload.bytes.dropFirst(JPEGMetadataFilter.photoshopHeader.count)
+                photoshopChanged = photoshopChanged || changed
+                continue
+            }
+            guard changed else { continue }
+            switch part {
+            case .jfif: try Invalid.within("JFIF") { try PayloadCheck.jfif(payload) }
+            case .jfifExtension, .multiPicture: break // a JFIF thumbnail; the index is checked image by image
+            case .exif: try Invalid.within("EXIF") { try PayloadCheck.tiff(payload.view(from: JPEGMetadataFilter.exifHeader.count)) }
+            case .xmp: try Invalid.within("XMP") { try PayloadCheck.xml(payload.view(from: JPEGMetadataFilter.xmpHeader.count)) }
+            case .extendedXMP:
+                try Invalid.within("extended XMP") { try PayloadCheck.extendedXMP(payload.view(from: JPEGMetadataFilter.extendedXMPHeader.count)) }
+            case .adobe: try Invalid.within("Adobe marker") { try PayloadCheck.adobe(payload) }
+            case .comment: throw Invalid("comment changed")
+            case .iccProfile: throw Invalid("colour profile changed")
+            case .photoshop, .other: throw Invalid(String(format: "APP%X segment changed", marker & 15))
+            }
+        }
+        if photoshopChanged { try Invalid.within("IPTC") { try PayloadCheck.photoshopResources(ByteView(photoshop)) } }
+    }
+
+    /// One scan's parameters against T.81 G.1.1.1 (progression) or the
+    /// sequential rules, and the tables it needs.
+    private static func checkScan(frame: UInt8, members: [Int], tables s: ByteView, ss: Int, se: Int, ah: Int, al: Int,
+                                  dc: [Bool], ac: [Bool], coded: inout [[Int]]) throws {
+        if frame == 0xC2 {
+            guard ss <= se, se <= 63, (ss == 0) == (se == 0), ss == 0 || members.count == 1, ah <= 13, al <= 13
+            else { throw Invalid("progression") }
+        }
+        for (c, index) in members.enumerated() {
+            let td = try s.u8(2 + 2 * c) >> 4, ta = try s.u8(2 + 2 * c) & 15
+            guard td <= 3, ta <= 3, frame != 0xC0 || (td <= 1 && ta <= 1) else { throw Invalid("SOS table") }
+            switch frame {
+            case 0xC2:
+                if ss == 0, ah == 0, !dc[td] { throw Invalid("Huffman table used before it is defined") }
+                if ss > 0, !ac[ta] { throw Invalid("Huffman table used before it is defined") }
+                if ss > 0, coded[index][0] < 0 { throw Invalid("AC scan before DC") }
+                for k in ss...se {
+                    let previous = coded[index][k]
+                    guard ah == 0 ? previous < 0 : (previous == ah && al == ah - 1) else { throw Invalid("progression") }
+                    coded[index][k] = al
+                }
+            case 0xC0, 0xC1:
+                guard ss == 0, se == 63, ah == 0, al == 0, coded[index][0] < 0 else { throw Invalid("sequential scan") }
+                guard dc[td], ac[ta] else { throw Invalid("Huffman table used before it is defined") }
+                coded[index][0] = 0
+            default:
+                coded[index][0] = 0 // the original's own coding: structure only
+            }
+        }
+    }
+
+    private static func divUp(_ a: Int, _ b: Int) -> Int { (a + b - 1) / b }
+}

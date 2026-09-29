@@ -15,9 +15,11 @@ enum Verifier {
     /// `exactUnderAlpha` false allows a different colour under fully
     /// transparent pixels (lossy mode's lossless steps); visible pixels must
     /// still match.
+    /// `structure` is what the structure check needs from the original; the
+    /// caller reads it once for all candidates of a step.
     static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
-                       exactUnderAlpha: Bool = true) async throws {
-        try StructureCheck.verify(original: original, result: result, format: format)
+                       exactUnderAlpha: Bool = true, structure: StructureCheck.Reference? = nil) async throws {
+        try StructureCheck.verify(result: result, against: structure ?? StructureCheck.Reference(original: original, format: format))
         if format == .svg {
             // UTF-16 → UTF-8 is proven on the text itself; the renderer reads UTF-8 only.
             if let a = try? Data(contentsOf: original), SVGText.encoding(a) != .utf8 {

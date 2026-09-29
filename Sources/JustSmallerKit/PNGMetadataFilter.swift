@@ -20,7 +20,7 @@ enum PNGMetadataFilter {
     /// Ancillary chunks that are always kept.
     static let kept: Set<String> = ["tRNS", "iCCP", "sRGB", "gAMA", "cHRM", "sBIT", "cICP", "mDCV", "cLLI",
                                     "acTL", "fcTL", "fdAT"]
-    private static let xmpKeyword = "XML:com.adobe.xmp"
+    static let xmpKeyword = "XML:com.adobe.xmp"
 
     static func filter(_ data: Data, level: MetadataHandling, orientation: Int) throws -> Data {
         let b = [UInt8](data)

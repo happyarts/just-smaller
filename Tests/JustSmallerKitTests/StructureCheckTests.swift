@@ -44,10 +44,8 @@ final class StructureCheckTests {
 
     /// Whether the check rejects `bytes` as the result of optimizing `original`.
     private func rejects(_ bytes: [UInt8], original: URL, _ format: ImageFormat) throws -> Bool {
-        let result = dir.appending(path: "result-\(UUID().uuidString).\(original.pathExtension)")
-        try Data(bytes).write(to: result)
         do {
-            try StructureCheck.verify(original: original, result: result, format: format)
+            try StructureCheck.verify(ByteView(bytes), against: StructureCheck.Reference(original: original, format: format))
             return false
         } catch is VerificationError {
             return true
@@ -213,6 +211,17 @@ final class StructureCheckTests {
         #expect(try rejects(Array(b[..<8]) + moved, original: url, .png), "pHYs after IDAT")
     }
 
+    /// The original is read leniently: data after its IEND doesn't make
+    /// every chunk of the result count as changed.
+    @Test func unusualOriginalsStillCount() throws {
+        let url = write("a.png", .png)
+        let plain = try bytes(url)
+        let withDensity = Array(plain[..<33]) + [UInt8](PNGMetadataFilter.chunk("pHYs", [0, 0, 11, 19, 0, 0, 11, 19, 1])) + Array(plain[33...])
+        let original = dir.appending(path: "trailing.png")
+        try Data(withDensity + Array("trailing".utf8)).write(to: original)
+        #expect(try !rejects(withDensity, original: original, .png))
+    }
+
     // MARK: - WebP
 
     private func riff(_ chunks: [UInt8]) -> [UInt8] {
@@ -238,15 +247,89 @@ final class StructureCheckTests {
         #expect(try rejects(riff(image + Array("EXIF".utf8) + [2, 0, 0, 0, 1, 2]), original: url, .webp), "chunk after a simple image")
     }
 
+    // MARK: - Metadata a step wrote
+
+    private func appSegment(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] { [UInt8](JPEGMetadataFilter.segment(marker, payload)) }
+
+    /// The file with `segment` right after SOI.
+    private func inserting(_ segment: [UInt8], into b: [UInt8]) -> [UInt8] { Array(b[..<2]) + segment + Array(b[2...]) }
+
+    @Test func rewrittenMetadataIsCheckedToo() throws {
+        let url = write("a.jpg", .jpeg)
+        let b = try bytes(url)
+        let exif = JPEGMetadataFilter.exifHeader
+        // TIFF header, IFD0 with one entry: Artist (ASCII, 20 bytes) at an offset past the end.
+        let tiff: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x3B, 0, 2, 0, 0, 0, 20, 0, 0, 0x10, 0, 0, 0, 0, 0]
+        #expect(try rejects(inserting(appSegment(0xE1, exif + tiff), into: b), original: url, .jpeg), "EXIF value outside")
+        var sound = tiff
+        sound[21] = 26; sound[20] = 0 // the value right after the IFD
+        #expect(try !rejects(inserting(appSegment(0xE1, exif + sound + Array(repeating: 0x41, count: 20)), into: b), original: url, .jpeg),
+                "sound EXIF")
+        let xmp = JPEGMetadataFilter.xmpHeader
+        #expect(try rejects(inserting(appSegment(0xE1, xmp + Array("<x:xmpmeta><rdf".utf8)), into: b), original: url, .jpeg), "XMP")
+        let photoshop = JPEGMetadataFilter.photoshopHeader
+        let resource = Array("8BIM".utf8) + [0x04, 0x04, 0, 0, 0, 0, 0, 12] + [0x1C, 2, 80, 0, 20] + Array("Jane".utf8) + [0, 0, 0]
+        #expect(try rejects(inserting(appSegment(0xED, photoshop + resource), into: b), original: url, .jpeg), "IPTC length")
+
+        // A broken segment the original already had is the original's, not ours.
+        let broken = dir.appending(path: "broken-exif.jpg")
+        let withBrokenEXIF = inserting(appSegment(0xE1, exif + tiff), into: b)
+        try Data(withBrokenEXIF).write(to: broken)
+        #expect(try !rejects(withBrokenEXIF, original: broken, .jpeg))
+    }
+
     // MARK: - HEIF
 
     @Test func damagedHEIFsAreRejected() throws {
         let url = write("a.heic", .heic)
         let b = try bytes(url)
+        let pitm = (0..<b.count - 4).first { b[$0..<$0 + 4].elementsEqual("pitm".utf8) }!
+        var missingItem = b
+        missingItem[pitm + 8] = 0x77; missingItem[pitm + 9] = 0x77
+        #expect(try rejects(missingItem, original: url, .heic), "primary item missing")
         #expect(try rejects(Array(b.dropLast(1)), original: url, .heic), "truncated")
         #expect(try rejects(b + [0, 0, 0], original: url, .heic), "trailing bytes")
         var brand = b
         brand[8] = UInt8(ascii: "a")
         #expect(try rejects(brand, original: url, .heic), "brand changed")
+    }
+
+    // MARK: - Fuzzing
+
+    /// Thousands of damaged versions of sound files: the check must never
+    /// stop the app, and must reject every truncated file.
+    @Test func damageNeverCrashesTheCheck() async throws {
+        var seed: UInt64 = 0x5EED
+        func random(_ n: Int) -> Int {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Int((seed >> 33) % UInt64(max(n, 1)))
+        }
+        let files: [(URL, ImageFormat)] = [
+            (write("f.jpg", .jpeg), .jpeg),
+            (write("fp.jpg", .jpeg, [kCGImagePropertyJFIFDictionary: [kCGImagePropertyJFIFIsProgressive: true]]), .jpeg),
+            (write("f.png", .png), .png),
+            (write("f.heic", .heic), .heic),
+            (try await webp(), .webp),
+        ]
+        for (url, format) in files {
+            let b = try bytes(url)
+            let reference = StructureCheck.Reference(original: url, format: format)
+            for _ in 0..<4000 {
+                var m = b
+                switch random(4) {
+                case 0: m[random(m.count)] = UInt8(random(256))
+                case 1: m.insert(contentsOf: (0..<1 + random(8)).map { _ in UInt8(random(256)) }, at: random(m.count))
+                case 2: m.removeSubrange(random(m.count / 2)..<m.count / 2 + random(m.count / 2))
+                default:
+                    let cut = random(m.count - 1)
+                    // A sound file cut short is never sound.
+                    #expect(throws: VerificationError.self, "\(url.lastPathComponent) cut at \(cut)") {
+                        try StructureCheck.verify(ByteView(Array(m.prefix(cut))), against: reference)
+                    }
+                    continue
+                }
+                _ = try? StructureCheck.verify(ByteView(m), against: reference)
+            }
+        }
     }
 }
