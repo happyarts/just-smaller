@@ -68,6 +68,37 @@ else
 	echo "note: no download-cache; run Tests/corpus/fetch-real-images.py for real photos"
 fi
 
+# --- rare codings: arithmetic, restart markers, 12 bit, lossless JPEG; SVG in UTF-16
+# Rewritten losslessly from the real photos above and libjpeg-turbo's own test
+# images, with the tools Tools/build.sh builds.
+TURBO=$HERE/../../build/work/libjpeg-turbo/install/bin
+TESTIMAGES=$HERE/../../Vendor/libjpeg-turbo/testimages
+if [ -x "$TURBO/jpegtran" ] && [ -d "$CORPUS/full/real-photo-jpeg" ]; then
+	mkdir -p "$CORPUS/full/rare-jpeg"
+	n=0
+	find "$CORPUS/full/real-photo-jpeg" -iname "*.jpg" -size +200k | LC_ALL=C sort | head -3 | while IFS= read -r f; do
+		n=$((n + 1)); out=$CORPUS/full/rare-jpeg
+		"$TURBO/jpegtran" -copy all -arithmetic "$f" > "$out/arithmetic-$n.jpg"
+		"$TURBO/jpegtran" -copy all -progressive -arithmetic "$f" > "$out/arithmetic-progressive-$n.jpg"
+		"$TURBO/jpegtran" -copy all -restart 1 "$f" > "$out/restart-row-$n.jpg"
+		"$TURBO/jpegtran" -copy all -progressive -restart 7B "$f" > "$out/restart-progressive-$n.jpg"
+	done
+	cp -p "$TESTIMAGES/testimgari.jpg" "$TESTIMAGES/testimgint.jpg" "$TESTIMAGES/monkey12.jpg" "$CORPUS/full/rare-jpeg/"
+	"$TURBO/cjpeg" -precision 12 -quality 90 "$TESTIMAGES/testorig.ppm" > "$CORPUS/full/rare-jpeg/precision-12.jpg"
+	"$TURBO/cjpeg" -lossless 1 "$TESTIMAGES/testorig.ppm" > "$CORPUS/full/rare-jpeg/lossless.jpg"
+	"$TURBO/cjpeg" -restart 3 -sample 2x2,1x1,1x1 -quality 85 "$TESTIMAGES/testorig.ppm" > "$CORPUS/full/rare-jpeg/restart-blocks.jpg"
+else
+	echo "note: run Tools/build.sh and fetch-real-images.py for the rare JPEG codings"
+fi
+if [ -d "$CORPUS/full/real-svg" ]; then
+	mkdir -p "$CORPUS/full/svg-utf16"
+	find "$CORPUS/full/real-svg" -iname "*.svg" | LC_ALL=C sort | head -3 | while IFS= read -r f; do
+		b=$(basename "$f" .svg)
+		sed 's/encoding="[Uu][Tt][Ff]-8"/encoding="UTF-16"/' "$f" | iconv -f UTF-8 -t UTF-16 > "$CORPUS/full/svg-utf16/$b-utf16.svg" || true
+		sed 's/encoding="[Uu][Tt][Ff]-8"/encoding="UTF-16"/' "$f" | iconv -f UTF-8 -t UTF-16BE > "$CORPUS/full/svg-utf16/$b-utf16be.svg" || true
+	done
+fi
+
 # --- quick tier: the edge cases plus a few real files of each format --------
 cp -p "$CORPUS/full/edge/"* "$CORPUS/quick/"
 for d in $(ls "$CORPUS/full" | grep -v "^edge$"); do

@@ -12,7 +12,12 @@ enum SVGContent {
 
     /// Why the file can't be checked, or nil.
     static func uncheckableReason(_ url: URL) -> String? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        guard var data = try? Data(contentsOf: url) else { return nil }
+        // UTF-16 is read as the UTF-8 text it becomes.
+        if SVGText.encoding(data) != .utf8 {
+            guard let converted = SVGText.utf8(data) else { return String(localized: "Couldn’t be read completely", bundle: .module) }
+            data = converted
+        }
         let scanner = Scanner()
         let parser = XMLParser(data: data)
         parser.delegate = scanner

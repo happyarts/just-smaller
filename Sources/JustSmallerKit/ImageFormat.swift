@@ -71,7 +71,13 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
     }
 
     private static func looksLikeSVG(_ data: Data) -> Bool {
-        guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else { return false }
+        var text: String?
+        if case let .utf16(bigEndian, _) = SVGText.encoding(data) {
+            text = String(data: data.prefix(data.count & ~1), encoding: bigEndian ? .utf16BigEndian : .utf16LittleEndian)
+        } else {
+            text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1)
+        }
+        guard let text else { return false }
         return text.range(of: "<svg", options: .caseInsensitive) != nil
     }
 }

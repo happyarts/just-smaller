@@ -441,6 +441,16 @@
         }
       }
     },
+    "text changed": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text verändert"
+          }
+        }
+      }
+    },
     "the decoder reports damaged data": {
       "localizations": {
         "de": {

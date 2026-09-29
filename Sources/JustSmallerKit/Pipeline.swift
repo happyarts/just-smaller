@@ -34,6 +34,10 @@ struct FileFacts: Sendable {
     var hasSecondaryImage = false
     var isAnimated = false
     var bitsPerComponent = 8
+    /// SVG in UTF-16.
+    var isUTF16 = false
+    /// SVG content the rendering comparison can't vouch for.
+    var isUncheckableSVG = false
 }
 
 /// The optimizers for each format, as stages. The candidates within a stage
@@ -81,7 +85,9 @@ enum Pipeline {
         case .svg:
             // Lossless keeps the geometry exact to five digits; lossy allows
             // oxvg's (svgo's) approximations such as curves turned into arcs.
-            return [[oxvg(lossless: !s.lossy, metadata: s.metadata)]]
+            let optimize = [oxvg(lossless: !s.lossy, metadata: s.metadata)]
+            if facts.isUncheckableSVG { return [[svgUTF8()]] }
+            return facts.isUTF16 ? [[svgUTF8()], optimize] : [optimize]
 
         case .heic:
             // Metadata is filtered without touching the image. The image can
@@ -248,6 +254,15 @@ enum Pipeline {
     }
 
     // MARK: - SVG
+
+    /// The same text in UTF-8, which the optimizer and the renderer read.
+    static func svgUTF8() -> Candidate {
+        Candidate(name: "UTF-8") { input, output, _ in
+            guard let converted = SVGText.utf8(try Data(contentsOf: input)) else { return false }
+            try converted.write(to: output)
+            return true
+        }
+    }
 
     /// The OXVG optimiser through Tools/svg-tool, which writes to stdout
     /// and never reads a configuration other than the one it is given.

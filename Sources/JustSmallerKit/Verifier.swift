@@ -19,6 +19,13 @@ enum Verifier {
                        exactUnderAlpha: Bool = true) async throws {
         try StructureCheck.verify(original: original, result: result, format: format)
         if format == .svg {
+            // UTF-16 → UTF-8 is proven on the text itself; the renderer reads UTF-8 only.
+            if let a = try? Data(contentsOf: original), SVGText.encoding(a) != .utf8 {
+                guard SVGText.isSameText(original: a, result: try Data(contentsOf: result)) else {
+                    throw VerificationError(reason: String(localized: "text changed", bundle: .module))
+                }
+                return
+            }
             try await compareRenderings(original, result, strict: pixelsMustMatch)
             return
         }

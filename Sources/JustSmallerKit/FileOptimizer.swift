@@ -71,11 +71,19 @@ public struct FileOptimizer: Sendable {
                                 size: size)
             }
         }
-        if format == .svg, let reason = SVGContent.uncheckableReason(url) {
-            return .skipped(reason: String(localized: "\(reason) – left unchanged, it can’t be checked safely", bundle: .module), size: size)
-        }
         var facts = Self.facts(about: url, format: format, size: size)
         facts.hasSecondaryImage = hasSecondaryImage
+        // An SVG the rendering can't check still gets re-encoded from UTF-16:
+        // that step is proven on the text. Only when all metadata stays,
+        // since filtering it needs the rendering check.
+        if format == .svg, let reason = SVGContent.uncheckableReason(url) {
+            let convertible = facts.isUTF16 && settings.metadata == .keep
+                && (try? Data(contentsOf: url)).flatMap(SVGText.utf8) != nil
+            guard convertible else {
+                return .skipped(reason: String(localized: "\(reason) – left unchanged, it can’t be checked safely", bundle: .module), size: size)
+            }
+            facts.isUncheckableSVG = true
+        }
         let stages = Pipeline.stages(for: format, facts: facts, settings: settings)
         guard !stages.isEmpty else {
             return .skipped(reason: Pipeline.reasonForNoStages(format, facts: facts, settings: settings), size: size)
@@ -235,7 +243,8 @@ public struct FileOptimizer: Sendable {
     static func hasContentCredentials(_ url: URL, format: ImageFormat) -> Bool {
         guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
         if format == .svg {
-            return data.range(of: Data("c2pa:manifest".utf8)) != nil
+            let text = SVGText.encoding(data) == .utf8 ? data : SVGText.utf8(data) ?? data
+            return text.range(of: Data("c2pa:manifest".utf8)) != nil
         }
         return data.range(of: Data("jumb".utf8)) != nil && data.range(of: Data("c2pa".utf8)) != nil
     }
@@ -320,6 +329,9 @@ public struct FileOptimizer: Sendable {
         }
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
             facts.jpegQuality = JPEGQuality.estimate(data)
+        }
+        if format == .svg, let data = try? Data(contentsOf: url, options: .alwaysMapped), SVGText.encoding(data) != .utf8 {
+            facts.isUTF16 = true
         }
         if format == .webp, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
             let chunks = WebPChunks(data)
