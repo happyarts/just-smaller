@@ -8,6 +8,16 @@
         "preserve": null,
         "preservePrefixes": null,
         "force": false
+      },
+      "removeUnknownsAndDefaults": {
+        "unknownContent": true,
+        "unknownAttrs": true,
+        "defaultAttrs": true,
+        "defaultMarkupDeclarations": true,
+        "uselessOverrides": true,
+        "keepDataAttrs": true,
+        "keepAriaAttrs": true,
+        "keepRoleAttr": true
       }
     },
     "omit": [

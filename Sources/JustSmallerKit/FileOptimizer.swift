@@ -105,7 +105,8 @@ public struct FileOptimizer: Sendable {
         var metadataFailure: String?
         stages: for (n, stage) in stages.enumerated() {
             try Task.checkCancellation()
-            progress(stage.map(\.name).joined(separator: ", "))
+            var shown = Set<String>()
+            progress(stage.map(\.name).filter { shown.insert($0).inserted }.joined(separator: ", "))
             let input = best
             let attempts = await withTaskGroup(of: Attempt.self) { group in
                 for (k, candidate) in stage.enumerated() {

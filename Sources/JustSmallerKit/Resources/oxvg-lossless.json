@@ -55,7 +55,7 @@
         "uselessOverrides": true,
         "keepDataAttrs": true,
         "keepAriaAttrs": true,
-        "keepRoleAttr": false
+        "keepRoleAttr": true
       },
       "removeNonInheritableGroupAttrs": true,
       "removeUselessStrokeAndFill": {

@@ -398,6 +398,60 @@ final class FileOptimizerTests {
         #expect(result.contains("id=\"icon-first\"") && result.contains("id=\"icon-second\""))
     }
 
+    /// Ids an editor numbered itself go, even when referenced (then shortened);
+    /// named ids and the role stay.
+    @Test(arguments: [false, true])
+    func svgLosesOnlyGeneratedIDs(lossy: Bool) async throws {
+        var settings = self.settings
+        settings.lossy = lossy
+        settings.outputLossy = .replace
+        let url = dir.appending(path: "ids-\(lossy).svg")
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" viewBox="0 0 200 100" role="img">
+              <defs><linearGradient id="linearGradient4601"><stop offset="0" stop-color="#f00"/><stop offset="1" stop-color="#00f"/></linearGradient></defs>
+              <g id="layer1">
+                <rect id="rect1234" x="10" y="10" width="80" height="80" fill="url(#linearGradient4601)"/>
+                <circle id="logo" cx="150" cy="50" r="40" fill="#0a0"/>
+              </g>
+            </svg>
+            """.utf8).write(to: url)
+        guard case .optimized = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) else {
+            Issue.record("not optimized"); return
+        }
+        let result = try String(contentsOf: url, encoding: .utf8)
+        #expect(result.contains("id=\"logo\""))
+        #expect(!result.contains("layer1") && !result.contains("rect1234") && !result.contains("linearGradient4601"))
+        #expect(result.contains("url(#"))
+        #expect(result.contains("role=\"img\"")) // screen readers
+    }
+
+    /// Rounding a transform that scales a large drawing down shows; the more
+    /// precise run keeps enough digits and is used instead.
+    @Test func svgWhoseRoundingShowsIsOptimizedPrecisely() async throws {
+        let url = dir.appending(path: "stripes.svg")
+        let d = (0..<12).map { "M\(300 + $0 * 8) 20h3v400h-3z" }.joined()
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 100 100">
+              <!-- stripes -->
+              <path transform="matrix(0.21329178,0,0,0.21342916,-50,2)" d="\(d)" stroke="#000" stroke-width="0.5"/>
+            </svg>
+            """.utf8).write(to: url)
+        #expect(try await isRejected(url, run: .idsKept), "the standard run must fail, or this test proves nothing")
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
+    }
+
+    /// Runs one SVG candidate and checks its result against the original.
+    private func isRejected(_ url: URL, run: Pipeline.SVGRun) async throws -> Bool {
+        let output = dir.appending(path: "once-\(UUID().uuidString).svg")
+        _ = try await Pipeline.oxvg(lossless: true, metadata: settings.metadata, run: run).run(url, output, dir)
+        do {
+            try await Verifier.verify(original: url, result: output, format: .svg, pixelsMustMatch: true)
+            return false
+        } catch is VerificationError {
+            return true
+        }
+    }
+
     @Test func sameNamesFromDifferentFoldersGetTheirOwnResults() async throws {
         let fm = FileManager.default
         let out = dir.appending(path: "out")

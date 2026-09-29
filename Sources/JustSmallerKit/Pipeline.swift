@@ -85,7 +85,13 @@ enum Pipeline {
         case .svg:
             // Lossless keeps the geometry exact to five digits; lossy allows
             // oxvg's (svgo's) approximations such as curves turned into arcs.
-            let optimize = [oxvg(lossless: !s.lossy, metadata: s.metadata)]
+            // Each runs with the ids as they are and with generated ids
+            // shortened or removed (fewer ids can also mean a bigger file:
+            // collapsed groups repeat their attributes on every child);
+            // lossless also more precisely, for drawings where the standard
+            // rounding shows. The smallest valid result wins.
+            let runs: [SVGRun] = s.lossy ? [.idsKept, .generatedIDsRemoved] : [.idsKept, .generatedIDsRemoved, .precise]
+            let optimize = runs.map { oxvg(lossless: !s.lossy, metadata: s.metadata, run: $0) }
             if facts.isUncheckableSVG { return [[svgUTF8()]] }
             return facts.isUTF16 ? [[svgUTF8()], optimize] : [optimize]
 
@@ -264,17 +270,25 @@ enum Pipeline {
         }
     }
 
+    enum SVGRun {
+        /// Every id stays, as the bundled configurations have it.
+        case idsKept
+        /// Ids SVGIDs finds safe to touch are shortened or removed.
+        case generatedIDsRemoved
+        /// As generatedIDsRemoved, with more digits in transforms and paths
+        /// and transforms left where they are.
+        case precise
+    }
+
     /// The OXVG optimiser through Tools/svg-tool, which writes to stdout
     /// and never reads a configuration other than the one it is given.
-    static func oxvg(lossless: Bool, metadata: MetadataHandling) -> Candidate {
+    static func oxvg(lossless: Bool, metadata: MetadataHandling, run: SVGRun) -> Candidate {
         Candidate(name: "OXVG", isLossy: !lossless) { input, output, work in
-            // Both configurations keep every id: other files and pages refer to
-            // them (sprites, <use href="icons.svg#x">), which no rendering of
-            // this file can show.
-            guard let bundled = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json") else {
-                throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
-            }
-            let config = try omitting(jobsKeeping(metadata), from: bundled, in: work)
+            let preserve = run == .idsKept ? nil : SVGIDs.toPreserve(in: input)
+            // No id to touch: the run keeping them all gives the same result.
+            if run == .generatedIDsRemoved, preserve == nil { return false }
+            let config = try configuration(lossless: lossless, omitting: jobsKeeping(metadata), precise: run == .precise,
+                                           preservingIDs: preserve, in: work)
             try await ToolRunner.run("svg-tool", ["optimise", "--config", config.path, input.path], stdout: output, in: work)
             return true
         }
@@ -292,20 +306,43 @@ enum Pipeline {
         }
     }
 
-    /// A copy of the configuration without the given jobs.
-    private static func omitting(_ metadataJobs: [String], from config: URL, in work: URL) throws -> URL {
-        guard !metadataJobs.isEmpty, var root = try JSONSerialization.jsonObject(with: Data(contentsOf: config)) as? [String: Any],
-              var optimise = root["optimise"] as? [String: Any] else { return config }
-        var jobs = optimise["jobs"] as? [String: Any] ?? [:]
-        for job in metadataJobs { jobs[job] = nil }
+    /// A copy of the bundled configuration without the given jobs,
+    /// optionally more precise, and with ids shortened and removed except
+    /// `preservingIDs` (nil: every id stays, as bundled).
+    static func configuration(lossless: Bool, omitting metadataJobs: [String], precise: Bool,
+                              preservingIDs: [String]?, in work: URL) throws -> URL {
+        guard let bundled = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json"),
+              var root = try JSONSerialization.jsonObject(with: Data(contentsOf: bundled)) as? [String: Any],
+              var optimise = root["optimise"] as? [String: Any], var jobs = optimise["jobs"] as? [String: Any]
+        else { throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module)) }
+        let omit = metadataJobs + (precise ? ["applyTransforms"] : [])
+        for job in omit { jobs[job] = nil }
+        if precise {
+            jobs["convertTransform"] = merged(jobs["convertTransform"], ["transformPrecision": 9, "floatPrecision": 7])
+            if var pathData = jobs["convertPathData"] as? [String: Any] {
+                pathData["tolerance"] = merged(pathData["tolerance"], ["precision": 7])
+                jobs["convertPathData"] = pathData
+            }
+        }
+        if let preservingIDs {
+            jobs["cleanupIds"] = merged(jobs["cleanupIds"], ["remove": true, "minify": true, "preserve": preservingIDs])
+        }
         optimise["jobs"] = jobs
         // Jobs from a preset ("extends") are left out by their snake_case name.
-        let snake = metadataJobs.map { $0.replacing(/([a-z])([A-Z])/) { "\($0.1)_\($0.2.lowercased())" }.lowercased() }
+        let snake = omit.map { $0.replacing(/([a-z])([A-Z])/) { "\($0.1)_\($0.2.lowercased())" }.lowercased() }
         optimise["omit"] = (optimise["omit"] as? [String] ?? []) + snake
         root["optimise"] = optimise
         let url = work.appending(path: "oxvg-config-\(UUID().uuidString).json")
         try JSONSerialization.data(withJSONObject: root).write(to: url)
         return url
+    }
+
+    /// A job's options with some replaced; a job the configuration doesn't
+    /// list stays as it is.
+    private static func merged(_ options: Any?, _ changes: [String: Any]) -> Any? {
+        guard var options = options as? [String: Any] else { return options }
+        options.merge(changes) { _, new in new }
+        return options
     }
 
 
