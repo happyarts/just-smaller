@@ -36,7 +36,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 | Format | Lossless | Lossy |
 |---|---|---|
 | PNG | own metadata filter + the PNG part of [ECT](https://github.com/fhanau/Efficient-Compression-Tool) (`Tools/ect-png`); animated PNGs: [OxiPNG](https://github.com/oxipng/oxipng) | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
-| JPEG | own metadata filter + jpegtran ([mozjpeg](https://github.com/mozilla/mozjpeg)), proven by comparing DCT coefficients (`Tools/jpegcmp`, [libjpeg-turbo](https://libjpeg-turbo.org)) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
+| JPEG | own metadata filter + own scan optimizer (`Tools/jpeg-scan`: finds the progressive scan split that codes each image smallest, written with [libjpeg-turbo](https://libjpeg-turbo.org)), proven by comparing DCT coefficients (`Tools/jpegcmp`) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
 | WebP | cwebp ([libwebp](https://chromium.googlesource.com/webm/libwebp)), lossless files only | — |
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
 | HEIC | — | Apple ImageIO, keeping HDR gain maps and depth data |
@@ -80,5 +80,5 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 
 Just Smaller's own code is under the [Mozilla Public License 2.0](LICENSE).
 The bundled optimizers keep their own licences: OxiPNG, OXVG, quantizr
-(MIT); libwebp, jpegli, mozjpeg and libjpeg-turbo (BSD-style). They run as
+(MIT); libwebp, jpegli and libjpeg-turbo (BSD-style). They run as
 separate programs.

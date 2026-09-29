@@ -68,6 +68,8 @@ enum XMPFilter {
             }
         }
         guard (rdf.children ?? []).contains(where: { $0.kind == .element }), let root = document.rootElement() else { return nil }
+        // The toolkit's name and version: which software wrote the packet.
+        root.removeAttribute(forName: "x:xmptk")
         compact(root)
         pruneNamespaces(root)
         let body = root.xmlString(options: [.nodeCompactEmptyElement])
@@ -104,6 +106,7 @@ enum XMPFilter {
     private static func keeps(_ node: XMLNode, in description: XMLElement, level: MetadataHandling) -> Bool {
         guard let ns = namespace(of: node, in: description), let name = node.localName else { return false }
         if ns == MetadataPolicy.NS.xmpNote { return false } // HasExtendedXMP: merged into this packet
+        if MetadataPolicy.isDerivable(xmpNamespace: ns, name: name) { return false }
         return MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: ns, name: name), at: level)
     }
 

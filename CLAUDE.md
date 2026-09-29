@@ -2,7 +2,7 @@
 
 - `Tools/build.sh` builds all optimizers into `build/tools` (Rust via rustup,
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
-  tags (mozjpeg, ECT: a master commit); build.sh only fetches missing ones and never moves
+  tags (ECT: a master commit); build.sh only fetches missing ones and never moves
   a checkout.
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also

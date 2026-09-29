@@ -40,7 +40,7 @@ enum Verifier {
         guard framesA <= 1 || framesB > 1, format == .gif || format == .png || format == .webp || framesB >= framesA else {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
-        // jpegtran copies the profile byte for byte. Other formats may store an
+        // jpeg-scan copies the profile byte for byte. Other formats may store an
         // equivalent profile differently (oxipng writes an sRGB chunk instead of
         // an sRGB ICC profile), which the pixel comparison below catches.
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {

@@ -72,8 +72,10 @@ reported = [json.loads(l)["file"] for l in open(os.path.join(work, "results.json
 expected = len(os.listdir(os.path.join(work, "orig")))
 if len(reported) != expected or len(set(reported)) != len(reported):
     fails.append(("—", f"REPORTED {len(reported)} RESULTS ({len(set(reported))} FILES) FOR {expected} FILES"))
+records = {}
 for line in open(os.path.join(work, "results.jsonl")):
     r = json.loads(line)
+    records[os.path.basename(r["file"])] = r
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
         fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("reason", "")))
 def render(p, outdir):
@@ -97,7 +99,15 @@ for n in names:
     cat[0] += 1; cat[1] += sa; cat[2] += sb
     same = open(a, "rb").read() == open(b, "rb").read()
     if n.startswith("broken") and not same: fails.append((n, "TOUCHED A BROKEN FILE"))
-    if sb > sa: fails.append((n, f"GREW {sa} -> {sb}"))
+    # A file may grow only when private metadata had to go (the promise
+    # beats the size); then its only tool is the metadata filter.
+    tools = records.get(n, {}).get("tools", [])
+    if sb > sa and tools != ["Metadata"]: fails.append((n, f"GREW {sa} -> {sb}"))
+    # Also files that stay as they are now but got smaller before: a tool
+    # that stopped working shows up here.
+    if n in baseline and sb > baseline[n]:
+        why = records.get(n, {}).get("reason") or "+".join(tools) or records.get(n, {}).get("status", "")
+        regress.append((n, baseline[n], f"{sb}  ({why})"))
     if same: continue
     cat[3] += 1
     if kind in (".jpg", ".jpeg"):
@@ -118,8 +128,6 @@ for n in names:
         m = re.search(r"up to (\d+) pixels", r.stdout)
         if r.returncode != 0 and not (m and int(m.group(1)) <= 262):
             fails.append((n, "RENDER: " + r.stdout.strip()))
-    if n in baseline and sb > baseline[n]:
-        regress.append((n, baseline[n], sb))
 print(f"\n{'type':<8}{'files':>6}{'changed':>8}{'before':>12}{'after':>12}{'saved':>8}")
 tot = [0, 0, 0, 0]
 for ext, (c, sa, sb, ch) in sorted(per.items()):

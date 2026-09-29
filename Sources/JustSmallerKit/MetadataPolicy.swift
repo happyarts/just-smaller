@@ -54,6 +54,7 @@ enum MetadataPolicy {
         static let aux = "http://ns.adobe.com/exif/1.0/aux/"
         static let lightroom = "http://ns.adobe.com/lightroom/1.0/"
         static let mwgKeywords = "http://www.metadataworkinggroup.com/schemas/keywords/"
+        static let pdf = "http://ns.adobe.com/pdf/1.3/"
     }
 
     /// Namespaces that describe how the image is to be shown or what else the
@@ -142,10 +143,36 @@ enum MetadataPolicy {
             return name == "hierarchicalSubject" || name == "weightedFlatSubject" ? .imageInfo : nil
         case NS.mwgKeywords:
             return .imageInfo
+        case NS.pdf:
+            // Design tools (Canva, Illustrator) name the creator here; ImageIO
+            // reads it as dc:creator. The producer is software.
+            switch name {
+            case "Author": return .rights
+            case "Keywords", "Title", "Subject": return .imageInfo
+            default: return nil
+            }
         default:
             // Editing history (xmpMM), develop settings (crs), face regions
             // (mwg-rs, Apple, Microsoft) and every namespace not listed.
             return nil
+        }
+    }
+
+    /// XMP properties that only restate what the image itself says (its
+    /// format, colour mode, pixel size, data layout) or when its metadata
+    /// was last touched. Nobody entered them; readers take the real values
+    /// from the image. They go in every level but `.keep`, in XMP only (EXIF
+    /// keeps its own copies, which the EXIF standard asks for).
+    static func isDerivable(xmpNamespace ns: String, name: String) -> Bool {
+        switch ns {
+        case NS.dc: name == "format"
+        case NS.photoshop: name == "ColorMode"
+        case NS.xmp: name == "MetadataDate"
+        case NS.exif: name == "PixelXDimension" || name == "PixelYDimension"
+        case NS.tiff:
+            ["ImageWidth", "ImageLength", "BitsPerSample", "Compression", "PhotometricInterpretation",
+             "SamplesPerPixel", "PlanarConfiguration"].contains(name)
+        default: false
         }
     }
 

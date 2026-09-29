@@ -51,7 +51,7 @@ enum Pipeline {
             return stages
 
         case .jpeg:
-            // jpegtran rewrites the entropy coding (Huffman tables, progressive
+            // jpeg-scan rewrites the entropy coding (Huffman tables, progressive
             // scans) without touching the DCT coefficients: lossless. It keeps
             // whatever markers are left; filtering is done by our own filter.
             // Our tools rewrite only the first image; ImageIO keeps them all.
@@ -62,7 +62,7 @@ enum Pipeline {
             // lossless steps below are all it gets (jpegoptim's rule).
             if s.lossy, (facts.jpegQuality ?? 100) > s.jpegQuality { stages.append([jpegli(quality: s.jpegQuality)]) }
             stages.append([jpegMetadata(s.metadata, orientation: facts.orientation)])
-            stages.append([jpegtran()])
+            stages.append([jpegScan(effort: s.effort)])
             return stages
 
         case .gif:
@@ -193,10 +193,16 @@ enum Pipeline {
         metadata(level) { try JPEGMetadataFilter.filter($0, level: level, orientation: orientation) }
     }
 
-    static func jpegtran() -> Candidate {
-        Candidate(name: "jpegtran") { input, output, work in
-            try await ToolRunner.run("jpegtran", ["-copy", "all", "-optimize", "-progressive",
-                                                  "-outfile", output.path, input.path], in: work)
+    /// Tools/jpeg-scan: finds the progressive scan split that codes this
+    /// image's coefficients smallest, and writes it with libjpeg-turbo.
+    /// Exit status 3: a JPEG it doesn't handle (12-bit, lossless, arithmetic).
+    static func jpegScan(effort: Effort) -> Candidate {
+        Candidate(name: "jpeg-scan") { input, output, work in
+            do {
+                try await ToolRunner.run("jpeg-scan", ["--effort", effort.rawValue, input.path, output.path], in: work)
+            } catch let error as ToolError where error.status == 3 {
+                return false
+            }
             return true
         }
     }

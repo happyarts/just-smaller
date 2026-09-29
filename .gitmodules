@@ -10,10 +10,6 @@
 	path = Vendor/libwebp
 	url = https://github.com/webmproject/libwebp.git
 	shallow = true
-[submodule "Vendor/mozjpeg"]
-	path = Vendor/mozjpeg
-	url = https://github.com/mozilla/mozjpeg.git
-	shallow = true
 [submodule "Vendor/jpegli"]
 	path = Vendor/jpegli
 	url = https://github.com/google/jpegli.git

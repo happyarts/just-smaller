@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
-# Vendor/ (git submodules pinned to released versions; mozjpeg and ECT to a
-# master commit, since their last releases lack years of fixes) and Tools/.
+# Vendor/ (git submodules pinned to released versions; ECT to a master
+# commit, since its last release lacks years of fixes) and Tools/.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -32,7 +32,7 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp mozjpeg libjpeg-turbo jpegli ect; do
+for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
@@ -54,28 +54,21 @@ run() { # name, command… — output goes to build/work/NAME.log, shown on fail
 CMAKE_COMMON="-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
 	-DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local -DBUILD_SHARED_LIBS=OFF"
 
-# JPEG is split between two libjpeg flavours:
-# - libjpeg-turbo (actively maintained, current security fixes) for
-#   everything that reads untrusted JPEGs to check or decode them: jpegcmp
-#   and jpegli's JPEG input;
-# - mozjpeg only for jpegtran, for its scan optimization. Its output is
-#   checked by the libjpeg-turbo based jpegcmp.
+# JPEG: libjpeg-turbo (actively maintained, current security fixes) for
+# everything — our scan optimizer jpeg-scan, jpegcmp and jpegli's JPEG input.
 log "libjpeg-turbo"
 TURBO=$WORK/libjpeg-turbo
 run turbo-configure cmake -S "$ROOT/Vendor/libjpeg-turbo" -B "$TURBO" $CMAKE_COMMON -DENABLE_SHARED=OFF \
 	-DWITH_TURBOJPEG=OFF -DCMAKE_INSTALL_PREFIX="$TURBO/install"
 run turbo cmake --build "$TURBO" -j "$JOBS" --target install
 
-log "mozjpeg"
-MOZ=$WORK/mozjpeg
-run mozjpeg-configure cmake -S "$ROOT/Vendor/mozjpeg" -B "$MOZ" $CMAKE_COMMON -DENABLE_SHARED=OFF \
-	-DPNG_SUPPORTED=OFF -DWITH_TURBOJPEG=OFF -DCMAKE_INSTALL_PREFIX="$MOZ/install"
-run mozjpeg cmake --build "$MOZ" -j "$JOBS" --target install
-cp "$MOZ/install/bin/jpegtran" "$OUT/jpegtran"
-
 log "jpegcmp"
 cc -O2 -mcpu=apple-m1 -mmacosx-version-min=26.0 -I"$TURBO/install/include" \
 	"$ROOT/Tools/jpegcmp/main.c" "$TURBO/install/lib/libjpeg.a" -o "$OUT/jpegcmp"
+
+log "jpeg-scan"
+cc -O2 -mcpu=apple-m1 -mmacosx-version-min=26.0 -I"$TURBO/install/include" \
+	"$ROOT/Tools/jpeg-scan/main.c" "$TURBO/install/lib/libjpeg.a" -o "$OUT/jpeg-scan"
 
 log "jpegli"
 JPEGLI=$WORK/jpegli
@@ -122,7 +115,7 @@ cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml" --locked
 
-for tool in jpegtran jpegcmp cjpegli cwebp ect-png oxipng svg-tool png-quantize; do
+for tool in jpeg-scan jpegcmp cjpegli cwebp ect-png oxipng svg-tool png-quantize; do
 	if [ -n "$ENTITLEMENTS" ]; then
 		codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
 	else

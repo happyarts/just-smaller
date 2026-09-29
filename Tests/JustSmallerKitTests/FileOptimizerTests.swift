@@ -487,11 +487,11 @@ final class FileOptimizerTests {
         await #expect(throws: VerificationError.self) {
             try await Verifier.verify(original: a, result: b, format: .jpeg, pixelsMustMatch: true)
         }
-        // jpegtran's output carries the same coefficients and earns the seal.
+        // The rewritten entropy coding carries the same coefficients and earns the seal.
         guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(a) else {
             Issue.record("not optimized"); return
         }
-        #expect(tools.contains("jpegtran"))
+        #expect(tools.contains("jpeg-scan"))
         #expect(identical)
     }
 

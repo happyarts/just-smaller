@@ -3,7 +3,7 @@ import Foundation
 /// Finds JPEGs that are more than one picture. HDR gain maps (Apple, Ultra
 /// HDR, ISO 21496), motion photos and stereo (MPO) files store a second image
 /// or a video after the first image's end, indexed by an "MPF" segment or
-/// found by position. jpegtran rewrites only the first image and drops the
+/// found by position. jpeg-scan rewrites only the first image and drops the
 /// rest, and the coefficient check compares only the first image, so such
 /// files are left alone.
 enum JPEGStructure {
