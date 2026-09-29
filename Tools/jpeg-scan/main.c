@@ -16,6 +16,10 @@
 // script is written; it can never damage an image (and every result is
 // checked by jpegcmp anyway).
 //
+// Efforts: fast searches a coarse set of band boundaries once; balanced and
+// thorough refine around the chosen boundaries in three rounds (from a
+// coarse and a finer start); maximum allows every boundary.
+//
 // Exit status: 0 written, 2 unreadable or failed, 3 not supported (12-bit
 // or lossless JPEG, damaged image data): the caller keeps the input.
 
@@ -31,8 +35,7 @@
 // prices the ones the encoder will pay.
 extern void jpeg_gen_optimal_table(j_compress_ptr cinfo, JHUFF_TBL *htbl, long freq[]);
 
-// "fast" searches like balanced: writing the file takes most of the time.
-enum { EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
+enum { EFFORT_FAST, EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
 
 // Up to this many blocks (about 0.8 megapixels in colour) an image gets the
 // full search and a real-encode check at every effort: milliseconds there,
@@ -715,19 +718,21 @@ static void prefix_bands(double cost[64][64], int ncuts, double *best, int *from
 typedef struct {
     const Component *k;
     int refine, al;
+    const int *cuts;    // the band boundaries this pass may use
+    int ncuts;
     double (*cost)[64];
     double best[64];
     int from[64];
 } Pass;
 
 // Every component's passes are independent, so they run in parallel.
-static void solve_passes(Pass *passes, size_t n, const int *cuts, int ncuts) {
+static void solve_passes(Pass *passes, size_t n) {
     dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i) {
         Pass *p = &passes[i];
         p->cost = checked_malloc(64 * sizeof *p->cost);
-        if (p->refine) refine_costs(p->k, p->al, cuts, ncuts, p->cost);
-        else first_pass_costs(p->k, p->al, cuts, ncuts, p->cost);
-        prefix_bands(p->cost, ncuts, p->best, p->from);
+        if (p->refine) refine_costs(p->k, p->al, p->cuts, p->ncuts, p->cost);
+        else first_pass_costs(p->k, p->al, p->cuts, p->ncuts, p->cost);
+        prefix_bands(p->cost, p->ncuts, p->best, p->from);
     });
 }
 
@@ -936,28 +941,55 @@ static Plan progressive_plan(const Image *img, int effort) {
     const int *cuts = balanced_cuts;
     int ncuts = sizeof balanced_cuts / sizeof *cuts, max_al = 3;
     if (effort >= EFFORT_THOROUGH) { cuts = thorough_cuts; ncuts = thorough_n; }
-    // Every boundary costs time in proportion to the image; beyond this it
-    // stops being worth the wait.
-    long blocks = total_blocks(img);
-    if ((effort == EFFORT_MAXIMUM && blocks <= 200000) || blocks <= SMALL_IMAGE_BLOCKS) {
+    // Maximum, and small images at every effort, allow every boundary.
+    if (effort == EFFORT_MAXIMUM || total_blocks(img) <= SMALL_IMAGE_BLOCKS) {
         cuts = all_cuts;
         ncuts = 64;
-        max_al = 3;
     }
 
     Plan p;
     memset(&p, 0, sizeof p);
     DCPlan dc = plan_dc(img, 1);
     ACPlan ac[4];
-    // Per component: first passes at 0..max_al, then refinements 0..max_al-1.
-    int per = 2 * max_al + 1;
-    Pass passes[4 * 7];
-    for (int c = 0; c < img->ncomp; c++)
-        for (int j = 0; j < per; j++)
-            passes[c * per + j] = (Pass){.k = &img->comp[c], .refine = j > max_al, .al = j > max_al ? j - max_al - 1 : j};
-    solve_passes(passes, (size_t)(img->ncomp * per), cuts, ncuts);
-    for (int c = 0; c < img->ncomp; c++) ac[c] = plan_ac(&passes[c * per], &passes[c * per + max_al + 1], cuts, ncuts, max_al);
-    for (int i = 0; i < img->ncomp * per; i++) free(passes[i].cost);
+    int ccuts[4][64], nccuts[4];
+    for (int c = 0; c < img->ncomp; c++) {
+        memcpy(ccuts[c], cuts, (size_t)ncuts * sizeof *cuts);
+        nccuts[c] = ncuts;
+    }
+    // Three rounds unless every boundary is already allowed: each later one
+    // looks again, more finely, around the boundaries the round before chose
+    // (four either side), each component around its own. Earlier boundaries
+    // stay allowed, so a later round never finds less.
+    int rounds = ncuts == 64 || effort == EFFORT_FAST ? 1 : 3, radius = 4;
+    for (int round = 0; round < rounds; round++) {
+        // Per component: first passes at 0..max_al, then refinements 0..max_al-1.
+        int per = 2 * max_al + 1;
+        Pass passes[4 * 7];
+        for (int c = 0; c < img->ncomp; c++)
+            for (int j = 0; j < per; j++)
+                passes[c * per + j] = (Pass){.k = &img->comp[c], .refine = j > max_al, .al = j > max_al ? j - max_al - 1 : j,
+                                             .cuts = ccuts[c], .ncuts = nccuts[c]};
+        solve_passes(passes, (size_t)(img->ncomp * per));
+        for (int c = 0; c < img->ncomp; c++)
+            ac[c] = plan_ac(&passes[c * per], &passes[c * per + max_al + 1], ccuts[c], nccuts[c], max_al);
+        for (int i = 0; i < img->ncomp * per; i++) free(passes[i].cost);
+        if (round + 1 == rounds) break;
+        for (int c = 0; c < img->ncomp; c++) {
+            unsigned char allowed[65] = {0};
+            for (int i = 0; i < nccuts[c]; i++) allowed[ccuts[c][i]] = 1;
+            int chosen[200], nchosen = 0;
+            for (int b = 0; b <= ac[c].nbands; b++) chosen[nchosen++] = ac[c].start[b];
+            for (int a = 0; a < max_al; a++)
+                for (int b = 0; b <= ac[c].nref[a]; b++) chosen[nchosen++] = ac[c].ref[a][b];
+            for (int i = 0; i < nchosen; i++)
+                for (int d = -radius; d <= radius; d++) {
+                    int x = chosen[i] + d;
+                    if (x >= 1 && x <= 64) allowed[x] = 1;
+                }
+            nccuts[c] = 0;
+            for (int x = 1; x <= 64; x++) if (allowed[x]) ccuts[c][nccuts[c]++] = x;
+        }
+    }
 
     int all[4] = {0, 1, 2, 3};
     // DC first pass, then every component's first AC pass, then refinements
@@ -1201,9 +1233,11 @@ typedef struct Writer {
     size_t n, cap;
     unsigned long long acc;
     int nacc;
+    int count_only;     // only count the bytes (exact sizes for decisions)
 } Writer;
 
 static void put_byte(Writer *w, int v) {
+    if (w->count_only) { w->n++; return; }
     if (w->n == w->cap) {
         w->cap = w->cap ? w->cap * 2 : 1 << 16;
         w->d = realloc(w->d, w->cap);
@@ -1258,6 +1292,24 @@ static int build_table(const Stats *s, JHUFF_TBL *t) {
     return 1;
 }
 
+// Within one code length the order of the symbols is free, and it decides
+// their code values: the first gets the smallest. The most frequent symbols
+// get the codes with the fewest 1 bits, so fewer 0xFF bytes appear in the
+// data, each of which costs a stuffed 0x00.
+static void order_by_frequency(JHUFF_TBL *t, const Stats *s) {
+    int p = 0;
+    for (int len = 1; len <= 16; len++) {
+        int n = t->bits[len];
+        for (int i = p + 1; i < p + n; i++) { // insertion sort, most frequent first
+            UINT8 v = t->huffval[i];
+            int j = i - 1;
+            while (j >= p && s->freq[t->huffval[j]] < s->freq[v]) { t->huffval[j + 1] = t->huffval[j]; j--; }
+            t->huffval[j + 1] = v;
+        }
+        p += n;
+    }
+}
+
 // Canonical codes from the lengths (T.81 Annex C).
 static void make_code(const JHUFF_TBL *t, Code *c) {
     memset(c, 0, sizeof *c);
@@ -1281,12 +1333,69 @@ typedef struct {
 } Need;
 
 typedef struct {
-    int class_, first, last, alive, slot;
+    int class_, first, last, alive, slot, built;
     Stats hist;
-    double bytes;       // symbols and table
+    double bytes;       // symbols and table, estimated
     JHUFF_TBL table;
     Code code;
 } Group;
+
+// The scans with their needs, and which group serves each need.
+typedef struct {
+    const Image *img;
+    const Plan *p;
+    int sequential;
+    Need *needs;
+    const int *first_need;
+} Layout;
+
+// Development: write exactly what libjpeg writes (no shared tables, libjpeg's
+// symbol order), to test the writer against it.
+static int like_libjpeg = 0;
+
+static int ensure_table(Group *g) {
+    if (g->built) return 1;
+    if (!build_table(&g->hist, &g->table)) return 0;
+    if (!like_libjpeg) order_by_frequency(&g->table, &g->hist);
+    make_code(&g->table, &g->code);
+    g->built = 1;
+    return 1;
+}
+
+static int table_bytes(const Group *g) {
+    int count = 0;
+    for (int len = 1; len <= 16; len++) count += g->table.bits[len];
+    return 17 + count;
+}
+
+// Codes scan `si` into `out` with the tables of the groups `group_of` names
+// (a need's group, or a stand-in while a merge is being tried).
+static void code_scan(const Layout *L, int si, Group *const *group_of, Sink *out) {
+    const Scan *sc = &L->p->scans[si];
+    for (int j = 0; j < sc->comps_in_scan; j++)
+        for (int n = L->first_need[si]; n < L->first_need[si + 1]; n++) {
+            int mine = L->sequential ? (n - L->first_need[si]) / 2 == j : sc->ss == 0 ? n - L->first_need[si] == j : 1;
+            if (!mine) continue;
+            const Group *gr = group_of[n];
+            if (gr->class_ == 0) out->code[j] = &gr->code;
+            else out->code[L->sequential ? j + 4 : 0] = &gr->code;
+        }
+    int tables[4] = {0, 1, 2, 3};
+    const Image *img = L->img;
+    if (L->sequential) code_sequential(img, tables, out);
+    else if (sc->ss == 0) code_dc(img, sc->comp, sc->comps_in_scan, sc->al, sc->ah > 0, tables, out);
+    else if (sc->ah == 0) code_ac_first(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, out);
+    else code_ac_refine(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, out);
+}
+
+// The exact bytes of a scan's data, stuffing and padding included.
+static size_t exact_scan_bytes(const Layout *L, int si, Group *const *group_of) {
+    Writer w = {.count_only = 1};
+    Sink out = {.symbol = write_symbol, .bits = write_bits, .writer = &w};
+    code_scan(L, si, group_of, &out);
+    put_flush(&w);
+    return w.n;
+}
 
 static double group_bytes(const Stats *h) {
     double bits;
@@ -1310,15 +1419,23 @@ static int slots_fit(const Group *g, int ngroups, int nscans, int class_) {
 }
 
 // Greedily lets needs share a table while that is cheaper: sharing saves a
-// table definition and costs the bits the shared table codes worse.
-static void share_tables(Group *g, int ngroups, int nscans) {
+// table definition and costs the bits the shared table codes worse. The
+// estimate picks the most promising pair; the exact sizes decide, because
+// how many 0xFF bytes (and stuffed zeros) a table produces isn't
+// predictable from its lengths alone.
+static void share_tables(Group *g, int ngroups, const Layout *L) {
+    int nscans = L->p->n, nneeds = L->first_need[nscans];
+    unsigned char *tried = checked_malloc((size_t)ngroups * ngroups);
+    memset(tried, 0, (size_t)ngroups * ngroups);
+    Group **group_of = checked_malloc((size_t)nneeds * sizeof *group_of);
+    Group *trial = checked_malloc(sizeof *trial);
     for (;;) {
         int best_a = -1, best_b = -1;
         double best_gain = 0.5; // at least a byte
         for (int a = 0; a < ngroups; a++) {
             if (!g[a].alive) continue;
             for (int b = a + 1; b < ngroups; b++) {
-                if (!g[b].alive || g[b].class_ != g[a].class_) continue;
+                if (!g[b].alive || g[b].class_ != g[a].class_ || tried[a * ngroups + b]) continue;
                 Stats m = g[a].hist;
                 for (int i = 0; i < 256; i++) m.freq[i] += g[b].hist.freq[i];
                 double gain = g[a].bytes + g[b].bytes - group_bytes(&m);
@@ -1333,15 +1450,51 @@ static void share_tables(Group *g, int ngroups, int nscans) {
                 if (fits) { best_gain = gain; best_a = a; best_b = b; }
             }
         }
-        if (best_a < 0) return;
+        if (best_a < 0) break;
+        tried[best_a * ngroups + best_b] = 1;
         Group *a = &g[best_a], *b = &g[best_b];
+
+        // Exact: the scans of both groups, coded apart and together.
+        *trial = (Group){.class_ = a->class_, .hist = a->hist};
+        for (int i = 0; i < 256; i++) trial->hist.freq[i] += b->hist.freq[i];
+        if (!ensure_table(a) || !ensure_table(b) || !ensure_table(trial)) continue;
+        long apart = table_bytes(a) + table_bytes(b), together = table_bytes(trial);
+        for (int n = 0; n < nneeds; n++) {
+            int k = L->needs[n].group;
+            while (!g[k].alive) k = g[k].slot;
+            group_of[n] = &g[k];
+        }
+        for (int si = 0; si < nscans; si++) {
+            int touched = 0;
+            for (int n = L->first_need[si]; n < L->first_need[si + 1]; n++) touched |= group_of[n] == a || group_of[n] == b;
+            if (!touched) continue;
+            for (int n = L->first_need[si]; n < L->first_need[si + 1]; n++) {
+                int k = L->needs[n].group;
+                while (!g[k].alive) k = g[k].slot;
+                group_of[n] = &g[k];
+            }
+            apart += (long)exact_scan_bytes(L, si, group_of);
+            for (int n = L->first_need[si]; n < L->first_need[si + 1]; n++)
+                if (group_of[n] == a || group_of[n] == b) group_of[n] = trial;
+            together += (long)exact_scan_bytes(L, si, group_of);
+        }
+        if (together >= apart) continue;
+
         for (int i = 0; i < 256; i++) a->hist.freq[i] += b->hist.freq[i];
         a->first = a->first < b->first ? a->first : b->first;
         a->last = a->last > b->last ? a->last : b->last;
         a->bytes = group_bytes(&a->hist);
+        a->table = trial->table;
+        a->code = trial->code;
+        a->built = 1;
         b->alive = 0;
         b->slot = best_a; // forwarding: needs of b now use a
+        memset(tried + (size_t)best_a * ngroups, 0, (size_t)ngroups); // a changed: its pairs are new
+        for (int k = 0; k < best_a; k++) tried[k * ngroups + best_a] = 0;
     }
+    free(tried);
+    free(group_of);
+    free(trial);
 }
 
 // Writes the file with the given scans (NULL: one sequential scan). `share`
@@ -1409,7 +1562,8 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
                                .alive = 1, .slot = -1, .hist = needs[n].hist};
     }
     for (int i = 0; i < ngroups; i++) g[i].bytes = group_bytes(&g[i].hist);
-    if (share && ngroups <= 160) share_tables(g, ngroups, p->n);
+    Layout layout = {.img = img, .p = p, .sequential = sequential, .needs = needs, .first_need = first_need};
+    if (share && ngroups <= 160) share_tables(g, ngroups, &layout);
     for (int n = 0; n < nneeds; n++) { // follow merges to the surviving group
         int k = needs[n].group;
         while (!g[k].alive) k = g[k].slot;
@@ -1418,10 +1572,11 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
     for (int i = 0; i < ngroups; i++) {
         if (!g[i].alive) continue;
         g[i].slot = -1;
-        if (!build_table(&g[i].hist, &g[i].table)) { free(needs); free(g); return 0; }
-        make_code(&g[i].table, &g[i].code);
+        if (!ensure_table(&g[i])) { free(needs); free(g); return 0; }
     }
 
+    Group **group_of = checked_malloc((size_t)(nneeds ? nneeds : 1) * sizeof *group_of);
+    for (int n = 0; n < nneeds; n++) group_of[n] = &g[needs[n].group];
     Writer w = {0};
     put_u16(&w, 0xFFD8);
     for (jpeg_saved_marker_ptr m = src->marker_list; m; m = m->next) {
@@ -1486,7 +1641,7 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
                 int o = owner[gr->class_][cand];
                 if (o < 0 || g[o].last < si) slot = cand;
             }
-            if (slot < 0) { free(needs); free(g); free(w.d); return 0; }
+            if (slot < 0) { free(group_of); free(needs); free(g); free(w.d); return 0; }
             gr->slot = slot;
             owner[gr->class_][slot] = needs[n].group;
             defs[ndefs++] = needs[n].group;
@@ -1512,15 +1667,14 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
         put_u16(&w, 0xFFDA);
         put_u16(&w, 6 + 2 * sc->comps_in_scan);
         put_byte(&w, sc->comps_in_scan);
-        Sink out = {.symbol = write_symbol, .bits = write_bits, .writer = &w};
         for (int j = 0; j < sc->comps_in_scan; j++) {
             int c = sc->comp[j], td = 0, ta = 0;
             for (int n = first_need[si]; n < first_need[si + 1]; n++) {
                 const Group *gr = &g[needs[n].group];
                 int mine = sequential ? (n - first_need[si]) / 2 == j : sc->ss == 0 ? n - first_need[si] == j : 1;
                 if (!mine) continue;
-                if (gr->class_ == 0) { td = gr->slot; out.code[j] = &gr->code; }
-                else { ta = gr->slot; out.code[sequential ? j + 4 : 0] = &gr->code; }
+                if (gr->class_ == 0) td = gr->slot;
+                else ta = gr->slot;
             }
             put_byte(&w, src->comp_info[c].component_id);
             put_byte(&w, td << 4 | ta);
@@ -1529,14 +1683,12 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
         put_byte(&w, sc->se);
         put_byte(&w, sc->ah << 4 | sc->al);
         // Entropy-coded data.
-        int tables[4] = {0, 1, 2, 3};
-        if (sequential) code_sequential(img, tables, &out);
-        else if (sc->ss == 0) code_dc(img, sc->comp, sc->comps_in_scan, sc->al, sc->ah > 0, tables, &out);
-        else if (sc->ah == 0) code_ac_first(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &out);
-        else code_ac_refine(&img->comp[sc->comp[0]], sc->ss, sc->se, sc->al, &out);
+        Sink out = {.symbol = write_symbol, .bits = write_bits, .writer = &w};
+        code_scan(&layout, si, group_of, &out);
         put_flush(&w);
     }
     put_u16(&w, 0xFFD9);
+    free(group_of);
     free(needs);
     free(g);
     out->data = w.d;
@@ -1633,10 +1785,10 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[arg], "--report")) report = 1;
         else if (!strcmp(argv[arg], "--selftest")) test = 1;
         else if (!strcmp(argv[arg], "--libjpeg")) force_libjpeg = 1;   // development: compare writers
-        else if (!strcmp(argv[arg], "--no-share")) share = 0;
+        else if (!strcmp(argv[arg], "--like-libjpeg")) { share = 0; like_libjpeg = 1; }
         else if (!strcmp(argv[arg], "--effort") && arg + 1 < argc) {
             const char *e = argv[++arg];
-            effort = !strcmp(e, "thorough") ? EFFORT_THOROUGH
+            effort = !strcmp(e, "fast") ? EFFORT_FAST : !strcmp(e, "thorough") ? EFFORT_THOROUGH
                    : !strcmp(e, "maximum") ? EFFORT_MAXIMUM : EFFORT_BALANCED;
         } else break;
     }

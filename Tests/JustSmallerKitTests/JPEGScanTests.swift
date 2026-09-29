@@ -80,13 +80,14 @@ final class JPEGScanTests {
         }
     }
 
-    /// The own writer writes what libjpeg writes: without shared tables, the
-    /// files are the same byte for byte from the frame header on.
+    /// The own writer writes what libjpeg writes: without shared tables and
+    /// with libjpeg's symbol order, the files are the same byte for byte from
+    /// the frame header on.
     @Test func ownWriterMatchesLibjpeg() throws {
         for input in hardCases {
             let own = dir.appending(path: "own-\(input.lastPathComponent)")
             let lib = dir.appending(path: "lib-\(input.lastPathComponent)")
-            #expect(try run("jpeg-scan", ["--no-share", input.path, own.path]) == 0)
+            #expect(try run("jpeg-scan", ["--like-libjpeg", input.path, own.path]) == 0)
             #expect(try run("jpeg-scan", ["--libjpeg", input.path, lib.path]) == 0)
             func fromFrame(_ url: URL) throws -> Data {
                 let d = try Data(contentsOf: url)
