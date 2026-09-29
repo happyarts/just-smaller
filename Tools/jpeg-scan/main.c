@@ -591,12 +591,10 @@ static void refine_costs(const Component *k, int al, const int *cuts, int ncuts,
     free(at);
 }
 
-// The cheapest split of coefficients 1..63 into bands at the given
-// boundaries: dynamic programming over the boundaries.
-static double best_bands(double cost[64][64], const int *cuts, int ncuts, int *chosen, int *nchosen) {
-    // cuts: ascending band starts, the first 1, the last 64 (end marker).
-    double best[64];
-    int from[64];
+// The cheapest way to cover each prefix of the coefficients with bands:
+// best[j] covers cuts[0] .. cuts[j] - 1 (best[0] = 0, nothing), from[j] is
+// where its last band starts. Dynamic programming over the boundaries.
+static void prefix_bands(double cost[64][64], int ncuts, double *best, int *from) {
     best[0] = 0;
     for (int j = 1; j < ncuts; j++) {
         best[j] = 1e300;
@@ -605,61 +603,174 @@ static double best_bands(double cost[64][64], const int *cuts, int ncuts, int *c
             if (c < best[j]) { best[j] = c; from[j] = i; }
         }
     }
-    int path[64], n = 0;
-    for (int j = ncuts - 1; j > 0; j = from[j]) path[n++] = j;
-    *nchosen = 0;
-    for (int m = n - 1; m >= 0; m--) chosen[(*nchosen)++] = cuts[from[path[m]]];
-    chosen[*nchosen] = 64;
-    return best[ncuts - 1];
 }
 
-typedef struct {
-    int top_al;                     // bits held back for refinement (0: none)
-    int bands[4][65], nbands[4];    // per level: 0 = first pass, then top_al-1 .. 0
-    double bytes;
-} ACPlan;
-
-// One pass of one component: the first pass at `al`, or the refinement
-// from al + 1 to al, split into its cheapest bands.
+// One pass of one component at one point transform: a first pass at `al`,
+// or a refinement from al + 1 to al. Keeps its band prices for the search.
 typedef struct {
     const Component *k;
     int refine, al;
-    double bytes;
-    int bands[65], nbands;
+    double (*cost)[64];
+    double best[64];
+    int from[64];
 } Pass;
 
 // Every component's passes are independent, so they run in parallel.
 static void solve_passes(Pass *passes, size_t n, const int *cuts, int ncuts) {
     dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i) {
         Pass *p = &passes[i];
-        double (*cost)[64] = checked_malloc(64 * sizeof *cost);
-        if (p->refine) refine_costs(p->k, p->al, cuts, ncuts, cost);
-        else first_pass_costs(p->k, p->al, cuts, ncuts, cost);
-        p->bytes = best_bands(cost, cuts, ncuts, p->bands, &p->nbands);
-        free(cost);
+        p->cost = checked_malloc(64 * sizeof *p->cost);
+        if (p->refine) refine_costs(p->k, p->al, cuts, ncuts, p->cost);
+        else first_pass_costs(p->k, p->al, cuts, ncuts, p->cost);
+        prefix_bands(p->cost, ncuts, p->best, p->from);
     });
 }
 
-// A component's best plan from its passes: the first pass at some point
-// transform, then each refinement level below it (a refinement from bit
-// a + 1 to a costs the same whichever first pass came before).
-static ACPlan plan_ac(const Pass *first, const Pass *refine, int max_al) {
-    ACPlan best;
-    best.bytes = 1e300;
-    for (int al = 0; al <= max_al; al++) {
-        double total = first[al].bytes;
-        for (int a = 0; a < al; a++) total += refine[a].bytes;
-        if (total >= best.bytes) continue;
-        best.bytes = total;
-        best.top_al = al;
-        memcpy(best.bands[0], first[al].bands, sizeof best.bands[0]);
-        best.nbands[0] = first[al].nbands;
-        for (int level = 1; level <= al; level++) {
-            memcpy(best.bands[level], refine[al - level].bands, sizeof best.bands[0]);
-            best.nbands[level] = refine[al - level].nbands;
+// A component's AC plan: first-pass bands, each with its own point
+// transform, then refinement bands per level.
+typedef struct {
+    int nbands, start[64], al[64];      // first pass: band starts (start[nbands] = 64) and their Al
+    int nref[4], ref[4][65];            // refinement from a + 1 to a: band starts, ref[a][nref[a]] = end + 1
+    double bytes;
+} ACPlan;
+
+// The same, in indices into the boundary list: band m is cuts[lo] .. cuts[hi] - 1.
+typedef struct {
+    int nbands, lo[64], hi[64], al[64];
+    int nref[4], rlo[4][64], rhi[4][64];
+    double bytes;
+} Profile;
+
+// The point transform may differ per band as long as it doesn't rise from
+// the low to the high frequencies. Refinement at level a then covers exactly
+// the prefix of bands whose Al is above a, split into its own cheapest
+// bands. Dynamic programming over (band end, Al of the last band): when Al
+// drops from a' to a at a boundary, the refinements of levels a .. a'-1 end
+// there. A single Al for all bands is one of the profiles.
+static Profile falling_profile(double (*const *first)[64], const double (*ref_best)[64], const int (*ref_from)[64],
+                               int ncuts, int max_al) {
+    enum { N = 64, L = 4 };
+    double f[N][L];
+    int from_i[N][L], from_al[N][L];
+    for (int j = 1; j < ncuts; j++) {
+        for (int al = 0; al <= max_al; al++) {
+            f[j][al] = 1e300;
+            for (int i = 0; i < j; i++) {
+                for (int prev = al; prev <= max_al; prev++) {
+                    // Before the first band: a virtual band at the top Al.
+                    double base = i == 0 ? (prev == max_al ? 0 : 1e300) : f[i][prev];
+                    if (base >= 1e300) continue;
+                    double c = base + first[al][i][j];
+                    for (int a = al; a < prev; a++) c += ref_best[a][i];
+                    if (c < f[j][al]) { f[j][al] = c; from_i[j][al] = i; from_al[j][al] = prev; }
+                }
+            }
         }
     }
-    return best;
+    Profile p;
+    memset(&p, 0, sizeof p);
+    p.bytes = 1e300;
+    int last = ncuts - 1, last_al = 0;
+    for (int al = 0; al <= max_al; al++) {
+        double c = f[last][al];
+        for (int a = 0; a < al; a++) c += ref_best[a][last];
+        if (c < p.bytes) { p.bytes = c; last_al = al; }
+    }
+    // Walk back: the first-pass bands, and where each refinement level ends.
+    int ends[L] = {0, 0, 0, 0};
+    for (int a = 0; a < last_al; a++) ends[a] = last;
+    int n = 0, lo[N], hi[N], al_of[N];
+    for (int j = last, al = last_al; j > 0;) {
+        int i = from_i[j][al], prev = from_al[j][al];
+        lo[n] = i;
+        hi[n] = j;
+        al_of[n++] = al;
+        if (i > 0) for (int a = al; a < prev; a++) ends[a] = i;
+        j = i;
+        al = prev;
+    }
+    p.nbands = n;
+    for (int m = 0; m < n; m++) {
+        p.lo[m] = lo[n - 1 - m];
+        p.hi[m] = hi[n - 1 - m];
+        p.al[m] = al_of[n - 1 - m];
+    }
+    for (int a = 0; a < max_al; a++) {
+        int k = 0, path[N];
+        for (int j = ends[a]; j > 0; j = ref_from[a][j]) path[k++] = j;
+        p.nref[a] = k;
+        for (int m = 0; m < k; m++) {
+            p.rhi[a][m] = path[k - 1 - m];
+            p.rlo[a][m] = ref_from[a][path[k - 1 - m]];
+        }
+    }
+    return p;
+}
+
+// The best profile in either direction: Al falling with the frequency, or
+// rising (found by running the same search on the mirrored boundary list;
+// refinements then cover suffixes). The cheaper one wins.
+static ACPlan plan_ac(const Pass *first, const Pass *refine, const int *cuts, int ncuts, int max_al) {
+    double (*fcost[4])[64], (*rcost[4])[64];
+    double ref_best[4][64];
+    int ref_from[4][64];
+    for (int al = 0; al <= max_al; al++) fcost[al] = first[al].cost;
+    for (int a = 0; a < max_al; a++) {
+        memcpy(ref_best[a], refine[a].best, sizeof ref_best[a]);
+        memcpy(ref_from[a], refine[a].from, sizeof ref_from[a]);
+    }
+    Profile fall = falling_profile(fcost, ref_best, ref_from, ncuts, max_al);
+
+    // Mirror: boundary index i becomes ncuts - 1 - i.
+    int n = ncuts - 1;
+    for (int al = 0; al <= max_al; al++) {
+        fcost[al] = checked_malloc(64 * sizeof *fcost[al]);
+        for (int i = 0; i < ncuts; i++)
+            for (int j = i + 1; j < ncuts; j++) fcost[al][i][j] = first[al].cost[n - j][n - i];
+    }
+    for (int a = 0; a < max_al; a++) {
+        rcost[a] = checked_malloc(64 * sizeof *rcost[a]);
+        for (int i = 0; i < ncuts; i++)
+            for (int j = i + 1; j < ncuts; j++) rcost[a][i][j] = refine[a].cost[n - j][n - i];
+        prefix_bands(rcost[a], ncuts, ref_best[a], ref_from[a]);
+    }
+    Profile rise = falling_profile(fcost, ref_best, ref_from, ncuts, max_al);
+    for (int al = 0; al <= max_al; al++) free(fcost[al]);
+    for (int a = 0; a < max_al; a++) free(rcost[a]);
+
+    Profile best = fall;
+    if (rise.bytes < fall.bytes) {
+        // Back from the mirror, in ascending order.
+        best = rise;
+        for (int m = 0; m < rise.nbands; m++) {
+            int k = rise.nbands - 1 - m;
+            best.lo[m] = n - rise.hi[k];
+            best.hi[m] = n - rise.lo[k];
+            best.al[m] = rise.al[k];
+        }
+        for (int a = 0; a < max_al; a++)
+            for (int m = 0; m < rise.nref[a]; m++) {
+                int k = rise.nref[a] - 1 - m;
+                best.rlo[a][m] = n - rise.rhi[a][k];
+                best.rhi[a][m] = n - rise.rlo[a][k];
+            }
+    }
+
+    ACPlan plan;
+    memset(&plan, 0, sizeof plan);
+    plan.bytes = best.bytes;
+    plan.nbands = best.nbands;
+    for (int m = 0; m < best.nbands; m++) {
+        plan.start[m] = cuts[best.lo[m]];
+        plan.al[m] = best.al[m];
+    }
+    plan.start[best.nbands] = 64;
+    for (int a = 0; a < max_al; a++) {
+        plan.nref[a] = best.nref[a];
+        for (int m = 0; m < best.nref[a]; m++) plan.ref[a][m] = cuts[best.rlo[a][m]];
+        plan.ref[a][best.nref[a]] = best.nref[a] ? cuts[best.rhi[a][best.nref[a] - 1]] : 1;
+    }
+    return plan;
 }
 
 typedef struct {
@@ -740,27 +851,25 @@ static Plan progressive_plan(const Image *img, int effort) {
         for (int j = 0; j < per; j++)
             passes[c * per + j] = (Pass){.k = &img->comp[c], .refine = j > max_al, .al = j > max_al ? j - max_al - 1 : j};
     solve_passes(passes, (size_t)(img->ncomp * per), cuts, ncuts);
-    for (int c = 0; c < img->ncomp; c++) ac[c] = plan_ac(&passes[c * per], &passes[c * per + max_al + 1], max_al);
+    for (int c = 0; c < img->ncomp; c++) ac[c] = plan_ac(&passes[c * per], &passes[c * per + max_al + 1], cuts, ncuts, max_al);
+    for (int i = 0; i < img->ncomp * per; i++) free(passes[i].cost);
 
     int all[4] = {0, 1, 2, 3};
-    // DC first pass, then every component's first AC pass, then refinements.
+    // DC first pass, then every component's first AC pass, then refinements
+    // from the highest level down.
     if (dc.interleaved) add(&p, img->ncomp, all, 0, 0, 0, dc.al);
     else for (int c = 0; c < img->ncomp; c++) add(&p, 1, &all[c], 0, 0, 0, dc.al);
     for (int c = 0; c < img->ncomp; c++)
-        for (int b = 0; b < ac[c].nbands[0]; b++)
-            add(&p, 1, &all[c], ac[c].bands[0][b], ac[c].bands[0][b + 1] - 1, 0, ac[c].top_al);
+        for (int b = 0; b < ac[c].nbands; b++)
+            add(&p, 1, &all[c], ac[c].start[b], ac[c].start[b + 1] - 1, 0, ac[c].al[b]);
     for (int bit = dc.al - 1; bit >= 0; bit--) {
         if (dc.interleaved) add(&p, img->ncomp, all, 0, 0, bit + 1, bit);
         else for (int c = 0; c < img->ncomp; c++) add(&p, 1, &all[c], 0, 0, bit + 1, bit);
     }
-    for (int level = 1; level <= 3; level++) {
-        for (int c = 0; c < img->ncomp; c++) {
-            if (level > ac[c].top_al) continue;
-            int al = ac[c].top_al - level;
-            for (int b = 0; b < ac[c].nbands[level]; b++)
-                add(&p, 1, &all[c], ac[c].bands[level][b], ac[c].bands[level][b + 1] - 1, al + 1, al);
-        }
-    }
+    for (int a = max_al - 1; a >= 0; a--)
+        for (int c = 0; c < img->ncomp; c++)
+            for (int b = 0; b < ac[c].nref[a]; b++)
+                add(&p, 1, &all[c], ac[c].ref[a][b], ac[c].ref[a][b + 1] - 1, a + 1, a);
     p.bytes = dc.bytes;
     for (int c = 0; c < img->ncomp; c++) p.bytes += ac[c].bytes;
     return p;
