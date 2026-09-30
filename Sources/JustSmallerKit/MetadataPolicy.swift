@@ -10,7 +10,8 @@ import Foundation
 /// "remove private data" keeps only what is known to be harmless.
 enum MetadataPolicy {
     enum Group: Int, Comparable {
-        /// Needed to show the image correctly. Kept in every level.
+        /// Needed to show the image correctly, and whether it was made or
+        /// changed by AI (IPTC digital source type). Kept in every level.
         case display
         /// Who made the image and the rights. Kept unless everything goes.
         case rights
@@ -131,7 +132,8 @@ enum MetadataPolicy {
             }
         case NS.iptcExt:
             switch name {
-            case "DigitalSourceType", "LinkedEncRightsExpr", "EmbdEncRightsExpr": return .rights
+            case "DigitalSourceType": return .display // e.g. "made with generative AI"
+            case "LinkedEncRightsExpr", "EmbdEncRightsExpr": return .rights
             case "LocationCreated", "LocationShown", "PersonInImage", "PersonInImageWDetails",
                  "ImageRegion", "ModelAge": return nil
             default: return .imageInfo

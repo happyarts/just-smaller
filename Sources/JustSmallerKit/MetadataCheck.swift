@@ -7,6 +7,8 @@ import ImageIO
 ///  - every value in the result is one the original holds, unchanged,
 ///  - every rights field of the original is still there,
 ///  - at `.keep`, nothing at all is missing.
+/// Maker notes are not part of that view: at every level but `.keep`, only
+/// Apple's may stay, with only the tags the level keeps (the HDR headroom).
 ///
 /// Many files hold a field twice with different values (EXIF and XMP
 /// written by different programs, MakerNotes); ImageIO shows one of them.
@@ -30,6 +32,7 @@ enum MetadataCheck {
     }
 
     private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {
+        if level != .keep { try verifyMakerNotes(result, level: level) }
         let merged = fields(original), after = fields(result)
         var sources: [[Key: Value]]?
         for (key, value) in after {
@@ -51,16 +54,33 @@ enum MetadataCheck {
         }
     }
 
+    private static func verifyMakerNotes(_ result: Data, level: MetadataHandling) throws {
+        if hasMakerNotesToRemove(result, level: level) {
+            throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+        }
+    }
+
+    /// Whether the file holds a maker note, or tags of Apple's, the level removes.
+    private static func hasMakerNotesToRemove(_ data: Data, level: MetadataHandling) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else { return false }
+        return properties.contains { key, value in
+            guard key.hasPrefix("{Maker") else { return false }
+            guard key == kCGImagePropertyMakerAppleDictionary as String, let tags = value as? [String: Any] else { return true }
+            return !tags.keys.allSatisfy { Int($0).map { MetadataPolicy.keeps(MetadataPolicy.group(appleMakerNoteTag: $0), at: level) } ?? false }
+        }
+    }
+
     /// Whether the file holds anything the level removes.
     static func hasFieldsToRemove(_ url: URL, level: MetadataHandling) -> Bool {
         guard level != .keep, let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
         return fields(data).keys.contains {
             !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level)
-        }
+        } || hasMakerNotesToRemove(data, level: level)
     }
 
     /// ImageIO's own bookkeeping (e.g. whether the file had IIM data).
-    private static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
+    static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
 
     struct Key: Hashable {
         var ns: String

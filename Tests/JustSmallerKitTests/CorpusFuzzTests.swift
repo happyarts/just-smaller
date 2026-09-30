@@ -76,6 +76,8 @@ struct CorpusFuzzTests {
             _ = RIFFChunks.webp(ByteView(data))
         case .svg:
             _ = SVGText.utf8(data)
+        case .heic:
+            _ = try? HEIFMetadataFilter.filter(data, level: .removePrivate)
         default: break
         }
         _ = try? StructureCheck.verify(ByteView(data), against: reference)

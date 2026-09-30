@@ -118,7 +118,7 @@ enum Pipeline {
             // level keeps, is the promise's second chance.
             let reencode = s.lossy && facts.bitsPerComponent <= 8
             var stages: [[Candidate]] = []
-            if s.metadata != .keep, !facts.isAnimated { stages.append([imageIOMetadata(s.metadata, required: !reencode)]) }
+            if s.metadata != .keep, !facts.isAnimated { stages.append([heifMetadata(s.metadata, required: !reencode)]) }
             if reencode { stages.append([heif(quality: s.jpegQuality, metadata: s.metadata)]) }
             return stages
         }
@@ -300,10 +300,10 @@ enum Pipeline {
         }
     }
 
-    /// Metadata through ImageIO, for HEIC.
-    static func imageIOMetadata(_ level: MetadataHandling, required: Bool) -> Candidate {
+    /// HEIC's EXIF and XMP, in their items; nothing else changes.
+    static func heifMetadata(_ level: MetadataHandling, required: Bool) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: required) { input, output, _ in
-            guard try ImageIOMetadata.copy(input, to: output, level: level) else { return false }
+            try HEIFMetadataFilter.filter(Data(contentsOf: input), level: level).write(to: output)
             try MetadataCheck.verify(original: input, result: output, level: level)
             return true
         }

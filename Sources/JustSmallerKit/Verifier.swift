@@ -56,7 +56,8 @@ enum Verifier {
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
-        if format == .jpeg { try compareAuxiliaryImages(a, b) }
+        // HEIC's lossy re-encode encodes the auxiliary images anew too.
+        if format == .jpeg || format == .heic { try compareAuxiliaryImages(a, b, exact: format == .jpeg || pixelsMustMatch) }
         // Every image of the file must read to its end.
         guard CGImageSourceGetStatus(b) == .statusComplete,
               (0..<framesB).allSatisfy({ CGImageSourceGetStatusAtIndex(b, $0) == .statusComplete })
@@ -128,12 +129,13 @@ enum Verifier {
     }
 
     /// A photo's auxiliary images (HDR gain map, depth, mattes) are all
-    /// still there and decode as before, and the photo is shown as bright as
+    /// still there and decode as before (`exact`) or at least have the same
+    /// size, and the photo is shown as bright as
     /// before: the HDR headroom comes from metadata (Apple's maker note, XMP,
     /// ISO 21496-1) that a filter must not lose. Reading the headroom
     /// doesn't decode the photo.
-    private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource) throws {
-        guard let aux = ImageIOMetadata.sameAuxiliaryImages(a, b) else {
+    private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource, exact: Bool) throws {
+        guard let aux = ImageIOMetadata.sameAuxiliaryImages(a, b, exact: exact) else {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
         guard !aux.isEmpty else { return }
@@ -264,6 +266,21 @@ enum Verifier {
         return dict?[kCGImagePropertyDepth] as? Int ?? 8
     }
 
+    /// Pixels vImage can't convert (packed 10-bit, as in iPhone
+    /// screenshots), drawn at 16 bits into one wide colour space (BT.2020),
+    /// so a changed colour space still shows up as different pixels. Only
+    /// for images without alpha, where premultiplied and straight are the same.
+    private static func drawn(_ image: CGImage, deep: Bool) throws -> [UInt8] {
+        guard deep, [.none, .noneSkipFirst, .noneSkipLast].contains(image.alphaInfo),
+              let space = CGColorSpace(name: CGColorSpace.itur_2020),
+              let context = CGContext(data: nil, width: image.width, height: image.height, bitsPerComponent: 16, bytesPerRow: image.width * 8,
+                                      space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue),
+              let data = context.data
+        else { throw VerificationError(reason: String(localized: "unreadable", bundle: .module)) }
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return [UInt8](UnsafeRawBufferPointer(start: data, count: image.width * 8 * image.height))
+    }
+
     /// Decodes a frame into sRGB, so a lost colour profile shows up as
     /// different pixels. `straight` keeps the colour of fully transparent
     /// pixels (unpremultiplied alpha), which a lossless PNG or WebP must not
@@ -281,7 +298,7 @@ enum Verifier {
                                                 colorSpace: srgb,
                                                 bitmapInfo: CGBitmapInfo(rawValue: alpha.rawValue | order)),
               let buffer = try? vImage_Buffer(cgImage: image, format: format)
-        else { throw VerificationError(reason: String(localized: "unreadable", bundle: .module)) }
+        else { return try drawn(image, deep: deep) }
         defer { buffer.free() }
         // Rows may be padded; copy only the pixels.
         let rowBytes = Int(buffer.width) * (deep ? 8 : 4)

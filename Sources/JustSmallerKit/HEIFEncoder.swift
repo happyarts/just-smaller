@@ -32,6 +32,18 @@ enum HEIFEncoder {
                 CGImageDestinationAddAuxiliaryDataInfo(destination, type, info)
             }
         }
-        return CGImageDestinationFinalize(destination)
+        guard CGImageDestinationFinalize(destination) else { return false }
+        // ImageIO writes EXIF and XMP anew (numbers rounded differently,
+        // fields of its own); what the level keeps comes from the original
+        // instead, byte for byte.
+        if level != .keep {
+            let result = try Data(contentsOf: output), original = try Data(contentsOf: input, options: .alwaysMapped)
+            do {
+                try HEIFMetadataFilter.filter(result, level: level, from: original).write(to: output)
+            } catch is FormatError {
+                throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+            }
+        }
+        return true
     }
 }

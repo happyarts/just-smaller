@@ -19,9 +19,9 @@ enum HEIFCheck {
         try BMFFBoxes.boxes(b, topLevel: topLevel)
     }
 
-    /// A full box's children, after its version and flags and `extra` bytes.
-    private static func children(_ box: Box, skipping extra: Int = 0) throws -> [Box] {
-        try boxes(box.payload.view(from: 4 + extra))
+    /// A full box's children, after its version and flags.
+    private static func children(_ box: Box) throws -> [Box] {
+        try boxes(box.payload.view(from: 4))
     }
 
     private static func one(_ type: String, in boxes: [Box]) throws -> Box {
@@ -41,10 +41,9 @@ enum HEIFCheck {
         // Items
         let iinf = try one("iinf", in: meta)
         let wide = try iinf.payload.u8(0) != 0
-        let entries = try iinf.payload.be(4, wide ? 4 : 2)
-        let infes = try children(iinf, skipping: wide ? 4 : 2)
-        guard infes.count == entries, infes.allSatisfy({ $0.type == "infe" }) else { throw Invalid("iinf") }
-        let ids = Set(try infes.map { box in try box.payload.u8(0) >= 3 ? box.payload.be(4, 4) : box.payload.be(4, 2) })
+        let infos = try HEIFItems.infos(iinf)
+        guard infos.count == (try iinf.payload.be(4, wide ? 4 : 2)) else { throw Invalid("iinf") }
+        let ids = Set(infos.map(\.id))
         let pitm = try one("pitm", in: meta).payload
         guard ids.contains(try pitm.u8(0) == 0 ? pitm.be(4, 2) : pitm.be(4, 4)) else { throw Invalid("pitm") }
 
@@ -62,15 +61,8 @@ enum HEIFCheck {
         }
         // References: from and to existing items.
         if let iref = meta.first(where: { $0.type == "iref" }) {
-            let wideIDs = try iref.payload.u8(0) != 0
-            for reference in try children(iref) {
-                let p = reference.payload, size = wideIDs ? 4 : 2
-                guard ids.contains(try p.be(0, size)) else { throw Invalid("item reference") }
-                let count = try p.be(size, 2)
-                guard p.count == size + 2 + count * size else { throw Invalid("item reference") }
-                for k in 0..<count where !ids.contains(try p.be(size + 2 + k * size, size)) {
-                    throw Invalid("item reference")
-                }
+            guard try HEIFItems.references(iref).allSatisfy({ ids.contains($0.from) && $0.to.allSatisfy(ids.contains) }) else {
+                throw Invalid("item reference")
             }
         }
     }
@@ -78,33 +70,18 @@ enum HEIFCheck {
     /// iloc: every extent inside an mdat box (construction method 0), the
     /// idat box (1), or another item (2).
     private static func locations(_ p: ByteView, ids: Set<Int>, mdat: [Range<Int>], idat: Int?) throws {
-        var k = 0
-        func read(_ bytes: Int) throws -> Int {
-            defer { k += bytes }
-            return try p.be(k, bytes)
-        }
-        let version = try read(1); _ = try read(3)
-        let sizes = try read(1), more = try read(1)
-        let offsetSize = sizes >> 4, lengthSize = sizes & 15, baseSize = more >> 4, indexSize = version > 0 ? more & 15 : 0
-        guard version <= 2, [offsetSize, lengthSize, baseSize, indexSize].allSatisfy({ [0, 4, 8].contains($0) }) else { throw Invalid("iloc") }
-        let items = try read(version < 2 ? 2 : 4)
-        for _ in 0..<items {
-            let id = try read(version < 2 ? 2 : 4)
-            let method = try version > 0 ? read(2) & 15 : 0
-            let reference = try read(2), base = try read(baseSize), extents = try read(2)
-            guard ids.contains(id), reference == 0, method <= 2 else { throw Invalid("iloc item") }
-            for _ in 0..<extents {
-                _ = try read(indexSize)
-                let start = try base + read(offsetSize), length = try read(lengthSize)
-                let inside = switch method {
-                case 0: mdat.contains { $0.contains(start) && start + length <= $0.upperBound }
-                case 1: idat.map { start + length <= $0 } ?? false
+        for location in try HEIFItems.locations(p).items {
+            guard ids.contains(location.id), location.method <= 2 else { throw Invalid("iloc item") }
+            for extent in location.extents {
+                let start = extent.start, length = extent.length
+                let inside = switch location.method {
+                case 0: mdat.contains { $0.contains(start) && length <= $0.upperBound - start }
+                case 1: idat.map { length <= $0 - start } ?? false
                 default: true // points into another item
                 }
                 guard inside else { throw Invalid("item data outside the file") }
             }
         }
-        guard k == p.count else { throw Invalid("iloc") }
     }
 
     /// ipma: items and 1-based property indices (0 means none).
