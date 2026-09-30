@@ -13,34 +13,6 @@ import Foundation
 enum JPEGMetadataFilter {
     struct Malformed: Error {}
 
-    static let exifHeader = Array("Exif\0\0".utf8)
-    static let xmpHeader = Array("http://ns.adobe.com/xap/1.0/\0".utf8)
-    static let extendedXMPHeader = Array("http://ns.adobe.com/xmp/extension/\0".utf8)
-    static let photoshopHeader = Array("Photoshop 3.0\0".utf8)
-    /// What an APPn or COM segment holds, by its marker and signature. The
-    /// filter rewrites EXIF, XMP and IPTC (Photoshop); the structure check
-    /// checks what was rewritten and requires the rest unchanged.
-    enum Part {
-        case jfif, jfifExtension, exif, xmp, extendedXMP, photoshop, iccProfile, multiPicture, adobe, comment, other
-    }
-
-    static func part(_ marker: UInt8, payload: some Collection<UInt8>) -> Part {
-        func has(_ header: [UInt8]) -> Bool { payload.starts(with: header) }
-        switch marker {
-        case 0xE0 where has(Array("JFIF\0".utf8)): return .jfif
-        case 0xE0 where has(Array("JFXX\0".utf8)): return .jfifExtension
-        case 0xE1 where has(exifHeader): return .exif
-        case 0xE1 where has(xmpHeader): return .xmp
-        case 0xE1 where has(extendedXMPHeader): return .extendedXMP
-        case 0xE2 where has(Array("ICC_PROFILE\0".utf8)): return .iccProfile
-        case 0xE2 where has(Array("MPF\0".utf8)): return .multiPicture
-        case 0xED where has(photoshopHeader): return .photoshop
-        case 0xEE where has(Array("Adobe".utf8)): return .adobe
-        case 0xFE: return .comment
-        default: return .other
-        }
-    }
-
     /// The largest payload of a segment: its length field counts itself.
     private static let maxPayload = 0xFFFF - 2
 
@@ -54,8 +26,8 @@ enum JPEGMetadataFilter {
         if level == .keep {
             var out = Data([0xFF, 0xD8])
             for (k, s) in headers.enumerated() {
-                if isApp(k, 0xE1, xmpHeader) {
-                    out.append(segment(0xE1, xmpHeader + XMPFilter.withoutPadding(Array(payloads[k].dropFirst(xmpHeader.count)))))
+                if isApp(k, 0xE1, JPEGMarkers.xmpHeader) {
+                    out.append(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + XMPFilter.withoutPadding(Array(payloads[k].dropFirst(JPEGMarkers.xmpHeader.count)))))
                 } else {
                     out.append(s.bytes)
                 }
@@ -65,28 +37,28 @@ enum JPEGMetadataFilter {
         }
 
         // IPTC: Photoshop splits large resource blocks over several APP13s.
-        let photoshop = headers.indices.filter { isApp($0, 0xED, photoshopHeader) }
+        let photoshop = headers.indices.filter { isApp($0, 0xED, JPEGMarkers.photoshopHeader) }
         let iptc = photoshop.isEmpty ? IPTCFilter.Result()
-            : IPTCFilter.filter(photoshop.flatMap { payloads[$0].dropFirst(photoshopHeader.count) }, level: level)
+            : IPTCFilter.filter(photoshop.flatMap { payloads[$0].dropFirst(JPEGMarkers.photoshopHeader.count) }, level: level)
 
         // XMP, with the extended part (JPEG's way around the 64 KB limit)
         // merged in when it fits into one segment afterwards.
-        let xmpIndex = headers.indices.first { isApp($0, 0xE1, xmpHeader) }
+        let xmpIndex = headers.indices.first { isApp($0, 0xE1, JPEGMarkers.xmpHeader) }
         var xmp: [UInt8]?
         if let xmpIndex {
-            let packet = Array(payloads[xmpIndex].dropFirst(xmpHeader.count))
-            let extended = reassembleExtendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, extendedXMPHeader) }
-                .map { Array($0.element.dropFirst(extendedXMPHeader.count)) }, for: packet)
+            let packet = Array(payloads[xmpIndex].dropFirst(JPEGMarkers.xmpHeader.count))
+            let extended = reassembleExtendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, JPEGMarkers.extendedXMPHeader) }
+                .map { Array($0.element.dropFirst(JPEGMarkers.extendedXMPHeader.count)) }, for: packet)
             xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest)
-            if let merged = xmp, merged.count + xmpHeader.count > maxPayload {
+            if let merged = xmp, merged.count + JPEGMarkers.xmpHeader.count > maxPayload {
                 xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
             }
-            if let packet = xmp, packet.count + xmpHeader.count > maxPayload { xmp = nil }
+            if let packet = xmp, packet.count + JPEGMarkers.xmpHeader.count > maxPayload { xmp = nil }
         }
 
-        let exifIndex = headers.indices.first { isApp($0, 0xE1, exifHeader) }
-        let exif = exifIndex.flatMap { EXIFFilter.filter(Array(payloads[$0].dropFirst(exifHeader.count)), level: level) }
-            .flatMap { $0.count + exifHeader.count <= maxPayload ? $0 : nil }
+        let exifIndex = headers.indices.first { isApp($0, 0xE1, JPEGMarkers.exifHeader) }
+        let exif = exifIndex.flatMap { EXIFFilter.filter(Array(payloads[$0].dropFirst(JPEGMarkers.exifHeader.count)), level: level) }
+            .flatMap { $0.count + JPEGMarkers.exifHeader.count <= maxPayload ? $0 : nil }
 
         var out = Data([0xFF, 0xD8])
         var wroteEXIF = false
@@ -94,7 +66,7 @@ enum JPEGMetadataFilter {
             // EXIF goes right after SOI/JFIF, before anything else.
             if !wroteEXIF, !isApp(k, 0xE0, Array("JFIF\0".utf8)) {
                 if let exif {
-                    out.append(segment(0xE1, exifHeader + exif))
+                    out.append(JPEGMarkers.write(0xE1, JPEGMarkers.exifHeader + exif))
                 } else if orientation != 1 {
                     out.append(minimalEXIF(orientation: orientation))
                 }
@@ -102,11 +74,11 @@ enum JPEGMetadataFilter {
             }
             switch s.marker {
             case 0xE1 where k == xmpIndex:
-                if let xmp { out.append(segment(0xE1, xmpHeader + xmp)) }
+                if let xmp { out.append(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + xmp)) }
             case 0xED where k == photoshop.first:
                 if let resources = iptc.resources {
-                    for chunk in resources.chunked(maxPayload - photoshopHeader.count) {
-                        out.append(segment(0xED, photoshopHeader + chunk))
+                    for chunk in resources.chunked(maxPayload - JPEGMarkers.photoshopHeader.count) {
+                        out.append(JPEGMarkers.write(0xED, JPEGMarkers.photoshopHeader + chunk))
                     }
                 }
             case 0xE2 where payloads[k].starts(with: Array("ICC_PROFILE\0".utf8)),
@@ -123,39 +95,29 @@ enum JPEGMetadataFilter {
         return out
     }
 
-    /// Extended XMP chunks: a 32-character GUID (the MD5 of the whole
-    /// extension), its full length and this chunk's offset, then the data.
-    /// Only the extension the main packet names is used.
+    /// The extended XMP packet with `packet`'s GUID, put together from its
+    /// parts; nil unless the parts fill it exactly. Its length is taken from
+    /// the file only once the parts' data adds up to it.
     static func reassembleExtendedXMP(_ chunks: [[UInt8]], for packet: [UInt8]) -> [UInt8]? {
-        var parts: [String: [(offset: Int, data: [UInt8])]] = [:]
-        var lengths: [String: Int] = [:]
-        for chunk in chunks where chunk.count > 40 {
-            let guid = String(decoding: chunk[0..<32], as: UTF8.self)
-            let length = chunk[32..<36].reduce(0) { $0 << 8 | Int($1) }
-            let offset = chunk[36..<40].reduce(0) { $0 << 8 | Int($1) }
-            parts[guid, default: []].append((offset, Array(chunk[40...])))
-            lengths[guid] = length
-        }
-        guard let guid = parts.keys.first(where: { packet.firstRange(of: Array($0.utf8)) != nil }),
-              let length = lengths[guid] else { return nil }
+        let parts = chunks.compactMap { try? JPEGMarkers.extendedXMPPart(ByteView($0)) }
+        guard let guid = parts.map(\.guid).first(where: { packet.firstRange(of: Array($0.utf8)) != nil }) else { return nil }
+        let mine = parts.filter { $0.guid == guid }
+        let length = mine[0].length
+        guard mine.allSatisfy({ $0.length == length }), mine.reduce(0, { $0 + $1.data.count }) == length else { return nil }
         var whole = [UInt8](repeating: 0, count: length)
-        var filled = 0
-        for part in parts[guid] ?? [] {
-            guard part.offset + part.data.count <= length else { return nil }
-            whole.replaceSubrange(part.offset..<part.offset + part.data.count, with: part.data)
-            filled += part.data.count
+        var covered = IndexSet()
+        for part in mine {
+            let range = part.offset..<part.offset + part.data.count
+            guard !covered.intersects(integersIn: range) else { return nil }
+            covered.insert(integersIn: range)
+            whole.replaceSubrange(range, with: part.data.bytes)
         }
-        return filled == length ? whole : nil
-    }
-
-    static func segment(_ marker: UInt8, _ payload: [UInt8]) -> Data {
-        let length = payload.count + 2
-        return Data([0xFF, marker, UInt8(length >> 8), UInt8(length & 0xFF)] + payload)
+        return whole
     }
 
     /// APP1 "Exif" holding the minimal TIFF block below.
     static func minimalEXIF(orientation: Int) -> Data {
-        segment(0xE1, exifHeader + minimalTIFF(orientation: orientation))
+        JPEGMarkers.write(0xE1, JPEGMarkers.exifHeader + minimalTIFF(orientation: orientation))
     }
 
     /// A big-endian TIFF header and one IFD entry: Orientation (0x0112),
@@ -190,26 +152,9 @@ enum JPEGMetadataFilter {
 
     /// The segments before the image data, and the image data from SOS on.
     static func segments(_ data: Data) throws -> (headers: [(marker: UInt8, bytes: Data)], imageData: Data) {
-        let b = [UInt8](data)
-        guard b.count > 4, b[0] == 0xFF, b[1] == 0xD8 else { throw Malformed() }
-        var headers: [(marker: UInt8, bytes: Data)] = []
-        var i = 2
-        while i + 4 <= b.count {
-            guard b[i] == 0xFF else { throw Malformed() }
-            let marker = b[i + 1]
-            if marker == 0xFF { i += 1; continue }
-            if marker == 0xDA { return (headers, Data(b[i...])) }
-            if marker == 0x01 || (0xD0...0xD7).contains(marker) { // no length field
-                headers.append((marker, Data(b[i..<i + 2])))
-                i += 2
-                continue
-            }
-            let length = Int(b[i + 2]) << 8 | Int(b[i + 3])
-            guard length >= 2, i + 2 + length <= b.count else { throw Malformed() }
-            headers.append((marker, Data(b[i..<i + 2 + length])))
-            i += 2 + length
-        }
-        throw Malformed()
+        let b = ByteView(data)
+        guard let found = try? JPEGMarkers.headers(b), let imageData = try? b.view(from: found.scan) else { throw Malformed() }
+        return (found.segments.map { ($0.marker, $0.whole.bytes) }, imageData.bytes)
     }
 }
 
@@ -247,27 +192,8 @@ enum JPEGQuality {
 
     /// Table 0 of the first DQT segment (luminance by convention).
     private static func luminanceTable(_ data: Data) -> [Int]? {
-        let b = [UInt8](data.prefix(256 * 1024))
-        var i = 2
-        while i + 4 <= b.count, b[i] == 0xFF {
-            let marker = b[i + 1]
-            let length = Int(b[i + 2]) << 8 | Int(b[i + 3])
-            if marker == 0xDA { return nil }
-            if marker == 0xDB {
-                var j = i + 4
-                while j < i + 2 + length, j < b.count {
-                    let precision = b[j] >> 4, id = b[j] & 0x0F
-                    let size = precision == 0 ? 64 : 128
-                    guard j + 1 + size <= b.count else { return nil }
-                    let values = precision == 0
-                        ? b[(j + 1)..<(j + 65)].map(Int.init)
-                        : stride(from: j + 1, to: j + 129, by: 2).map { Int(b[$0]) << 8 | Int(b[$0 + 1]) }
-                    if id == 0 { return values }
-                    j += 1 + size
-                }
-            }
-            i += 2 + length
-        }
-        return nil
+        guard let headers = try? JPEGMarkers.headers(ByteView(data)).segments else { return nil }
+        let tables = headers.filter { $0.marker == 0xDB }.flatMap { (try? JPEGMarkers.quantTables($0.payload, strict: false)) ?? [] }
+        return tables.first { $0.id == 0 }?.steps
     }
 }

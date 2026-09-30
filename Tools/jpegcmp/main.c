@@ -2,6 +2,7 @@
 //
 //     jpegcmp ORIGINAL RESULT
 //     jpegcmp --check FILE
+//     jpegcmp --check-headers FILE
 //
 // Reads both files' quantized DCT coefficients with libjpeg (the same call
 // jpegtran uses) and compares them block by block, together with the frame
@@ -9,7 +10,8 @@
 // coefficients and tables decode to the same pixels in every conforming
 // decoder; this is a stronger proof than comparing one decoder's output.
 //
-// With --check, only reads FILE.
+// With --check, only reads FILE; with --check-headers, only its headers up
+// to the first scan.
 //
 // Exit status: 0 identical, 1 different, 2 unreadable, 3 the result reads
 // only with warnings (damaged data, bytes where a marker belongs).
@@ -77,14 +79,25 @@ static int finish(j_decompress_ptr info) {
     return 1;
 }
 
+/// Reads only the headers up to the first scan; false on an error.
+static int read_headers(j_decompress_ptr info, FILE *file) {
+    jmp_buf here;
+    ((struct error_manager *)info->err)->jump = &here;
+    if (setjmp(here)) return 0;
+    jpeg_stdio_src(info, file);
+    jpeg_read_header(info, TRUE);
+    return 1;
+}
+
 int main(int argc, char **argv) {
     int check_only = argc == 3 && strcmp(argv[1], "--check") == 0;
+    int headers_only = argc == 3 && strcmp(argv[1], "--check-headers") == 0;
     if (argc != 3) {
-        fprintf(stderr, "usage: jpegcmp ORIGINAL RESULT\n       jpegcmp --check FILE\n");
+        fprintf(stderr, "usage: jpegcmp ORIGINAL RESULT\n       jpegcmp --check FILE\n       jpegcmp --check-headers FILE\n");
         return 2;
     }
-    FILE *fa = check_only ? NULL : fopen(argv[1], "rb"), *fb = fopen(argv[2], "rb");
-    if ((!check_only && !fa) || !fb) {
+    FILE *fa = check_only || headers_only ? NULL : fopen(argv[1], "rb"), *fb = fopen(argv[2], "rb");
+    if ((!check_only && !headers_only && !fa) || !fb) {
         fprintf(stderr, "jpegcmp: can't open input\n");
         return 2;
     }
@@ -96,6 +109,13 @@ int main(int argc, char **argv) {
     ea.pub.output_message = eb.pub.output_message = silent;
     jpeg_create_decompress(&a);
     jpeg_create_decompress(&b);
+    if (headers_only) {
+        int ok = read_headers(&b, fb) && eb.pub.num_warnings == 0;
+        jpeg_destroy_decompress(&a);
+        jpeg_destroy_decompress(&b);
+        fclose(fb);
+        return ok ? 0 : 3;
+    }
     jvirt_barray_ptr *ca = NULL, *cb = NULL;
     if ((!check_only && !read_all(&a, fa, &ca)) || !read_all(&b, fb, &cb)) {
         fprintf(stderr, "jpegcmp: unreadable JPEG\n");

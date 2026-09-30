@@ -3,7 +3,7 @@ import Foundation
 /// SVG: well-formed XML with the same root element as the original, in
 /// UTF-8 if the original was. What it draws is the rendering comparison's job.
 enum SVGCheck {
-    typealias Invalid = StructureCheck.Invalid
+    typealias Invalid = FormatError
 
     /// What the original contributes: its root element (nil if it isn't
     /// well-formed XML) and whether it was UTF-8.

@@ -1,5 +1,20 @@
 import Foundation
 
+/// A file (or part of one) that isn't what its format says. Every reader
+/// throws it; the structure check reports it, the filters treat the part
+/// as unreadable.
+struct FormatError: Error {
+    let detail: String
+    init(_ detail: String) { self.detail = detail }
+
+    /// Runs `body`, naming the part a failure is in ("EXIF: truncated data").
+    static func within<T>(_ part: String, _ body: () throws -> T) throws -> T {
+        do { return try body() } catch let error as FormatError {
+            throw FormatError("\(part): \(error.detail)")
+        }
+    }
+}
+
 /// Bounds-checked reads over a file's bytes. A result file is untrusted
 /// input to the checks: a length or offset that points past the end must
 /// reject the file, never stop the app. Every read of a file's structure goes
@@ -17,7 +32,7 @@ struct ByteView {
     var bytes: Data { data }
 
     private func require(_ at: Int, _ length: Int) throws {
-        guard at >= 0, length >= 0, at <= count - length else { throw StructureCheck.Invalid("truncated data") }
+        guard at >= 0, length >= 0, at <= count - length else { throw FormatError("truncated data") }
     }
 
     func u8(_ at: Int) throws -> Int {
@@ -66,24 +81,4 @@ struct ByteView {
 
     /// Nothing but padding (zero or 0xFF bytes).
     var isPadding: Bool { data.allSatisfy { $0 == 0 || $0 == 0xFF } }
-}
-
-/// A TIFF structure's byte order and first IFD, read through a ByteView:
-/// EXIF blocks and JPEG's multi-picture index share it.
-struct TIFFReader {
-    let view: ByteView
-    let bigEndian: Bool
-
-    init(_ view: ByteView) throws {
-        self.view = view
-        switch try view.be(0, 2) {
-        case 0x4D4D: bigEndian = true
-        case 0x4949: bigEndian = false
-        default: throw StructureCheck.Invalid("byte order")
-        }
-        guard try read(2, 2) == 42 else { throw StructureCheck.Invalid("TIFF header") }
-    }
-
-    func read(_ at: Int, _ length: Int) throws -> Int { try bigEndian ? view.be(at, length) : view.le(at, length) }
-    var firstIFD: Int { get throws { try read(4, 4) } }
 }

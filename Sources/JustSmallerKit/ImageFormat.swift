@@ -40,33 +40,23 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
     }
 
     public static func detect(header: Data, pathExtension: String) -> ImageFormat? {
-        let b = [UInt8](header)
-        func starts(_ bytes: [UInt8], at offset: Int = 0) -> Bool {
-            b.count >= offset + bytes.count && Array(b[offset..<offset + bytes.count]) == bytes
-        }
-        func ascii(_ s: String, at offset: Int = 0) -> Bool { starts(Array(s.utf8), at: offset) }
-
-        if starts([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) { return .png }
-        if starts([0xFF, 0xD8, 0xFF]) { return .jpeg }
-        if ascii("GIF87a") || ascii("GIF89a") { return .gif }
-        if ascii("RIFF") && ascii("WEBP", at: 8) { return .webp }
-        if ascii("ftyp", at: 4), isHEIF(b) { return .heic }
+        let b = ByteView(header)
+        if b.has(PNGChunks.signature) { return .png }
+        if b.has([0xFF, 0xD8, 0xFF]) { return .jpeg }
+        if b.has("GIF87a") || b.has("GIF89a") { return .gif }
+        if b.has("RIFF") && b.has("WEBP", at: 8) { return .webp }
+        if b.has("ftyp", at: 4), isHEIF(b) { return .heic }
         if pathExtension.lowercased() == "svg", looksLikeSVG(header) { return .svg }
         return nil
     }
 
-    /// HEIF files share their container with AVIF, so check the brands.
-    private static func isHEIF(_ b: [UInt8]) -> Bool {
-        let boxSize = Int(b[0]) << 24 | Int(b[1]) << 16 | Int(b[2]) << 8 | Int(b[3])
-        let end = min(boxSize, b.count)
-        guard end >= 16 else { return false }
+    /// HEIF files share their container with AVIF, so check the brands:
+    /// the major brand, then the compatible ones, inside the ftyp box.
+    private static func isHEIF(_ b: ByteView) -> Bool {
+        guard let ftyp = try? BMFFBoxes.box(at: 0, in: b, topLevel: true).payload else { return false }
         let heicBrands: Set<String> = ["heic", "heix", "heim", "heis", "hevc", "hevx"]
-        var brands = [String(decoding: b[8..<12], as: UTF8.self)]
-        var offset = 16 // major brand, minor version, then the compatible brands
-        while offset + 4 <= end {
-            brands.append(String(decoding: b[offset..<offset + 4], as: UTF8.self))
-            offset += 4
-        }
+        let brands = stride(from: 0, to: ftyp.count - 3, by: 4).filter { $0 != 4 } // minor version at 4
+            .compactMap { (try? ftyp.view($0, 4)).map { String(decoding: $0.bytes, as: UTF8.self) } }
         return !brands.contains("avif") && brands.contains(where: heicBrands.contains)
     }
 

@@ -5,7 +5,7 @@ import Foundation
 /// sequence and in the right number, nothing unexpected after the end — and
 /// every image a multi-picture index lists, sound in the same way.
 enum JPEGCheck {
-    typealias Invalid = StructureCheck.Invalid
+    typealias Invalid = FormatError
 
     /// What the original contributes.
     struct Reference {
@@ -19,16 +19,16 @@ enum JPEGCheck {
         let trailer: Data
 
         init(_ a: ByteView) {
-            let lenient = (try? JPEGMetadataFilter.segments(a.bytes))?.headers ?? []
+            let lenient = (try? JPEGMarkers.headers(a))?.segments ?? []
             let frame = lenient.first { JPEGCheck.isFrame($0.marker) }?.marker
             self.frame = frame
             let strict = try? JPEGCheck.parse(a, allowing: frame)
             complete = strict?.complete
-            var segments = Set(strict?.segments ?? lenient.filter { JPEGCheck.isMetadata($0.marker) }.map(\.bytes))
+            var segments = Set(strict?.segments ?? lenient.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
             // Those of the images a multi-picture index lists, too.
             for start in JPEGStructure.imageIndex(a)?.starts.dropFirst() ?? [] {
-                if let image = try? a.view(from: start), let s = try? JPEGMetadataFilter.segments(image.bytes) {
-                    segments.formUnion(s.headers.filter { JPEGCheck.isMetadata($0.marker) }.map(\.bytes))
+                if let image = try? a.view(from: start), let s = try? JPEGMarkers.headers(image).segments {
+                    segments.formUnion(s.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
                 }
             }
             self.segments = segments
@@ -97,40 +97,26 @@ enum JPEGCheck {
         var coded: [[Int]] = []
 
         while true {
-            guard try b.u8(i) == 0xFF else { throw Invalid("data between segments") }
-            let marker = UInt8(try b.u8(i + 1))
-            if marker == 0xFF { i += 1; continue } // fill byte
+            let segment = try JPEGMarkers.segment(at: i, in: b)
+            let marker = segment.marker, s = segment.payload, end = segment.end
             if marker == 0xD9 {
                 guard scans > 0 else { throw Invalid("no scan") }
-                image.end = i + 2
+                image.end = end
                 image.complete = image.frame == 0xC2
                     ? coded.allSatisfy { $0.allSatisfy { $0 == 0 } }
                     : coded.allSatisfy { $0[0] == 0 }
                 return image
             }
-            guard marker != 0x01, marker != 0xD8, !(0xD0...0xD7).contains(marker) else {
-                throw Invalid(String(format: "marker %02X out of place", marker))
-            }
-            let length = try b.be(i + 2, 2)
-            guard length >= 2 else { throw Invalid("segment length") }
-            let s = try b.view(i + 4, length - 2) // the payload
-            let end = i + 2 + length
+            guard JPEGMarkers.hasLength(marker) else { throw Invalid(String(format: "marker %02X out of place", marker)) }
             switch marker {
             case _ where isMetadata(marker):
-                image.segments.append(try b.view(i, 2 + length).bytes)
+                image.segments.append(segment.whole.bytes)
             case 0xDB: // DQT
-                var k = 0
-                while k < s.count {
-                    let pq = try s.u8(k) >> 4, tq = try s.u8(k) & 15
-                    guard pq <= 1, tq <= 3 else { throw Invalid("DQT") }
-                    for n in 0..<64 {
-                        let step = try pq == 0 ? s.u8(k + 1 + n) : s.be(k + 1 + 2 * n, 2)
-                        guard step > 0 else { throw Invalid("DQT zero step") }
-                    }
-                    quant[tq] = true
-                    k += 1 + 64 * (pq + 1)
+                for table in try JPEGMarkers.quantTables(s) {
+                    guard table.precision <= 1, table.id <= 3 else { throw Invalid("DQT") }
+                    guard !table.steps.contains(0) else { throw Invalid("DQT zero step") }
+                    quant[table.id] = true
                 }
-                guard k == s.count else { throw Invalid("DQT") }
             case 0xC4: // DHT
                 var k = 0
                 while k < s.count {
@@ -156,8 +142,12 @@ enum JPEGCheck {
             case 0xDD: // DRI
                 guard s.count == 2 else { throw Invalid("DRI") }
                 restartInterval = try s.be(0, 2)
-            case 0xCC: // DAC, arithmetic coding only
-                guard let originalFrame, arithmetic.contains(originalFrame) else { throw Invalid("DAC") }
+            case 0xCC: // DAC, arithmetic coding only: class/table, then DC bounds L ≤ U or AC Kx 1–63
+                guard let originalFrame, arithmetic.contains(originalFrame), s.count % 2 == 0 else { throw Invalid("DAC") }
+                for k in stride(from: 0, to: s.count, by: 2) {
+                    let tc = try s.u8(k) >> 4, tb = try s.u8(k) & 15, value = try s.u8(k + 1)
+                    guard tc <= 1, tb <= 3, tc == 0 ? value & 15 <= value >> 4 : (1...63).contains(value) else { throw Invalid("DAC") }
+                }
             case _ where isFrame(marker):
                 guard image.frame == 0 else { throw Invalid("second frame") }
                 guard [0xC0, 0xC1, 0xC2].contains(marker) || marker == originalFrame else {
@@ -168,7 +158,11 @@ enum JPEGCheck {
                 height = try s.be(1, 2); width = try s.be(3, 2)
                 let n = try s.u8(5)
                 guard (1...4).contains(n), s.count == 6 + 3 * n, width > 0, height > 0 else { throw Invalid("SOF") }
-                guard precision == 8 || marker == originalFrame else { throw Invalid("SOF precision") }
+                // 8 or 12 bits for DCT, 2–16 lossless; anything but 8 only where the original had it.
+                let precisions = lossless.contains(marker) ? 2...16 : 8...12
+                guard precisions.contains(precision), lossless.contains(marker) || precision % 4 == 0,
+                      precision == 8 || marker == originalFrame
+                else { throw Invalid("SOF precision") }
                 for c in 0..<n {
                     let id = try s.u8(6 + 3 * c), hv = try s.u8(7 + 3 * c), t = try s.u8(8 + 3 * c)
                     let h = hv >> 4, v = hv & 15
@@ -195,23 +189,13 @@ enum JPEGCheck {
                               dc: dc, ac: ac, coded: &coded)
                 scans += 1
                 // The entropy-coded data, up to the next real marker.
-                var k = end, restarts = 0
-                while true {
-                    guard let next = b.index(of: 0xFF, from: k) else { throw Invalid("scan runs to the end of the file") }
-                    let m = try b.u8(next + 1)
-                    if m == 0x00 { k = next + 2; continue }
-                    if m == 0xFF { k = next + 1; continue } // fill before a marker
-                    if (0xD0...0xD7).contains(m) {
-                        guard restartInterval > 0, m - 0xD0 == restarts % 8 else { throw Invalid("restart marker out of sequence") }
-                        restarts += 1
-                        k = next + 2
-                        continue
-                    }
-                    i = next
-                    break
-                }
+                let data = JPEGMarkers.entropyData(from: end, in: b)
+                guard data.end < b.count else { throw Invalid("scan runs to the end of the file") }
+                guard data.restarts == 0 || restartInterval > 0, data.inSequence else { throw Invalid("restart marker out of sequence") }
+                let restarts = data.restarts
+                i = data.end
                 if restartInterval > 0, !lossless.contains(image.frame) {
-                    let hMax = components.map(\.h).max()!, vMax = components.map(\.v).max()!
+                    let hMax = components.map(\.h).max() ?? 1, vMax = components.map(\.v).max() ?? 1
                     let mcus: Int
                     if ns == 1 {
                         let c = components[members[0]]
@@ -235,11 +219,11 @@ enum JPEGCheck {
         var photoshop = Data(), photoshopChanged = false
         for s in segments {
             let v = ByteView(s), marker = s[s.startIndex + 1], payload = try v.view(from: 4)
-            let part = JPEGMetadataFilter.part(marker, payload: payload.bytes)
+            let part = JPEGMarkers.part(marker, payload: payload.bytes)
             let changed = !original.contains(s)
             if part == .photoshop {
                 // Resources may continue from one APP13 to the next.
-                photoshop += payload.bytes.dropFirst(JPEGMetadataFilter.photoshopHeader.count)
+                photoshop += payload.bytes.dropFirst(JPEGMarkers.photoshopHeader.count)
                 photoshopChanged = photoshopChanged || changed
                 continue
             }
@@ -247,10 +231,10 @@ enum JPEGCheck {
             switch part {
             case .jfif: try Invalid.within("JFIF") { try PayloadCheck.jfif(payload) }
             case .jfifExtension, .multiPicture: break // a JFIF thumbnail; the index is checked image by image
-            case .exif: try Invalid.within("EXIF") { try PayloadCheck.tiff(payload.view(from: JPEGMetadataFilter.exifHeader.count)) }
-            case .xmp: try Invalid.within("XMP") { try PayloadCheck.xml(payload.view(from: JPEGMetadataFilter.xmpHeader.count)) }
+            case .exif: try Invalid.within("EXIF") { try PayloadCheck.tiff(payload.view(from: JPEGMarkers.exifHeader.count)) }
+            case .xmp: try Invalid.within("XMP") { try PayloadCheck.xml(payload.view(from: JPEGMarkers.xmpHeader.count)) }
             case .extendedXMP:
-                try Invalid.within("extended XMP") { try PayloadCheck.extendedXMP(payload.view(from: JPEGMetadataFilter.extendedXMPHeader.count)) }
+                try Invalid.within("extended XMP") { try PayloadCheck.extendedXMP(payload.view(from: JPEGMarkers.extendedXMPHeader.count)) }
             case .adobe: try Invalid.within("Adobe marker") { try PayloadCheck.adobe(payload) }
             case .comment: throw Invalid("comment changed")
             case .iccProfile: throw Invalid("colour profile changed")

@@ -87,7 +87,8 @@ final class StructureCheckTests {
 
     /// Where the first segment with `marker` starts.
     private func segment(_ b: [UInt8], _ marker: UInt8) -> Int {
-        (2..<b.count - 1).first { b[$0] == 0xFF && b[$0 + 1] == marker }!
+        let found = try! JPEGMarkers.headers(ByteView(b))
+        return marker == 0xDA ? found.scan : found.segments.first { $0.marker == marker }!.offset
     }
 
     @Test func damagedJPEGsAreRejected() throws {
@@ -148,19 +149,14 @@ final class StructureCheckTests {
 
     // MARK: - PNG
 
+    /// Each chunk's type and where it and its payload are in `b`.
     private func chunks(_ b: [UInt8]) -> [(type: String, whole: Range<Int>, data: Range<Int>)] {
-        var out: [(String, Range<Int>, Range<Int>)] = [], i = 8
-        while i + 12 <= b.count {
-            let n = Int(b[i]) << 24 | Int(b[i + 1]) << 16 | Int(b[i + 2]) << 8 | Int(b[i + 3])
-            out.append((String(decoding: b[i + 4..<i + 8], as: UTF8.self), i..<i + 12 + n, i + 8..<i + 8 + n))
-            i += 12 + n
-        }
-        return out
+        ((try? PNGChunks.read(ByteView(b), strict: false)) ?? []).map { ($0.type, $0.whole.bytes.indices, $0.data.bytes.indices) }
     }
 
     private func replacing(_ b: [UInt8], _ type: String, with payload: [UInt8]) -> [UInt8] {
         let c = chunks(b).first { $0.type == type }!
-        return Array(b[..<c.whole.lowerBound]) + [UInt8](PNGMetadataFilter.chunk(type, payload)) + Array(b[c.whole.upperBound...])
+        return Array(b[..<c.whole.lowerBound]) + [UInt8](PNGChunks.write(type, payload)) + Array(b[c.whole.upperBound...])
     }
 
     private func zlibCompress(_ raw: [UInt8]) -> [UInt8] {
@@ -181,7 +177,7 @@ final class StructureCheckTests {
         let url = write("a.png", .png)
         // A pixel density (pHYs) right after IHDR.
         let plain = try bytes(url)
-        try Data(Array(plain[..<33]) + [UInt8](PNGMetadataFilter.chunk("pHYs", [0, 0, 11, 19, 0, 0, 11, 19, 1])) + Array(plain[33...]))
+        try Data(Array(plain[..<33]) + [UInt8](PNGChunks.write("pHYs", [0, 0, 11, 19, 0, 0, 11, 19, 1])) + Array(plain[33...]))
             .write(to: url)
         let b = try bytes(url)
         let idat = chunks(b).first { $0.type == "IDAT" }!
@@ -216,7 +212,7 @@ final class StructureCheckTests {
     @Test func unusualOriginalsStillCount() throws {
         let url = write("a.png", .png)
         let plain = try bytes(url)
-        let withDensity = Array(plain[..<33]) + [UInt8](PNGMetadataFilter.chunk("pHYs", [0, 0, 11, 19, 0, 0, 11, 19, 1])) + Array(plain[33...])
+        let withDensity = Array(plain[..<33]) + [UInt8](PNGChunks.write("pHYs", [0, 0, 11, 19, 0, 0, 11, 19, 1])) + Array(plain[33...])
         let original = dir.appending(path: "trailing.png")
         try Data(withDensity + Array("trailing".utf8)).write(to: original)
         #expect(try !rejects(withDensity, original: original, .png))
@@ -249,7 +245,7 @@ final class StructureCheckTests {
 
     // MARK: - Metadata a step wrote
 
-    private func appSegment(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] { [UInt8](JPEGMetadataFilter.segment(marker, payload)) }
+    private func appSegment(_ marker: UInt8, _ payload: [UInt8]) -> [UInt8] { [UInt8](JPEGMarkers.write(marker, payload)) }
 
     /// The file with `segment` right after SOI.
     private func inserting(_ segment: [UInt8], into b: [UInt8]) -> [UInt8] { Array(b[..<2]) + segment + Array(b[2...]) }
@@ -257,7 +253,7 @@ final class StructureCheckTests {
     @Test func rewrittenMetadataIsCheckedToo() throws {
         let url = write("a.jpg", .jpeg)
         let b = try bytes(url)
-        let exif = JPEGMetadataFilter.exifHeader
+        let exif = JPEGMarkers.exifHeader
         // TIFF header, IFD0 with one entry: Artist (ASCII, 20 bytes) at an offset past the end.
         let tiff: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 1, 0x01, 0x3B, 0, 2, 0, 0, 0, 20, 0, 0, 0x10, 0, 0, 0, 0, 0]
         #expect(try rejects(inserting(appSegment(0xE1, exif + tiff), into: b), original: url, .jpeg), "EXIF value outside")
@@ -265,9 +261,9 @@ final class StructureCheckTests {
         sound[21] = 26; sound[20] = 0 // the value right after the IFD
         #expect(try !rejects(inserting(appSegment(0xE1, exif + sound + Array(repeating: 0x41, count: 20)), into: b), original: url, .jpeg),
                 "sound EXIF")
-        let xmp = JPEGMetadataFilter.xmpHeader
+        let xmp = JPEGMarkers.xmpHeader
         #expect(try rejects(inserting(appSegment(0xE1, xmp + Array("<x:xmpmeta><rdf".utf8)), into: b), original: url, .jpeg), "XMP")
-        let photoshop = JPEGMetadataFilter.photoshopHeader
+        let photoshop = JPEGMarkers.photoshopHeader
         let resource = Array("8BIM".utf8) + [0x04, 0x04, 0, 0, 0, 0, 0, 12] + [0x1C, 2, 80, 0, 20] + Array("Jane".utf8) + [0, 0, 0]
         #expect(try rejects(inserting(appSegment(0xED, photoshop + resource), into: b), original: url, .jpeg), "IPTC length")
 
@@ -276,6 +272,21 @@ final class StructureCheckTests {
         let withBrokenEXIF = inserting(appSegment(0xE1, exif + tiff), into: b)
         try Data(withBrokenEXIF).write(to: broken)
         #expect(try !rejects(withBrokenEXIF, original: broken, .jpeg))
+    }
+
+    /// What we write follows the specification even where the original
+    /// didn't: EXIF in front of the image data moves behind it.
+    @Test func writtenWebPIsInOrder() async throws {
+        let url = try await webp()
+        let image = Array(try bytes(url)[12...])
+        let tiff = JPEGMetadataFilter.minimalTIFF(orientation: 1)
+        let exif = Array("EXIF".utf8) + [UInt8(tiff.count), 0, 0, 0] + tiff
+        let vp8x = Array("VP8X".utf8) + [10, 0, 0, 0, 0x08, 0, 0, 0, 63, 0, 0, 47, 0, 0]
+        let original = dir.appending(path: "exif-first.webp")
+        try Data(riff(vp8x + exif + image)).write(to: original)
+        #expect(try rejects(bytes(original), original: original, .webp), "the original's order is wrong")
+        let written = try WebPMetadataFilter.filter(Data(contentsOf: original), level: .keep)
+        #expect(try !rejects([UInt8](written), original: original, .webp))
     }
 
     // MARK: - HEIF

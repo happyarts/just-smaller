@@ -1,28 +1,25 @@
 import Foundation
-import zlib
 
 /// PNG after its specification: every chunk's CRC, IHDR's fields, the chunk
 /// order rules, the image data inflated to exactly the bytes the header asks
 /// for (every row's filter byte valid, Adler-32 right), the same for each
 /// APNG frame, and the text, EXIF and XMP a step rewrote.
 enum PNGCheck {
-    typealias Invalid = StructureCheck.Invalid
+    typealias Invalid = FormatError
 
     /// What the original contributes, read leniently: its ancillary chunks
     /// and colour profile.
     struct Reference {
         let chunks: ChunkSet
-        let profile: [UInt8]?
+        let profile: Data?
 
         init(_ a: ByteView) {
-            let all = PNGCheck.chunks(lenient: a).filter { !PNGCheck.isCritical($0) }
+            let all = ((try? PNGChunks.read(a, strict: false)) ?? []).filter { !PNGChunks.isCritical($0) }
             chunks = ChunkSet(all)
-            profile = all.first { $0.type == "iCCP" }.flatMap { try? PNGCheck.compressedText($0.data) }
+            profile = all.first { $0.type == "iCCP" }.flatMap { try? PNGChunks.text($0).content }
         }
     }
 
-    /// Bit 5 of the first letter is clear for chunks a decoder must understand.
-    static func isCritical(_ chunk: Chunk) -> Bool { chunk.type.utf8.first! & 0x20 == 0 }
 
     /// Chunks the tools rewrite as part of their job: palette and colour
     /// reductions touch the colour-type dependent ones, the metadata filter
@@ -39,11 +36,11 @@ enum PNGCheck {
 
     private struct Header {
         let width: Int, height: Int, depth: Int, colourType: Int, interlaced: Bool
-        var bitsPerPixel: Int { [0: 1, 2: 3, 3: 1, 4: 2, 6: 4][colourType]! * depth }
+        var bitsPerPixel: Int { ([0: 1, 2: 3, 3: 1, 4: 2, 6: 4][colourType] ?? 4) * depth } // colour type checked in header(_:)
     }
 
     static func check(_ b: ByteView, against reference: Reference) throws {
-        let chunks = try chunks(b)
+        let chunks = try PNGChunks.read(b, strict: true)
         guard let first = chunks.first, first.type == "IHDR" else { throw Invalid("IHDR not first") }
         guard chunks.last?.type == "IEND", chunks.last?.data.isEmpty == true else { throw Invalid("IEND not last") }
         let header = try header(first.data)
@@ -63,7 +60,7 @@ enum PNGCheck {
         }
         for chunk in chunks {
             let type = chunk.type, d = chunk.data
-            let critical = isCritical(chunk)
+            let critical = PNGChunks.isCritical(chunk)
             if critical, !["IHDR", "PLTE", "IDAT", "IEND"].contains(type) { throw Invalid("unknown critical chunk \(type)") }
             if type.utf8.dropFirst(2).first! & 0x20 != 0 { throw Invalid("reserved bit in \(type)") }
             if once.contains(type), seen.contains(type) { throw Invalid("second \(type)") }
@@ -93,7 +90,7 @@ enum PNGCheck {
                 guard d.count == 1, try d.u8(0) <= 3 else { throw Invalid("sRGB") }
                 if !reference.chunks.contains(type: "sRGB"), !reference.chunks.contains(type: "iCCP") { throw Invalid("sRGB added") }
             case "iCCP":
-                guard try compressedText(d) == reference.profile else { throw Invalid("colour profile changed") }
+                guard try PNGChunks.text(chunk).content == reference.profile else { throw Invalid("colour profile changed") }
             case "acTL":
                 guard d.count == 8, try d.be(0, 4) > 0 else { throw Invalid("acTL") }
                 expectedFrames = try d.be(0, 4)
@@ -144,84 +141,9 @@ enum PNGCheck {
 
     /// Text, EXIF and XMP a step wrote.
     private static func payload(_ chunk: Chunk) throws {
-        let d = chunk.data
-        switch chunk.type {
-        case "eXIf":
-            try PayloadCheck.tiff(d)
-        case "tEXt":
-            _ = try keyword(d)
-        case "zTXt":
-            _ = try compressedText(d)
-        case "iTXt":
-            // keyword NUL, compression flag, method, language NUL, translated keyword NUL, text
-            let (name, k) = try keyword(d)
-            let compressed = try d.u8(k + 1)
-            guard compressed <= 1, try d.u8(k + 2) == 0,
-                  let language = d.index(of: 0, from: k + 3), let translated = d.index(of: 0, from: language + 1)
-            else { throw Invalid("iTXt") }
-            let raw = try d.view(from: translated + 1)
-            let text = compressed == 1 ? Data(try inflated([raw.bytes])) : raw.bytes
-            if name == PNGMetadataFilter.xmpKeyword { try Invalid.within("XMP") { try PayloadCheck.xml(ByteView(text)) } }
-        default:
-            break
-        }
-    }
-
-    /// A text chunk's keyword (1–79 Latin-1 characters) and where its NUL is.
-    private static func keyword(_ d: ByteView) throws -> (String, Int) {
-        guard let k = d.index(of: 0, from: 0), (1...79).contains(k) else { throw Invalid("text keyword") }
-        return (String(decoding: try d.view(0, k).bytes, as: UTF8.self), k)
-    }
-
-    /// The chunks of a file read leniently: as many as fit, checksums unread.
-    static func chunks(lenient a: ByteView) -> [Chunk] {
-        var out: [Chunk] = [], i = 8
-        while let length = try? a.be(i, 4), let data = try? a.view(i + 8, length), let type = try? a.view(i + 4, 4) {
-            out.append(Chunk(type: String(decoding: type.bytes, as: UTF8.self), data: data))
-            i += 12 + length
-        }
-        return out
-    }
-
-    static func chunks(_ b: ByteView) throws -> [Chunk] {
-        guard b.has(PNGMetadataFilter.signature) else { throw Invalid("PNG signature") }
-        var out: [Chunk] = [], i = 8
-        while i < b.count {
-            let length = try b.be(i, 4)
-            guard length <= 0x7FFF_FFFF else { throw Invalid("chunk length") }
-            let typeBytes = try b.view(i + 4, 4).bytes
-            guard typeBytes.allSatisfy({ (0x41...0x5A).contains($0) || (0x61...0x7A).contains($0) }) else { throw Invalid("chunk type") }
-            let type = String(decoding: typeBytes, as: UTF8.self)
-            let data = try b.view(i + 8, length)
-            let stored = try b.be(i + 8 + length, 4)
-            let covered = try b.view(i + 4, 4 + length)
-            guard Int(PNGMetadataFilter.crc32(covered.bytes)) == stored else {
-                throw Invalid("\(type) checksum")
-            }
-            out.append(Chunk(type: type, data: data))
-            i += 12 + length
-            if type == "IEND", i != b.count { throw Invalid("data after IEND") }
-        }
-        return out
-    }
-
-    /// The text of iCCP/zTXt: keyword, NUL, method 0, zlib data.
-    static func compressedText(_ d: ByteView) throws -> [UInt8] {
-        let (_, k) = try keyword(d)
-        guard try d.u8(k + 1) == 0 else { throw Invalid("compression method") }
-        return try inflated([d.view(from: k + 2).bytes])
-    }
-
-    /// Inflates one complete zlib stream (header and Adler-32 checked by zlib).
-    private static func inflated(_ data: [Data]) throws -> [UInt8] {
-        let limit = 64 << 20
-        var out: [UInt8] = []
-        let ok = inflateStream(data) { piece in
-            out += piece
-            return out.count <= limit
-        }
-        guard ok else { throw Invalid("compressed data") }
-        return out
+        if chunk.type == "eXIf" { return try PayloadCheck.tiff(chunk.data) }
+        let text = try PNGChunks.text(chunk)
+        if text.keyword == PNGChunks.xmpKeyword { try Invalid.within("XMP") { try PayloadCheck.xml(ByteView(text.content)) } }
     }
 
     /// PNG image data: the rows of each pass, each a filter byte (0–4) and
@@ -236,7 +158,7 @@ enum PNGCheck {
             if w > 0, h > 0 { rows.append((h, 1 + (w * header.bitsPerPixel + 7) / 8)) }
         }
         var pass = 0, row = 0, untilFilter = 0, valid = true
-        let ok = inflateStream(data) { piece in
+        let ok = Zlib.stream(data) { piece in
             var k = piece.startIndex
             while k < piece.endIndex {
                 if untilFilter == 0 {
@@ -252,45 +174,5 @@ enum PNGCheck {
             return true
         }
         guard ok, valid, pass == rows.count, untilFilter == 0 else { throw Invalid("image data") }
-    }
-
-    /// Runs zlib over the pieces in turn, handing each inflated piece to
-    /// `sink` (which may stop it). True if the stream ended exactly at the
-    /// end of the last piece.
-    private static func inflateStream(_ pieces: [Data], sink: (ArraySlice<UInt8>) -> Bool) -> Bool {
-        var stream = z_stream()
-        guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { return false }
-        defer { inflateEnd(&stream) }
-        var buffer = [UInt8](repeating: 0, count: 256 << 10)
-        var ended = false
-        /// One inflate call; false on an error or when the sink stops.
-        func step() -> Bool {
-            let status = buffer.withUnsafeMutableBufferPointer { out in
-                stream.next_out = out.baseAddress
-                stream.avail_out = uInt(out.count)
-                return zlib.inflate(&stream, Z_NO_FLUSH)
-            }
-            let produced = buffer.count - Int(stream.avail_out)
-            guard sink(buffer[0..<produced]) else { return false }
-            if status == Z_STREAM_END { ended = true; return true }
-            return status == Z_OK && (produced > 0 || stream.avail_in > 0)
-        }
-        for piece in pieces where !piece.isEmpty {
-            guard !ended else { return false } // data after the end of the stream
-            let ok = piece.withUnsafeBytes { input -> Bool in
-                stream.next_in = UnsafeMutablePointer(mutating: input.bindMemory(to: UInt8.self).baseAddress)
-                stream.avail_in = uInt(input.count)
-                while stream.avail_in > 0, !ended {
-                    guard step() else { return false }
-                }
-                return stream.avail_in == 0
-            }
-            guard ok else { return false }
-        }
-        // Output still inside zlib once all input is in.
-        while !ended {
-            guard step() else { return false }
-        }
-        return true
     }
 }

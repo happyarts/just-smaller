@@ -6,24 +6,22 @@ import Foundation
 /// unknown chunks must be the original's; EXIF and XMP a step rewrote are
 /// checked on their own.
 enum WebPCheck {
-    typealias Invalid = StructureCheck.Invalid
+    typealias Invalid = FormatError
 
     /// What the original contributes: its chunks, read leniently.
     struct Reference {
         let chunks: ChunkSet
-        init(_ a: ByteView) { chunks = ChunkSet(WebPCheck.chunks(lenient: a)) }
+        init(_ a: ByteView) { chunks = ChunkSet(RIFFChunks.webp(a).chunks) }
     }
 
     /// Image data: checked above, never compared with the original's.
     private static let imageData: Set<String> = ["ALPH", "VP8 ", "VP8L", "ANMF"]
 
-    /// ICCP, ANIM, image data, EXIF, XMP, then unknown chunks.
-    private static let rank: [String: Int] = ["ICCP": 1, "ANIM": 2, "ALPH": 3, "VP8 ": 3, "VP8L": 3, "ANMF": 3, "EXIF": 4, "XMP ": 5]
 
     static func check(_ b: ByteView, against reference: Reference) throws {
         guard b.has("RIFF"), b.has("WEBP", at: 8) else { throw Invalid("RIFF header") }
         guard try b.le(4, 4) == b.count - 8 else { throw Invalid("RIFF size") }
-        let chunks = try chunks(b.view(from: 12))
+        let chunks = try RIFFChunks.read(b.view(from: 12), strict: true).chunks
         guard let first = chunks.first else { throw Invalid("no image") }
 
         switch first.type {
@@ -49,7 +47,7 @@ enum WebPCheck {
 
         var last = 0, seen: Set<String> = []
         for (k, chunk) in rest.enumerated() {
-            let r = rank[chunk.type] ?? 6
+            let r = RIFFChunks.webpOrder(chunk.type)
             guard r >= last else { throw Invalid("\(chunk.type) out of order") }
             last = r
             guard chunk.type == "ANMF" || r == 6 || seen.insert(chunk.type).inserted else { throw Invalid("second \(chunk.type)") }
@@ -74,7 +72,7 @@ enum WebPCheck {
         for chunk in rest where !imageData.contains(chunk.type) && !reference.chunks.contains(chunk) {
             switch chunk.type {
             case "EXIF":
-                try Invalid.within("EXIF") { try PayloadCheck.tiff(chunk.data.view(from: WebPMetadataFilter.tiffOffset(chunk.data.bytes))) }
+                try Invalid.within("EXIF") { try PayloadCheck.tiff(chunk.data.view(from: RIFFChunks.tiffOffset(chunk.data.bytes))) }
             case "XMP ":
                 try Invalid.within("XMP") { try PayloadCheck.xml(chunk.data) }
             case "ICCP":
@@ -85,35 +83,10 @@ enum WebPCheck {
         }
     }
 
-    /// The chunks of a file read leniently: as many as fit.
-    static func chunks(lenient a: ByteView) -> [Chunk] {
-        var out: [Chunk] = [], i = 12
-        while let size = try? a.le(i + 4, 4), let data = try? a.view(i + 8, size), let type = try? a.view(i, 4) {
-            out.append(Chunk(type: String(decoding: type.bytes, as: UTF8.self), data: data))
-            i += 8 + size + (size & 1)
-        }
-        return out
-    }
-
-    /// The chunks of a RIFF body, which they must fill exactly.
-    static func chunks(_ b: ByteView) throws -> [Chunk] {
-        var out: [Chunk] = [], i = 0
-        while i < b.count {
-            let size = try b.le(i + 4, 4)
-            out.append(Chunk(type: String(decoding: try b.view(i, 4).bytes, as: UTF8.self), data: try b.view(i + 8, size)))
-            i += 8 + size
-            if size & 1 == 1 {
-                guard try b.u8(i) == 0 else { throw Invalid("chunk padding") }
-                i += 1
-            }
-        }
-        return out
-    }
-
     private static func animationFrame(_ p: ByteView, canvas: (Int, Int)) throws {
         let x = 2 * (try p.le(0, 3)), y = 2 * (try p.le(3, 3)), w = try p.le(6, 3) + 1, h = try p.le(9, 3) + 1
         guard x + w <= canvas.0, y + h <= canvas.1, try p.u8(15) & 0b1111_1100 == 0 else { throw Invalid("ANMF") }
-        let inner = try chunks(p.view(from: 16))
+        let inner = try RIFFChunks.read(p.view(from: 16), strict: true).chunks
         guard let image = inner.first(where: { $0.type == "VP8 " || $0.type == "VP8L" }), try bitstreamSize(image) == (w, h)
         else { throw Invalid("ANMF image") }
         if let k = inner.firstIndex(where: { $0.type == "ALPH" }) {

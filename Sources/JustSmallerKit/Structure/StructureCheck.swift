@@ -13,17 +13,7 @@ import Foundation
 /// same way in every container. The original is summarized once per step,
 /// read leniently: it only says what may stay as it was.
 enum StructureCheck {
-    struct Invalid: Error {
-        let detail: String
-        init(_ detail: String) { self.detail = detail }
-
-        /// Runs `body`, naming the part a failure is in ("EXIF: truncated data").
-        static func within<T>(_ part: String, _ body: () throws -> T) throws -> T {
-            do { return try body() } catch let error as Invalid {
-                throw Invalid("\(part): \(error.detail)")
-            }
-        }
-    }
+    typealias Invalid = FormatError
 
     /// What the checks need to know about the original.
     struct Reference {
@@ -69,22 +59,4 @@ enum StructureCheck {
             throw VerificationError(reason: String(localized: "invalid file structure (\(error.detail))", bundle: .module))
         }
     }
-}
-
-/// A chunk of a PNG or RIFF (WebP) file.
-struct Chunk {
-    let type: String
-    let data: ByteView
-}
-
-/// The original's chunks, to ask whether a result's chunk is one of them.
-struct ChunkSet {
-    private var byType: [String: [Data]] = [:]
-
-    init(_ chunks: [Chunk]) {
-        for chunk in chunks { byType[chunk.type, default: []].append(chunk.data.bytes) }
-    }
-
-    func contains(_ chunk: Chunk) -> Bool { byType[chunk.type]?.contains(chunk.data.bytes) ?? false }
-    func contains(type: String) -> Bool { byType[type] != nil }
 }

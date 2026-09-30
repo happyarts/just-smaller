@@ -15,18 +15,12 @@ enum JPEGStructure {
     private static func secondaryImage(_ b: ByteView) throws -> Bool {
         guard try b.be(0, 2) == 0xFFD8 else { return false }
         var i = 2
-        while i + 4 <= b.count {
-            guard try b.u8(i) == 0xFF else { return false }
-            let marker = try b.u8(i + 1)
-            if marker == 0xFF { i += 1; continue }
-            if marker == 0xD9 { return try !b.view(from: i + 2).isPadding } // EOI
-            if marker == 0x01 || (0xD0...0xD7).contains(marker) { i += 2; continue } // no length
-            let length = try b.be(i + 2, 2)
-            guard length >= 2 else { return false }
+        while i < b.count {
+            let s = try JPEGMarkers.segment(at: i, in: b)
+            if s.marker == 0xD9 { return try !b.view(from: s.end).isPadding } // EOI: anything after it?
             // APP2 "MPF\0": a multi-picture index.
-            if marker == 0xE2, b.has("MPF\0", at: i + 4) { return true }
-            i += 2 + length
-            if marker == 0xDA { i = endOfScan(from: i, in: b) } // SOS: entropy-coded data follows
+            if s.marker == 0xE2, s.payload.has("MPF\0") { return true }
+            i = s.marker == 0xDA ? JPEGMarkers.entropyData(from: s.end, in: b).end : s.end
         }
         return false
     }
@@ -39,39 +33,25 @@ enum JPEGStructure {
     }
 
     private static func findIndex(_ b: ByteView) throws -> (starts: [Int], end: Int)? {
-        guard try b.be(0, 2) == 0xFFD8 else { return nil }
-        var i = 2
-        while try b.u8(i) == 0xFF {
-            let marker = try b.u8(i + 1)
-            if marker == 0xFF { i += 1; continue }
-            if marker == 0xDA || marker == 0xD9 { return nil }
-            if marker == 0x01 || (0xD0...0xD7).contains(marker) { i += 2; continue }
-            let length = try b.be(i + 2, 2)
-            guard length >= 2 else { return nil }
-            if marker == 0xE2, b.has("MPF\0", at: i + 4) {
-                return try entries(TIFFReader(b.view(i + 8, length - 6)), tiff: i + 8, fileSize: b.count)
-            }
-            i += 2 + length
-        }
-        return nil
+        guard let index = try JPEGMarkers.headers(b).segments.first(where: { $0.marker == 0xE2 && $0.payload.has("MPF\0") })
+        else { return nil }
+        return try entries(TIFFReader(index.payload.view(from: 4)), tiff: index.offset + 8, fileSize: b.count)
     }
 
+    /// MPEntry (0xB002): 16 bytes per image — attributes, size, offset
+    /// (0 for the first), two dependent-image entries.
     private static func entries(_ r: TIFFReader, tiff: Int, fileSize: Int) throws -> (starts: [Int], end: Int)? {
-        let ifd = try r.firstIFD
-        for k in 0..<(try r.read(ifd, 2)) {
-            let e = ifd + 2 + k * 12
-            guard try r.read(e, 2) == 0xB002 else { continue } // MPEntry: 16 bytes per image
-            let length = try r.read(e + 4, 4), start = try r.read(e + 8, 4)
-            guard length >= 16, length % 16 == 0 else { return nil }
-            var end = 0, starts: [Int] = []
-            for image in 0..<length / 16 {
-                let size = try r.read(start + image * 16 + 4, 4), offset = try r.read(start + image * 16 + 8, 4)
-                starts.append(image == 0 ? 0 : tiff + offset)
-                end = max(end, image == 0 ? size : tiff + offset + size)
-            }
-            return end <= fileSize ? (starts, end) : nil
+        guard let list = try r.ifd(at: r.firstIFD).entries.first(where: { $0.tag == 0xB002 })?.value,
+              list.count >= 16, list.count % 16 == 0
+        else { return nil }
+        func read(_ at: Int) throws -> Int { try r.bigEndian ? list.be(at, 4) : list.le(at, 4) }
+        var end = 0, starts: [Int] = []
+        for image in 0..<list.count / 16 {
+            let size = try read(image * 16 + 4), offset = try read(image * 16 + 8)
+            starts.append(image == 0 ? 0 : tiff + offset)
+            end = max(end, image == 0 ? size : tiff + offset + size)
         }
-        return nil
+        return end <= fileSize ? (starts, end) : nil
     }
 
     /// Only indexed images follow the first: no motion-photo video or other
@@ -79,16 +59,5 @@ enum JPEGStructure {
     static func holdsOnlyIndexedImages(_ b: ByteView) -> Bool {
         guard let index = imageIndex(b), index.starts.count > 1, let rest = try? b.view(from: index.end) else { return false }
         return rest.isPadding
-    }
-
-    /// The position of the next marker after entropy-coded data: 0xFF
-    /// followed by anything but a stuffed zero or a restart marker.
-    private static func endOfScan(from start: Int, in b: ByteView) -> Int {
-        var i = start
-        while let next = b.index(of: 0xFF, from: i), let m = try? b.u8(next + 1) {
-            if m != 0x00, !(0xD0...0xD7).contains(m) { return next }
-            i = next + 1
-        }
-        return b.count
     }
 }

@@ -17,3 +17,11 @@
   either. Measurements, tool comparisons, thresholds and the reasoning behind
   them live in the private app repo (`../just-smaller-app/docs/`); code
   comments here say what the code does, not how it was measured.
+- Untrusted input never crashes the app: every read of a file's bytes goes
+  through the readers in `Sources/JustSmallerKit/Structure/` (ByteView,
+  JPEGMarkers, PNGChunks/RIFFChunks, TIFFReader, IPTCRecords, BMFFBoxes,
+  Zlib with a size limit) — filters, detection and the structure check alike.
+  Writers live next to their readers and follow the specification.
+- Fuzzing on real files (off by default):
+  `JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz`.
+  Cases that once broke a reader go into `HostileInputTests`.

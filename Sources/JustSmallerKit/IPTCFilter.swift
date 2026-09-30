@@ -41,62 +41,22 @@ enum IPTCFilter {
         }
         // A digest without its data means nothing.
         if !kept.contains(where: { $0.id != 0x0425 }) { return Result() }
-        var out: [UInt8] = []
-        for r in kept {
-            out += Array("8BIM".utf8) + [UInt8(r.id >> 8), UInt8(r.id & 0xFF)]
-            out += [UInt8(r.name.count)] + r.name
-            if (r.name.count + 1) % 2 == 1 { out.append(0) } // the name is padded to an even length
-            let n = r.data.count
-            out += [UInt8(n >> 24 & 0xFF), UInt8(n >> 16 & 0xFF), UInt8(n >> 8 & 0xFF), UInt8(n & 0xFF)]
-            out += r.data
-            if n % 2 == 1 { out.append(0) }
-        }
-        return Result(resources: out, digest: digest)
+        return Result(resources: IPTCRecords.write(kept.map { (Int($0.id), $0.name, $0.data) }), digest: digest)
     }
 
     private static func parse(_ b: [UInt8]) -> [(id: UInt16, name: [UInt8], data: [UInt8])]? {
-        var out: [(id: UInt16, name: [UInt8], data: [UInt8])] = []
-        var i = 0
-        while i + 12 <= b.count {
-            guard b[i..<i + 4].elementsEqual(Array("8BIM".utf8)) else {
-                // Trailing zero padding is fine; anything else is not.
-                return b[i...].allSatisfy { $0 == 0 } ? out : nil
-            }
-            let id = UInt16(b[i + 4]) << 8 | UInt16(b[i + 5])
-            let nameLength = Int(b[i + 6])
-            var j = i + 7 + nameLength
-            if (nameLength + 1) % 2 == 1 { j += 1 }
-            guard j + 4 <= b.count else { return nil }
-            let size = Int(b[j]) << 24 | Int(b[j + 1]) << 16 | Int(b[j + 2]) << 8 | Int(b[j + 3])
-            guard size >= 0, j + 4 + size <= b.count else { return nil }
-            out.append((id, Array(b[i + 7..<i + 7 + nameLength]), Array(b[j + 4..<j + 4 + size])))
-            i = j + 4 + size + (size & 1)
-        }
-        return out
+        (try? IPTCRecords.resources(ByteView(b), strict: false))?.map { (UInt16($0.id), [UInt8]($0.name.bytes), [UInt8]($0.data.bytes)) }
     }
 
     /// The IIM datasets the level keeps, in their original order; nil when
     /// nothing but the record versions and the character set is left.
     static func filterIIM(_ b: [UInt8], level: MetadataHandling) -> [UInt8]? {
+        guard let datasets = try? IPTCRecords.datasets(ByteView(b), strict: false) else { return nil }
         var out: [UInt8] = []
         var meaningful = false
-        var i = 0
-        while i + 5 <= b.count, b[i] == 0x1C {
-            let record = b[i + 1], dataset = b[i + 2]
-            var length = Int(b[i + 3]) << 8 | Int(b[i + 4])
-            var start = i + 5
-            if length & 0x8000 != 0 { // extended length: the next n bytes hold it
-                let n = length & 0x7FFF
-                guard n <= 4, start + n <= b.count else { return nil }
-                length = b[start..<start + n].reduce(0) { $0 << 8 | Int($1) }
-                start += n
-            }
-            guard start + length <= b.count else { return nil }
-            if MetadataPolicy.keeps(MetadataPolicy.group(iimRecord: record, dataset: dataset), at: level) {
-                out += b[i..<start + length]
-                if !(dataset == 0 || (record, dataset) == (1, 90)) { meaningful = true }
-            }
-            i = start + length
+        for d in datasets where MetadataPolicy.keeps(MetadataPolicy.group(iimRecord: UInt8(d.record), dataset: UInt8(d.dataset)), at: level) {
+            out += d.whole.bytes
+            if !(d.dataset == 0 || (d.record, d.dataset) == (1, 90)) { meaningful = true }
         }
         return meaningful ? out : nil
     }

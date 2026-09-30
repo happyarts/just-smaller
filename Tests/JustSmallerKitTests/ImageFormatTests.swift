@@ -34,11 +34,8 @@ struct ImageFormatTests {
     }
 
     @Test func webPChunks() {
-        func chunk(_ type: String, _ size: Int) -> [UInt8] {
-            Array(type.utf8) + [UInt8(size & 0xFF), UInt8(size >> 8 & 0xFF), 0, 0] + [UInt8](repeating: 0, count: size + (size & 1))
-        }
-        let lossless = Data(Array("RIFF\0\0\0\0WEBP".utf8) + chunk("VP8X", 10) + chunk("ICCP", 3) + chunk("VP8L", 5))
-        let chunks = WebPChunks(lossless)
+        let lossless = RIFFChunks.write(form: "WEBP", [("VP8X", Data(count: 10)), ("ICCP", Data(count: 3)), ("VP8L", Data(count: 5))])
+        let chunks = Set(RIFFChunks.webp(ByteView(lossless)).chunks.map(\.type))
         #expect(chunks.contains("VP8L"))
         #expect(chunks.contains("ICCP"))
         #expect(!chunks.contains("VP8 "))

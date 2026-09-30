@@ -5,7 +5,7 @@ import Foundation
 /// and locations — every item's data inside the file's mdat or idat — and
 /// property associations and item references that point at what exists.
 enum HEIFCheck {
-    typealias Invalid = StructureCheck.Invalid
+    typealias Invalid = FormatError
 
     /// What the original contributes: its major brand.
     struct Reference {
@@ -13,31 +13,10 @@ enum HEIFCheck {
         init(_ a: ByteView) { brand = try? a.view(8, 4).bytes }
     }
 
-    private struct Box {
-        let type: String
-        let payload: ByteView
-        /// Where the payload starts in the view the box was read from.
-        let offset: Int
-    }
+    private typealias Box = BMFFBoxes.Box
 
-    /// The boxes in `b`, which they must fill exactly.
     private static func boxes(_ b: ByteView, topLevel: Bool = false) throws -> [Box] {
-        var out: [Box] = [], i = 0
-        while i < b.count {
-            var size = try b.be(i, 4), header = 8
-            let type = String(decoding: try b.view(i + 4, 4).bytes, as: UTF8.self)
-            if size == 1 {
-                size = try b.be(i + 8, 8); header = 16
-            } else if size == 0 {
-                guard topLevel else { throw Invalid("\(type) size") }
-                size = b.count - i
-            }
-            if type == "uuid" { header += 16 }
-            guard size >= header, size <= b.count - i else { throw Invalid("\(type) size") }
-            out.append(Box(type: type, payload: try b.view(i + header, size - header), offset: i + header))
-            i += size
-        }
-        return out
+        try BMFFBoxes.boxes(b, topLevel: topLevel)
     }
 
     /// A full box's children, after its version and flags and `extra` bytes.

@@ -338,42 +338,11 @@ public struct FileOptimizer: Sendable {
             facts.isUTF16 = true
         }
         if format == .webp, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
-            let chunks = WebPChunks(data)
+            let chunks = Set(RIFFChunks.webp(ByteView(data)).chunks.map(\.type))
             facts.isLosslessWebP = chunks.contains("VP8L") && !chunks.contains("VP8 ")
             facts.isAnimated = facts.isAnimated || chunks.contains("ANIM")
             facts.hasWebPMetadata = chunks.contains("EXIF") || chunks.contains("XMP ")
         }
         return facts
-    }
-}
-
-/// The chunk types in a WebP file. A lossless image has a VP8L chunk, a lossy
-/// one VP8 (with a space), and an animation ANIM plus ANMF frames.
-struct WebPChunks {
-    private(set) var types: [String] = []
-
-    init(_ data: Data) {
-        types = Self.chunks([UInt8](data.prefix(64 * 1024 * 1024))).map(\.type)
-    }
-
-    func contains(_ type: String) -> Bool { types.contains(type) }
-
-    /// Each chunk's type and where its payload is. Stops at the first chunk
-    /// that doesn't fit; `complete` says whether the walk reached the end.
-    static func chunks(_ bytes: [UInt8]) -> [(type: String, payload: Range<Int>)] {
-        walk(bytes).chunks
-    }
-
-    static func walk(_ bytes: [UInt8]) -> (chunks: [(type: String, payload: Range<Int>)], complete: Bool) {
-        guard bytes.count >= 12 else { return ([], false) }
-        var out: [(type: String, payload: Range<Int>)] = []
-        var offset = 12 // "RIFF", size, "WEBP"
-        while offset + 8 <= bytes.count {
-            let size = Int(bytes[offset + 4]) | Int(bytes[offset + 5]) << 8 | Int(bytes[offset + 6]) << 16 | Int(bytes[offset + 7]) << 24
-            guard size <= bytes.count - offset - 8 else { return (out, false) }
-            out.append((String(decoding: bytes[offset..<offset + 4], as: UTF8.self), offset + 8..<offset + 8 + size))
-            offset += 8 + size + (size & 1) // payloads are padded to an even length
-        }
-        return (out, true)
     }
 }
