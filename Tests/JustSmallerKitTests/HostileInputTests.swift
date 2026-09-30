@@ -30,6 +30,41 @@ struct HostileInputTests {
         _ = try? PNGMetadataFilter.filter(png, level: .removePrivate, orientation: 1)
     }
 
+    /// Multi-picture indexes listing images past the end, in the middle of
+    /// another image, twice, backwards, or millions of them; and an Apple
+    /// maker note whose values point past its end.
+    @Test func hostileMultiPictureIndex() {
+        let image: [UInt8] = [0xFF, 0xD8, 0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9]
+        func file(_ entries: [(size: UInt32, offset: UInt32)], count: UInt32? = nil) -> Data {
+            let n = count ?? UInt32(entries.count * 16)
+            var tiff: [UInt8] = Array("MM".utf8) + [0, 42, 0, 0, 0, 8, 0, 1] + [0xB0, 0x02, 0, 7]
+            tiff += withUnsafeBytes(of: n.bigEndian, Array.init) + [0, 0, 0, 26] + [0, 0, 0, 0]
+            for e in entries {
+                tiff += [0, 0, 0, 0] + withUnsafeBytes(of: e.size.bigEndian, Array.init)
+                    + withUnsafeBytes(of: e.offset.bigEndian, Array.init) + [0, 0, 0, 0]
+            }
+            let first = [0xFF, 0xD8] + JPEGMarkers.write(0xE2, Array("MPF\0".utf8) + tiff) + Data(image.dropFirst(2))
+            return first + Data(image) + Data(image)
+        }
+        let cases = [
+            file([(0, 0), (10, 0xFFFF_FFF0)]),          // past the end
+            file([(0, 0), (10, 3)]),                    // inside the first image
+            file([(0, 0), (10, 90), (10, 90)]),         // the same image twice
+            file([(0, 0), (10, 100), (10, 90)]),        // backwards
+            file([(0, 0)], count: 0xFFFF_FFF0),         // millions of images
+            file([]),
+        ]
+        for data in cases {
+            _ = JPEGStructure.hasSecondaryImage(ByteView(data))
+            _ = JPEGStructure.imageIndex(ByteView(data))
+            #expect(JPEGStructure.images(ByteView(data)) == nil)
+            _ = try? JPEGStructure.joined([data, Data(image)])
+        }
+        var note: [UInt8] = Array("Apple iOS\0".utf8) + [0, 1] + Array("MM".utf8) + [0xFF, 0xFF]
+        note += [0, 33, 0, 10, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF] + [0, 48, 0, 10, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0x00]
+        #expect(AppleMakerNote.filter(ByteView(note), level: .removePrivate) == nil)
+    }
+
     /// EXIF whose IFDs point at each other, past the end, or at huge counts.
     @Test func hostileEXIF() {
         let loop: [UInt8] = [0x4D, 0x4D, 0, 42, 0, 0, 0, 8, 0, 1, 0x87, 0x69, 0, 4, 0, 0, 0, 1, 0, 0, 0, 8, 0, 0, 0, 8]

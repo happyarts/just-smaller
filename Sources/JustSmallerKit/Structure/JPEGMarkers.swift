@@ -13,7 +13,7 @@ enum JPEGMarkers {
     /// metadata filter rewrites EXIF, XMP and IPTC (Photoshop); the structure
     /// check checks what was rewritten and requires the rest unchanged.
     enum Part {
-        case jfif, jfifExtension, exif, xmp, extendedXMP, photoshop, iccProfile, multiPicture, adobe, comment, other
+        case jfif, jfifExtension, exif, xmp, extendedXMP, photoshop, iccProfile, multiPicture, isoGainMap, adobe, comment, other
     }
 
     static func part(_ marker: UInt8, payload: some Collection<UInt8>) -> Part {
@@ -26,6 +26,7 @@ enum JPEGMarkers {
         case 0xE1 where has(extendedXMPHeader): return .extendedXMP
         case 0xE2 where has(Array("ICC_PROFILE\0".utf8)): return .iccProfile
         case 0xE2 where has(Array("MPF\0".utf8)): return .multiPicture
+        case 0xE2 where has(Array("urn:iso:std:iso:ts:21496:-1\0".utf8)): return .isoGainMap
         case 0xED where has(photoshopHeader): return .photoshop
         case 0xEE where has(Array("Adobe".utf8)): return .adobe
         case 0xFE: return .comment

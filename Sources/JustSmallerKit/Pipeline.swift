@@ -1,4 +1,5 @@
 import Foundation
+import ImageIO
 
 /// One way of producing a smaller version of a file. Writes `output` and
 /// returns true, or returns false when it has nothing better to offer.
@@ -21,6 +22,17 @@ struct Candidate: Sendable {
 
 /// What the pipeline needs to know about a file beyond its format.
 struct FileFacts: Sendable {
+    /// The EXIF orientation ImageIO reads (1 = up; 1 for anything invalid).
+    static func orientation(of source: CGImageSource) -> Int {
+        let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        let orientation = props?[kCGImagePropertyOrientation] as? Int ?? 1
+        return (1...8).contains(orientation) ? orientation : 1
+    }
+
+    static func orientation(of image: Data) -> Int {
+        CGImageSourceCreateWithData(image as CFData, nil).map(orientation) ?? 1
+    }
+
     var byteSize: Int64
     /// EXIF orientation (1 = up). Stripping EXIF must keep it.
     var orientation = 1
@@ -30,7 +42,8 @@ struct FileFacts: Sendable {
     var isLosslessWebP = false
     /// WebP with EXIF or XMP chunks.
     var hasWebPMetadata = false
-    /// JPEG with more images indexed after the first (gain map, depth).
+    /// JPEG with more images indexed after the first (gain map, depth,
+    /// stereo), which `JPEGStructure.images` can take apart.
     var hasSecondaryImage = false
     var isAnimated = false
     var bitsPerComponent = 8
@@ -58,8 +71,11 @@ enum Pipeline {
             // jpeg-scan rewrites the entropy coding (Huffman tables, progressive
             // scans) without touching the DCT coefficients: lossless. It keeps
             // whatever markers are left; filtering is done by our own filter.
-            // Our tools rewrite only the first image; ImageIO keeps them all.
-            if facts.hasSecondaryImage { return s.metadata == .keep ? [] : [[imageIOMetadata(s.metadata, required: true)]] }
+            // A JPEG that holds several images gets both image by image, and
+            // no lossy re-encode.
+            if facts.hasSecondaryImage {
+                return [[jpegImagesMetadata(s.metadata, orientation: facts.orientation)], [jpegImagesScan(effort: s.effort)]]
+            }
             var stages: [[Candidate]] = []
             // Re-encode only when the original is of higher quality than the
             // target; otherwise re-encoding only adds generation loss and the
@@ -231,7 +247,60 @@ enum Pipeline {
         }
     }
 
-    /// Metadata through ImageIO, for HEIC and multi-image JPEGs.
+    /// A JPEG that holds several images (HDR gain map, depth and mattes,
+    /// stereo), taken apart into its images, each changed on its own (in
+    /// parallel) and joined again with the multi-picture index rewritten.
+    /// `change` gets an image and its number and returns it changed or as it
+    /// was. Where the first image's XMP lists the lengths of the others
+    /// (Google's container), only the first changes.
+    private static func changeEachImage(of input: URL, to output: URL,
+                                        _ change: @escaping @Sendable (_ image: Data, _ n: Int) async throws -> Data) async throws {
+        let data = try Data(contentsOf: input, options: .alwaysMapped)
+        guard let ranges = JPEGStructure.images(ByteView(data)) else { throw JPEGMetadataFilter.Malformed() }
+        // The first image starts the file; its header segments are read.
+        let onlyFirst = JPEGStructure.listsLengthsInXMP(ByteView(data))
+        let images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for (n, range) in ranges.enumerated() {
+                let image = data.subdata(in: range)
+                group.addTask { (n, n > 0 && onlyFirst ? image : try await change(image, n)) }
+            }
+            var images = [Data](repeating: Data(), count: ranges.count)
+            for try await (n, image) in group { images[n] = image }
+            return images
+        }
+        try JPEGStructure.joined(images).write(to: output)
+    }
+
+    /// Each image keeps its own orientation.
+    static func jpegImagesMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
+        Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, _ in
+            try await changeEachImage(of: input, to: output) { image, n in
+                try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image))
+            }
+            try MetadataCheck.verify(original: input, result: output, level: level)
+            return true
+        }
+    }
+
+    /// Each image through jpeg-scan; one it doesn't handle or can't make
+    /// smaller stays as it was.
+    static func jpegImagesScan(effort: Effort) -> Candidate {
+        let scan = jpegScan(effort: effort)
+        return Candidate(name: scan.name) { input, output, work in
+            try await changeEachImage(of: input, to: output) { image, n in
+                let id = UUID().uuidString
+                let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-scan.jpg")
+                defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }
+                try image.write(to: from)
+                guard try await scan.run(from, to, work) else { return image }
+                let scanned = try Data(contentsOf: to)
+                return scanned.count < image.count ? scanned : image
+            }
+            return true
+        }
+    }
+
+    /// Metadata through ImageIO, for HEIC.
     static func imageIOMetadata(_ level: MetadataHandling, required: Bool) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: required) { input, output, _ in
             guard try ImageIOMetadata.copy(input, to: output, level: level) else { return false }

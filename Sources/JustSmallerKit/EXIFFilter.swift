@@ -3,10 +3,11 @@ import Foundation
 /// Rewrites an EXIF block (a TIFF structure) with only the tags a level
 /// keeps. Values are copied byte for byte in the file's own byte order; only
 /// the layout is new. GPS, MakerNotes and the thumbnail (IFD1) never survive
-/// filtering.
+/// filtering — except what `MetadataPolicy` keeps of Apple's maker note (the
+/// HDR headroom), in a maker note of its own (`AppleMakerNote`).
 enum EXIFFilter {
     /// An entry as the writer lays it out.
-    private struct Entry {
+    fileprivate struct Entry {
         var tag: UInt16
         var type: UInt16
         var count: UInt32
@@ -41,14 +42,20 @@ enum EXIFFilter {
         }
         let keptMain = kept(main, .main)
         let keptInterop = kept(interop, .interop)
-        var keptExif = kept(exif, .exif)
+        let keptExif = kept(exif, .exif)
+        var exifOut = keptExif.map(Entry.init)
+        if !keptExif.contains(where: { $0.tag == AppleMakerNote.tag }),
+           let note = exif.first(where: { $0.tag == AppleMakerNote.tag })?.value.flatMap({ AppleMakerNote.filter($0, level: level) }) {
+            exifOut.append(Entry(tag: UInt16(AppleMakerNote.tag), type: 7, count: UInt32(note.count), value: note))
+        }
         // ExifVersion alone says nothing; neither does sRGB, the default.
-        let meaningful = keptExif.contains { !($0.tag == 0x9000 || $0.tag == 0xA001 && reader.number($0) == 1) }
-        if !meaningful && keptInterop.isEmpty { keptExif = [] }
-        if keptMain.isEmpty && keptExif.isEmpty { return nil }
-        if keptMain.count == 1, keptMain[0].tag == 0x0112, reader.number(keptMain[0]) == 1, keptExif.isEmpty { return nil }
+        let meaningful = exifOut.count > keptExif.count
+            || keptExif.contains { !($0.tag == 0x9000 || $0.tag == 0xA001 && reader.number($0) == 1) }
+        if !meaningful && keptInterop.isEmpty { exifOut = [] }
+        if keptMain.isEmpty && exifOut.isEmpty { return nil }
+        if keptMain.count == 1, keptMain[0].tag == 0x0112, reader.number(keptMain[0]) == 1, exifOut.isEmpty { return nil }
         var writer = Writer(bigEndian: reader.bigEndian)
-        return writer.write(main: keptMain.map(Entry.init), exif: keptExif.map(Entry.init), interop: keptInterop.map(Entry.init))
+        return writer.write(main: keptMain.map(Entry.init), exif: exifOut, interop: keptInterop.map(Entry.init))
     }
 
     /// An IFD's entries with a readable value: those of unknown types or
@@ -60,7 +67,7 @@ enum EXIFFilter {
 
     /// Lays out IFD0, the EXIF IFD and the Interop IFD one after another,
     /// each followed by its out-of-line values, all at even offsets.
-    private struct Writer {
+    fileprivate struct Writer {
         let bigEndian: Bool
         var out: [UInt8] = []
 
@@ -92,7 +99,7 @@ enum EXIFFilter {
 
         /// Writes one IFD and returns where each entry's value field is, so
         /// pointers can be filled in once their target's offset is known.
-        private mutating func writeIFD(_ entries: [Entry]) -> [UInt16: Int] {
+        mutating func writeIFD(_ entries: [Entry]) -> [UInt16: Int] {
             let sorted = entries.sorted { $0.tag < $1.tag }
             let start = out.count
             var dataOffset = start + 2 + sorted.count * 12 + 4
@@ -119,5 +126,29 @@ enum EXIFFilter {
         private mutating func patch(_ at: Int, _ value: UInt32) {
             out.replaceSubrange(at..<at + 4, with: u32(value))
         }
+    }
+}
+
+/// Apple's maker note: "Apple iOS", a version, a byte order mark, then an
+/// IFD whose offsets count from the note's start.
+enum AppleMakerNote {
+    static let tag = 0x927C
+    private static let header = 14
+
+    /// The note with only the tags `MetadataPolicy` keeps at `level`, or nil
+    /// when it isn't Apple's or none is kept.
+    static func filter(_ note: ByteView, level: MetadataHandling) -> [UInt8]? {
+        guard note.has("Apple iOS\0"), let big = try? TIFFReader.byteOrder(note, at: 12),
+              let prefix = try? note.view(0, header),
+              case let reader = TIFFReader(note, bigEndian: big), let ifd = try? reader.ifd(at: header)
+        else { return nil }
+        let kept = ifd.entries.filter {
+            $0.value != nil && MetadataPolicy.keeps(MetadataPolicy.group(appleMakerNoteTag: $0.tag), at: level)
+        }
+        guard !kept.isEmpty else { return nil }
+        var writer = EXIFFilter.Writer(bigEndian: big)
+        writer.out = Array(prefix.bytes)
+        _ = writer.writeIFD(kept.map(EXIFFilter.Entry.init))
+        return writer.out
     }
 }

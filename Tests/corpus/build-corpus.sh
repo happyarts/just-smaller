@@ -68,6 +68,18 @@ else
 	echo "note: no download-cache; run Tests/corpus/fetch-real-images.py for real photos"
 fi
 
+# --- JPEGs that hold several images: the iPhone photos with an HDR gain map
+# downloaded above, written again by Core Image with an ISO 21496-1 gain map.
+if [ -d "$CORPUS/full/real-multi-jpeg" ]; then
+	mkdir -p "$CORPUS/full/multi-jpeg"
+	GAINMAP=$(mktemp -d)/gain-map
+	xcrun swiftc -O -o "$GAINMAP" "$HERE/gain-map.swift"
+	for f in "$CORPUS/full/real-multi-jpeg"/*.jpg; do
+		"$GAINMAP" "$f" "$CORPUS/full/multi-jpeg/iso-$(basename "$f")" || true
+	done
+	rm -rf "$(dirname "$GAINMAP")"
+fi
+
 # --- rare codings: arithmetic, restart markers, 12 bit, lossless JPEG; SVG in UTF-16
 # Rewritten losslessly from the real photos above and libjpeg-turbo's own test
 # images, with the tools Tools/build.sh builds.

@@ -122,7 +122,7 @@ final class MetadataTests {
     @Test func keepLeavesEveryField() throws {
         let url = photo("keep.jpg")
         let kept = try filtered(url, .keep)
-        #expect(MetadataCheck.fields(kept) == MetadataCheck.fields(url))
+        #expect(MetadataCheck.fields(try Data(contentsOf: kept)) == MetadataCheck.fields(try Data(contentsOf: url)))
         #expect(props(kept)[kCGImagePropertyGPSDictionary] != nil)
     }
 
@@ -276,9 +276,9 @@ final class MetadataTests {
     }
 
     /// Private data goes even where the image itself can't be improved:
-    /// HEIC in lossless mode, and a JPEG with an HDR gain map.
-    @Test(arguments: [UTType.heic, .jpeg])
-    func privateDataGoesWhereTheImageStaysAsItIs(type: UTType) async throws {
+    /// HEIC in lossless mode. (JPEGs with a gain map: MultiImageJPEGTests.)
+    @Test func privateDataGoesWhereTheImageStaysAsItIs() async throws {
+        let type = UTType.heic
         let url = dir.appending(path: "gain-map.\(type.preferredFilenameExtension ?? "img")")
         let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(dest, image(), [
@@ -299,7 +299,6 @@ final class MetadataTests {
         #expect(CGImageDestinationFinalize(dest))
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
-        if type == .jpeg { #expect(JPEGStructure.holdsOnlyIndexedImages(ByteView(try Data(contentsOf: url)))) }
 
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false

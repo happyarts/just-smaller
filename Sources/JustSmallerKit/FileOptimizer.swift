@@ -60,16 +60,17 @@ public struct FileOptimizer: Sendable {
             return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
                             size: size)
         }
-        // Files with more images than the first get only their metadata
-        // filtered, and only when nothing else follows the indexed images.
+        // A JPEG with more images than the first is optimized image by image;
+        // one with anything else after them (a motion photo's video), or
+        // with an index that doesn't fit, stays as it is.
         var hasSecondaryImage = false
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
            case let bytes = ByteView(data), JPEGStructure.hasSecondaryImage(bytes) {
-            hasSecondaryImage = true
-            if settings.metadata == .keep || !JPEGStructure.holdsOnlyIndexedImages(bytes) {
-                return .skipped(reason: String(localized: "Contains a second image (HDR gain map, motion photo or stereo image) – left unchanged", bundle: .module),
+            guard JPEGStructure.images(bytes) != nil else {
+                return .skipped(reason: String(localized: "Contains a video, or images that can’t be read safely – left unchanged", bundle: .module),
                                 size: size)
             }
+            hasSecondaryImage = true
         }
         var facts = Self.facts(about: url, format: format, size: size)
         facts.hasSecondaryImage = hasSecondaryImage
@@ -143,12 +144,13 @@ public struct FileOptimizer: Sendable {
             results.sort { $0.2 < $1.2 }
             // Read once, for the first candidate that gets verified.
             var structure: StructureCheck.Reference?
+            lazy var hasFieldsToRemove = MetadataCheck.hasFieldsToRemove(input, level: settings.metadata)
             for (candidate, output, outSize) in results {
                 let limit = candidate.minimumGain > 0 ? Int64(Double(bestSize) * (1 - candidate.minimumGain)) : bestSize
                 // Removing private data is a promise, not an optimization: it
                 // counts even when the file grows (ImageIO writes metadata
                 // less compactly), as long as there was something to remove.
-                let promised = candidate.isRequired && MetadataCheck.hasFieldsToRemove(input, level: settings.metadata)
+                let promised = candidate.isRequired && hasFieldsToRemove
                 guard outSize < limit || promised else { continue }
                 if structure == nil { structure = StructureCheck.Reference(original: input, format: format) }
                 do {
@@ -325,9 +327,8 @@ public struct FileOptimizer: Sendable {
         var facts = FileFacts(byteSize: size)
         if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
             facts.isAnimated = CGImageSourceGetCount(source) > 1
+            facts.orientation = FileFacts.orientation(of: source)
             if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
-                let orientation = props[kCGImagePropertyOrientation] as? Int ?? 1
-                facts.orientation = (1...8).contains(orientation) ? orientation : 1
                 facts.bitsPerComponent = props[kCGImagePropertyDepth] as? Int ?? 8
             }
         }

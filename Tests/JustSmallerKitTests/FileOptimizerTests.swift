@@ -333,15 +333,15 @@ final class FileOptimizerTests {
         }
     }
 
-    @Test func jpegWithASecondImageIsLeftAlone() async throws {
+    @Test func jpegWithDataAfterTheImageIsLeftAlone() async throws {
         let plain = try Data(contentsOf: write(image(), "plain.jpg", type: .jpeg,
                                                properties: [kCGImageDestinationLossyCompressionQuality: 0.95]))
         #expect(!JPEGStructure.hasSecondaryImage(ByteView(plain)))
 
-        // A gain map, motion-photo video or trailer after the end of the image.
+        // A motion-photo video or other trailer after the end of the image.
         let trailing = dir.appending(path: "trailing.jpg")
         try (plain + Data(repeating: 0x42, count: 3000)).write(to: trailing)
-        // A multi-picture index (APP2 "MPF") right after SOI.
+        // A multi-picture index (APP2 "MPF") right after SOI that lists nothing.
         let mpf = dir.appending(path: "mpf.jpg")
         let segment: [UInt8] = [0xFF, 0xE2, 0x00, 0x0A] + Array("MPF\0".utf8) + [0, 0, 0, 0]
         try (plain.prefix(2) + Data(segment) + plain.dropFirst(2)).write(to: mpf)

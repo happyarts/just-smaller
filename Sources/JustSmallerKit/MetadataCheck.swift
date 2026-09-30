@@ -15,8 +15,21 @@ import ImageIO
 /// original's sources: the merged view, EXIF and IPTC alone, or XMP alone —
 /// or, for fields ImageIO couldn't read in the original (broken IIM from old
 /// programs), text that stands in the original file as it is.
+///
+/// A JPEG that holds several images is checked image by image: a gain map
+/// or a depth image can carry EXIF with the location too.
 enum MetadataCheck {
     static func verify(original: URL, result: URL, level: MetadataHandling) throws {
+        let a = try Data(contentsOf: original, options: .alwaysMapped), b = try Data(contentsOf: result, options: .alwaysMapped)
+        try verify(a, b, level: level)
+        let pairs: [(original: Data, result: Data)]?
+        do { pairs = try JPEGStructure.imagePairs(a, b) } catch {
+            throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+        }
+        for pair in pairs?.dropFirst() ?? [] { try verify(pair.original, pair.result, level: level) }
+    }
+
+    private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {
         let merged = fields(original), after = fields(result)
         var sources: [[Key: Value]]?
         for (key, value) in after {
@@ -40,7 +53,8 @@ enum MetadataCheck {
 
     /// Whether the file holds anything the level removes.
     static func hasFieldsToRemove(_ url: URL, level: MetadataHandling) -> Bool {
-        level != .keep && fields(url).keys.contains {
+        guard level != .keep, let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
+        return fields(data).keys.contains {
             !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level)
         }
     }
@@ -61,8 +75,8 @@ enum MetadataCheck {
     }
 
     /// Top-level properties with their values flattened to text.
-    static func fields(_ url: URL, excludingXMP: Bool = false) -> [Key: Value] {
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+    static func fields(_ data: Data, excludingXMP: Bool = false) -> [Key: Value] {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, [kCGImageMetadataShouldExcludeXMP: excludingXMP] as CFDictionary)
         else { return [:] }
         return fields(metadata)
@@ -72,8 +86,8 @@ enum MetadataCheck {
     /// texts ("art", "1") occur by chance in any file, so they must stand
     /// there as a whole field: an IIM dataset (length first), an XML element
     /// or an attribute value.
-    private static func standsIn(_ original: URL, _ value: Value) -> Bool {
-        guard !value.leaves.isEmpty, let data = try? Data(contentsOf: original, options: .alwaysMapped) else { return false }
+    private static func standsIn(_ data: Data, _ value: Value) -> Bool {
+        guard !value.leaves.isEmpty else { return false }
         return value.leaves.allSatisfy { leaf in
             let bytes = Array(leaf.utf8)
             if bytes.count >= 8 { return data.range(of: Data(bytes)) != nil }
@@ -84,9 +98,8 @@ enum MetadataCheck {
     }
 
     /// The file's XMP packet alone.
-    private static func xmpFields(_ url: URL) -> [Key: Value] {
-        guard let data = try? Data(contentsOf: url, options: .alwaysMapped),
-              let start = data.range(of: Data("<x:xmpmeta".utf8)),
+    private static func xmpFields(_ data: Data) -> [Key: Value] {
+        guard let start = data.range(of: Data("<x:xmpmeta".utf8)),
               let end = data.range(of: Data("</x:xmpmeta>".utf8), in: start.upperBound..<data.endIndex),
               let metadata = CGImageMetadataCreateFromXMPData(data[start.lowerBound..<end.upperBound] as CFData)
         else { return [:] }

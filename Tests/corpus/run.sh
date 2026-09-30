@@ -78,6 +78,28 @@ for line in open(os.path.join(work, "results.jsonl")):
     records[os.path.basename(r["file"])] = r
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
         fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("reason", "")))
+def jpeg_images(path):
+    """Each JPEG in the file from its SOI to its EOI, one after another (the
+    first, then those a multi-picture index lists); stops at anything else."""
+    b, out, i = open(path, "rb").read(), [], 0
+    while b.startswith(b"\xff\xd8", i):
+        start, i, end = i, i + 2, None
+        while end is None and i + 1 < len(b) and b[i] == 0xFF:
+            m = b[i + 1]
+            if m == 0xFF: i += 1
+            elif m == 0xD9: end = i + 2
+            elif 0xD0 <= m <= 0xD7 or m == 0x01: i += 2
+            else:
+                i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
+                if m == 0xDA:  # entropy-coded data up to the next marker
+                    while (k := b.find(b"\xff", i)) >= 0 and k + 1 < len(b) and (b[k + 1] == 0 or 0xD0 <= b[k + 1] <= 0xD7):
+                        i = k + 2
+                    i = k if k >= 0 else len(b)
+        if end is None: break
+        out.append(b[start:end])
+        i = end
+        while i < len(b) and b[i] in (0x00, 0xFF) and not b.startswith(b"\xff\xd8", i): i += 1
+    return out
 def render(p, outdir):
     subprocess.run(["qlmanage", "-t", "-s", "512", "-o", outdir, p], capture_output=True)
     return os.path.join(outdir, os.path.basename(p) + ".png")
@@ -112,11 +134,17 @@ for n in names:
     cat[3] += 1
     if kind in (".jpg", ".jpeg"):
         # ImageIO decodes identical DCT data differently depending on the
-        # Huffman tables; the coefficients are the exact proof.
-        r = subprocess.run([jpegcmp, a, b], capture_output=True, text=True)
-        if r.returncode != 0: fails.append((n, "COEFFICIENTS: " + (r.stdout + r.stderr).strip()))
+        # Huffman tables; the coefficients are the exact proof. jpegcmp reads
+        # one image: a file that holds several is compared image by image.
+        ia, ib = jpeg_images(a), jpeg_images(b)
+        if len(ia) != len(ib): fails.append((n, f"IMAGES: {len(ia)} -> {len(ib)}"))
+        for k, (x, y) in enumerate(zip(ia, ib)):
+            pa, pb = os.path.join(work, "image-a.jpg"), os.path.join(work, "image-b.jpg")
+            open(pa, "wb").write(x); open(pb, "wb").write(y)
+            r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
+            if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
         r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
-        if "orientation" in r.stdout: fails.append((n, r.stdout.strip()))
+        if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
     elif kind in raster:
         r = subprocess.run([imgcmp, a, b], capture_output=True, text=True)
         if r.returncode != 0: fails.append((n, "PIXELS: " + r.stdout.strip()))

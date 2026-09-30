@@ -8,6 +8,8 @@ Sources:
   - Wikimedia Commons (free licences): featured photos, and PNG / SVG / GIF /
     WebP files found through varied search terms, so they come from many
     different cameras, editors and encoders.
+  - libultrahdr's test data (CC BY 4.0): iPhone photos with an HDR gain map,
+    JPEGs that hold two images.
 
 Everything is cached in CACHE; re-running only fetches what's missing.
 The images are for local testing only and never go into the repository.
@@ -93,6 +95,8 @@ def featured_photos(limit, thumb_width, originals_max_bytes):
 
 jobs = []
 jobs += [("kodak", f"kodim{i:02d}.png", f"https://r0k.us/graphics/kodak/kodak/kodim{i:02d}.png") for i in range(1, 25)]
+jobs += [("multi-jpeg", f"{n}.jpg", f"https://raw.githubusercontent.com/google/libultrahdr/main/tests/data/{n}.jpg")
+         for n in ("apple_gainmap_new", "apple_gainmap_old")]
 thumbs, originals = featured_photos(30, 1920, 8_000_000)
 jobs += [("photo-jpeg", n, u) for n, u in thumbs + originals]
 for q in ("screenshot", "diagram", "chart", "logo", "map", "photograph", "icon", "drawing"):

@@ -17,6 +17,11 @@ enum JPEGCheck {
         let segments: Set<Data>
         /// What follows its end of image.
         let trailer: Data
+        /// Its multi-picture index without sizes and offsets.
+        let index: Data?
+        /// Its images after the first, when they must stay byte for byte
+        /// (their lengths are listed in the first one's XMP).
+        let fixedImages: [Data]?
 
         init(_ a: ByteView) {
             let lenient = (try? JPEGMarkers.headers(a))?.segments ?? []
@@ -26,13 +31,16 @@ enum JPEGCheck {
             complete = strict?.complete
             var segments = Set(strict?.segments ?? lenient.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
             // Those of the images a multi-picture index lists, too.
-            for start in JPEGStructure.imageIndex(a)?.starts.dropFirst() ?? [] {
-                if let image = try? a.view(from: start), let s = try? JPEGMarkers.headers(image).segments {
+            for entry in JPEGStructure.imageIndex(a)?.dropFirst() ?? [] {
+                if let image = try? a.view(from: entry.start), let s = try? JPEGMarkers.headers(image).segments {
                     segments.formUnion(s.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
                 }
             }
             self.segments = segments
             trailer = strict.flatMap { try? a.view(from: $0.end).bytes } ?? Data()
+            index = JPEGStructure.indexWithoutPositions(a)
+            fixedImages = JPEGStructure.listsLengthsInXMP(a)
+                ? JPEGStructure.images(a)?.dropFirst().compactMap { try? a.view($0.lowerBound, $0.count).bytes } : nil
         }
     }
 
@@ -63,19 +71,28 @@ enum JPEGCheck {
         try metadata(image.segments, original: reference.segments)
 
         // After EOI: the images a multi-picture index lists, each a sound
-        // JPEG right after the one before it, and nothing else — or exactly
-        // what the original had there.
-        if let index = JPEGStructure.imageIndex(b), index.starts.count > 1 {
-            var end = image.end
-            for (n, start) in index.starts.enumerated().dropFirst() {
-                guard start >= end, try b.view(end, start - end).isPadding else { throw Invalid("images overlap or have data between them") }
-                end = try Invalid.within("image \(n + 1)") {
-                    let image = try parse(b, from: start)
-                    try metadata(image.segments, original: reference.segments)
-                    return image.end
+        // JPEG after the one before it, of exactly the size the index gives,
+        // and nothing else — or exactly what the original had there.
+        if let index = JPEGStructure.imageIndex(b), index.count > 1 {
+            guard let images = JPEGStructure.images(b), images[0].upperBound == image.end else {
+                throw Invalid("images overlap, or data between or after them")
+            }
+            // Only the sizes and offsets in the index may change.
+            guard JPEGStructure.indexWithoutPositions(b) == reference.index else { throw Invalid("multi-picture index changed") }
+            if let fixed = reference.fixedImages {
+                guard try images.dropFirst().map({ try b.view($0.lowerBound, $0.count).bytes }) == fixed else {
+                    throw Invalid("images listed in the XMP changed")
                 }
             }
-            guard try b.view(from: index.end).isPadding else { throw Invalid("data after the last image") }
+            for (n, (entry, range)) in zip(index, images).enumerated() {
+                try Invalid.within("image \(n + 1)") {
+                    guard range.count == entry.size else { throw Invalid("multi-picture index: size") }
+                    guard n > 0 else { return }
+                    let image = try parse(b, from: range.lowerBound)
+                    guard image.end == range.upperBound else { throw Invalid("end of image") }
+                    try metadata(image.segments, original: reference.segments)
+                }
+            }
         } else {
             let trailer = try b.view(from: image.end)
             guard trailer.isEmpty || trailer.bytes == reference.trailer else { throw Invalid("data after the end of the image") }
@@ -238,7 +255,7 @@ enum JPEGCheck {
             case .adobe: try Invalid.within("Adobe marker") { try PayloadCheck.adobe(payload) }
             case .comment: throw Invalid("comment changed")
             case .iccProfile: throw Invalid("colour profile changed")
-            case .photoshop, .other: throw Invalid(String(format: "APP%X segment changed", marker & 15))
+            case .photoshop, .isoGainMap, .other: throw Invalid(String(format: "APP%X segment changed", marker & 15))
             }
         }
         if photoshopChanged { try Invalid.within("IPTC") { try PayloadCheck.photoshopResources(ByteView(photoshop)) } }

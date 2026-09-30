@@ -56,6 +56,7 @@ enum Verifier {
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
+        if format == .jpeg { try compareAuxiliaryImages(a, b) }
         // Every image of the file must read to its end.
         guard CGImageSourceGetStatus(b) == .statusComplete,
               (0..<framesB).allSatisfy({ CGImageSourceGetStatusAtIndex(b, $0) == .statusComplete })
@@ -84,8 +85,37 @@ enum Verifier {
 
     // MARK: - JPEG
 
-    /// Without an original, only reads the result.
+    /// Without an original, only reads the result. A JPEG that holds several
+    /// images is compared image by image, in parallel: jpegcmp reads only
+    /// the first.
     private static func compareJPEGCoefficients(original: URL?, _ result: URL) async throws {
+        guard let original else { return try await jpegcmp(nil, result) }
+        let pairs: [(original: Data, result: Data)]?
+        do {
+            pairs = try JPEGStructure.imagePairs(Data(contentsOf: original, options: .alwaysMapped),
+                                                 Data(contentsOf: result, options: .alwaysMapped))
+        } catch is FormatError {
+            throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+        }
+        guard let pairs else { return try await jpegcmp(original, result) }
+        let folder = result.deletingLastPathComponent()
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // The first image: jpegcmp reads it from the whole files.
+            group.addTask { try await jpegcmp(original, result) }
+            for pair in pairs.dropFirst() {
+                group.addTask {
+                    let a = folder.appending(path: "image-\(UUID().uuidString).jpg"), b = folder.appending(path: "image-\(UUID().uuidString).jpg")
+                    defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
+                    try pair.original.write(to: a)
+                    try pair.result.write(to: b)
+                    try await jpegcmp(a, b)
+                }
+            }
+            try await group.waitForAll()
+        }
+    }
+
+    private static func jpegcmp(_ original: URL?, _ result: URL) async throws {
         do {
             try await ToolRunner.run("jpegcmp", [original?.path ?? "--check", result.path], in: result.deletingLastPathComponent())
         } catch let error as ToolError where error.status == 1 {
@@ -94,6 +124,22 @@ enum Verifier {
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
         } catch let error as ToolError where error.status == 3 {
             throw VerificationError(reason: String(localized: "the decoder reports damaged data", bundle: .module))
+        }
+    }
+
+    /// A photo's auxiliary images (HDR gain map, depth, mattes) are all
+    /// still there and decode as before, and the photo is shown as bright as
+    /// before: the HDR headroom comes from metadata (Apple's maker note, XMP,
+    /// ISO 21496-1) that a filter must not lose. Reading the headroom
+    /// doesn't decode the photo.
+    private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource) throws {
+        guard let aux = ImageIOMetadata.sameAuxiliaryImages(a, b) else {
+            throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+        }
+        guard !aux.isEmpty else { return }
+        let hdr = [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary
+        guard CGImageSourceCreateImageAtIndex(a, 0, hdr)?.contentHeadroom == CGImageSourceCreateImageAtIndex(b, 0, hdr)?.contentHeadroom else {
+            throw VerificationError(reason: String(localized: "HDR brightness changed", bundle: .module))
         }
     }
 

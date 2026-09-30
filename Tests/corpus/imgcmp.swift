@@ -86,6 +86,19 @@ func orientation(_ path: String) -> Int {
 if orientation(args[0]) != orientation(args[1]) {
     print("DIFFERENT: orientation \(orientation(args[0])) vs \(orientation(args[1]))"); exit(1)
 }
+// An HDR photo's gain map and other auxiliary images, and how bright it is
+// shown, come from data next to the pixels: losing it changes the photo.
+func hdr(_ path: String) -> String {
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil) else { return "" }
+    let types = [kCGImageAuxiliaryDataTypeHDRGainMap, kCGImageAuxiliaryDataTypeISOGainMap, kCGImageAuxiliaryDataTypeDepth,
+                 kCGImageAuxiliaryDataTypeDisparity, kCGImageAuxiliaryDataTypePortraitEffectsMatte]
+    let aux = types.filter { CGImageSourceCopyAuxiliaryDataInfoAtIndex(src, 0, $0) != nil }
+    let image = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)
+    return "\(aux.count) auxiliary images, headroom \(image?.contentHeadroom ?? 0)"
+}
+if hdr(args[0]) != hdr(args[1]) {
+    print("DIFFERENT: HDR \(hdr(args[0])) vs \(hdr(args[1]))"); exit(1)
+}
 let ta = timeline(a), tb = timeline(b)
 let durA = ta.last!.to, durB = tb.last!.to
 if a.count > 1 && durA != durB { print("DIFFERENT: duration \(durA) vs \(durB) cs"); exit(1) }

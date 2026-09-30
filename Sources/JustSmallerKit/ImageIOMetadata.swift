@@ -2,10 +2,9 @@ import Foundation
 import ImageIO
 
 /// Filters metadata through ImageIO, for files our own filters can't rewrite
-/// safely: HEIC, and JPEGs that hold more than one image (HDR gain maps,
-/// portrait depth and mattes, indexed by MPF). ImageIO copies the image data
-/// unchanged and writes new metadata around it; the auxiliary images and
-/// the multi-picture index are rebuilt, and are checked to be all there.
+/// safely: HEIC. ImageIO copies the image data unchanged and writes new
+/// metadata around it; the auxiliary images (HDR gain map, portrait depth
+/// and mattes) are rebuilt, and are checked to be all there.
 enum ImageIOMetadata {
     private static var auxiliaryTypes: [CFString] { [
         kCGImageAuxiliaryDataTypeHDRGainMap,
@@ -25,8 +24,18 @@ enum ImageIOMetadata {
         auxiliaryTypes.filter { CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, $0) != nil }
     }
 
-    private static func auxiliaryData(_ source: CGImageSource, _ type: CFString) -> Data? {
-        (CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type) as? [CFString: Any])?[kCGImageAuxiliaryDataInfoData] as? Data
+    /// The auxiliary images both hold, when they hold the same ones and they
+    /// decode to the same data; nil otherwise. Each is decoded once.
+    static func sameAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource) -> [CFString]? {
+        var both: [CFString] = []
+        for type in auxiliaryTypes {
+            let x = CGImageSourceCopyAuxiliaryDataInfoAtIndex(a, 0, type) as? [CFString: Any]
+            let y = CGImageSourceCopyAuxiliaryDataInfoAtIndex(b, 0, type) as? [CFString: Any]
+            guard (x == nil) == (y == nil), x?[kCGImageAuxiliaryDataInfoData] as? Data == y?[kCGImageAuxiliaryDataInfoData] as? Data
+            else { return nil }
+            if x != nil { both.append(type) }
+        }
+        return both
     }
 
     /// Writes `input` with only the metadata the level keeps. False when the
@@ -45,15 +54,8 @@ enum ImageIOMetadata {
 
         // Every auxiliary image must still be there, decoding to the same data:
         // ImageIO copies them, and must never re-encode them.
-        guard let result = CGImageSourceCreateWithURL(output as CFURL, nil),
-              auxiliaryImages(result) == auxiliaryImages(source),
-              auxiliaryImages(source).allSatisfy({ auxiliaryData(source, $0) == auxiliaryData(result, $0) }) else {
+        guard let result = CGImageSourceCreateWithURL(output as CFURL, nil), sameAuxiliaryImages(source, result) != nil else {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
-        }
-        if let before = JPEGStructure.imageIndex(ByteView(try Data(contentsOf: input, options: .alwaysMapped))) {
-            guard JPEGStructure.imageIndex(ByteView(try Data(contentsOf: output)))?.starts.count == before.starts.count else {
-                throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
-            }
         }
         return true
     }

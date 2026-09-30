@@ -1,11 +1,13 @@
 import Foundation
 
 /// Filters the metadata of a JPEG by `MetadataPolicy` without touching the
-/// image data.
+/// image data. In a JPEG that holds several images it filters one image at
+/// a time.
 ///
-/// Always kept: everything the decoder needs, JFIF, the ICC profile (APP2)
-/// and the Adobe marker (APP14, it says how CMYK/YCCK data is to be
-/// interpreted). EXIF, XMP (with its extended part) and IPTC (APP13) are
+/// Always kept: everything the decoder needs, JFIF, the ICC profile (APP2),
+/// the Adobe marker (APP14, it says how CMYK/YCCK data is to be
+/// interpreted), the multi-picture index and ISO 21496-1 gain map metadata
+/// (both APP2). EXIF, XMP (with its extended part) and IPTC (APP13) are
 /// filtered field by field; comments and all other APPn segments go. At
 /// `.keep` only the XMP padding goes. If the photo is rotated and no EXIF is
 /// left, a minimal EXIF block holding only the orientation is written, so it
@@ -81,9 +83,7 @@ enum JPEGMetadataFilter {
                         out.append(JPEGMarkers.write(0xED, JPEGMarkers.photoshopHeader + chunk))
                     }
                 }
-            case 0xE2 where payloads[k].starts(with: Array("ICC_PROFILE\0".utf8)),
-                 0xEE where payloads[k].starts(with: Array("Adobe".utf8)),
-                 0xE0 where payloads[k].starts(with: Array("JFIF\0".utf8)):
+            case _ where [.iccProfile, .adobe, .jfif, .multiPicture, .isoGainMap].contains(JPEGMarkers.part(s.marker, payload: payloads[k])):
                 out.append(s.bytes)
             case 0xE0...0xEF, 0xFE: // everything else in APPn (EXIF was written above), comments
                 break

@@ -9,6 +9,8 @@ struct TIFFReader {
         /// The value's bytes: in the entry up to four bytes, otherwise where
         /// its offset points. nil for an unknown type or a value outside the block.
         let value: ByteView?
+        /// Where the value starts in the block, for writing it in place.
+        let valueOffset: Int?
     }
 
     /// Bytes per value of each TIFF type (1–13).
@@ -21,13 +23,24 @@ struct TIFFReader {
     let bigEndian: Bool
 
     init(_ view: ByteView) throws {
+        self.init(view, bigEndian: try Self.byteOrder(view, at: 0))
+        guard try read(2, 2) == 42 else { throw FormatError("TIFF header") }
+    }
+
+    /// IFDs without a TIFF header, such as a maker note's; offsets count
+    /// from the start of `view`.
+    init(_ view: ByteView, bigEndian: Bool) {
         self.view = view
-        switch try view.be(0, 2) {
-        case 0x4D4D: bigEndian = true
-        case 0x4949: bigEndian = false
+        self.bigEndian = bigEndian
+    }
+
+    /// "MM" (big-endian) or "II" at `at`.
+    static func byteOrder(_ view: ByteView, at: Int) throws -> Bool {
+        switch try view.be(at, 2) {
+        case 0x4D4D: true
+        case 0x4949: false
         default: throw FormatError("byte order")
         }
-        guard try read(2, 2) == 42 else { throw FormatError("TIFF header") }
     }
 
     func read(_ at: Int, _ length: Int) throws -> Int { try bigEndian ? view.be(at, length) : view.le(at, length) }
@@ -42,10 +55,12 @@ struct TIFFReader {
         for k in 0..<n {
             let at = offset + 2 + 12 * k
             let tag = try read(at, 2), type = try read(at + 2, 2), count = try read(at + 4, 4)
-            let value = Self.sizes[type].flatMap { size in
-                try? view.view(size * count > 4 ? read(at + 8, 4) : at + 8, size * count)
+            var value: ByteView?, valueOffset: Int?
+            if let size = Self.sizes[type], let offset = size * count > 4 ? try? read(at + 8, 4) : at + 8 {
+                value = try? view.view(offset, size * count)
+                valueOffset = value == nil ? nil : offset
             }
-            entries.append(Entry(tag: tag, type: type, count: count, value: value))
+            entries.append(Entry(tag: tag, type: type, count: count, value: value, valueOffset: valueOffset))
         }
         return (entries, try? read(offset + 2 + 12 * n, 4))
     }

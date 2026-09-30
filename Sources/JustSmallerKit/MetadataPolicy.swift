@@ -180,6 +180,13 @@ enum MetadataPolicy {
 
     enum IFD { case main, exif, interop }
 
+    /// The group of a tag in Apple's maker note, which as a whole goes
+    /// (`group(exifTag:)`): 33 and 48 say how far above white a photo with an
+    /// HDR gain map may be shown (its headroom), so they are display data.
+    static func group(appleMakerNoteTag tag: Int) -> Group? {
+        tag == 33 || tag == 48 ? .display : nil
+    }
+
     /// The group of an EXIF tag; nil when it goes. GPS and the thumbnail
     /// (IFD1) are not listed: they go in every level but `.keep`.
     static func group(exifTag tag: UInt16, in ifd: IFD) -> Group? {
