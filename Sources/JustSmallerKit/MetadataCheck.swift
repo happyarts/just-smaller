@@ -8,7 +8,8 @@ import ImageIO
 ///  - every rights field of the original is still there,
 ///  - at `.keep`, nothing at all is missing.
 /// Maker notes are not part of that view: at every level but `.keep`, only
-/// Apple's may stay, with only the tags the level keeps (the HDR headroom).
+/// Apple's may stay, with only the tags the level keeps (the HDR headroom, a
+/// Live Photo's identifier).
 ///
 /// Many files hold a field twice with different values (EXIF and XMP
 /// written by different programs, MakerNotes); ImageIO shows one of them.

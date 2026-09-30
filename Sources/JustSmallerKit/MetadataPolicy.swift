@@ -185,8 +185,10 @@ enum MetadataPolicy {
     /// The group of a tag in Apple's maker note, which as a whole goes
     /// (`group(exifTag:)`): 33 and 48 say how far above white a photo with an
     /// HDR gain map may be shown (its headroom), so they are display data.
+    /// 17 is a Live Photo's content identifier, a random id its video holds
+    /// too: without it, photo and video no longer belong together.
     static func group(appleMakerNoteTag tag: Int) -> Group? {
-        tag == 33 || tag == 48 ? .display : nil
+        [17, 33, 48].contains(tag) ? .display : nil
     }
 
     /// The group of an EXIF tag; nil when it goes. GPS and the thumbnail

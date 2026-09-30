@@ -67,6 +67,8 @@ final class HEICTests {
         let url = photo("gain-map-\(level.rawValue)-\(lossy).heic")
         let headroomBefore = try #require(headroom(url))
         #expect(headroomBefore > 1)
+        let live = (props(try Data(contentsOf: url))[kCGImagePropertyMakerAppleDictionary] as? [String: Any])?["17"] as? String
+        #expect(live?.hasPrefix("89175B33-LIVE") == true)
 
         settings.metadata = level
         settings.lossy = lossy
@@ -81,7 +83,9 @@ final class HEICTests {
         let after = try Data(contentsOf: url)
         #expect((props(after)[kCGImagePropertyGPSDictionary] != nil) == (level == .keep))
         let maker = props(after)[kCGImagePropertyMakerAppleDictionary] as? [String: Any]
-        #expect(Set((maker ?? [:]).keys) == (level == .keep ? ["33", "43", "48"] : ["33", "48"]))
+        #expect(Set((maker ?? [:]).keys) == (level == .keep ? ["17", "33", "43", "48"] : ["17", "33", "48"]))
+        // The Live Photo stays one: photo and video share this id.
+        #expect(maker?["17"] as? String == live)
         #expect(headroom(url) == headroomBefore)
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
@@ -93,7 +97,7 @@ final class HEICTests {
         #expect(props(try Data(contentsOf: url))[kCGImagePropertyGPSDictionary] == nil)
         let headroomBefore = headroom(url)
         guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
-        #expect(Set((props(try Data(contentsOf: url))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "48"])
+        #expect(Set((props(try Data(contentsOf: url))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "48"])
         #expect(headroom(url) == headroomBefore)
     }
 
@@ -203,13 +207,13 @@ final class HEICTests {
         let options = [kCGImageDestinationMetadata: ImageIOMetadata.filtered(CGImageSourceCopyMetadataAtIndex(source, 0, nil), .removePrivate),
                        kCGImageDestinationMergeMetadata: false] as CFDictionary
         #expect(CGImageDestinationCopyImageSource(dest, source, options, nil))
-        #expect(Set((props(try Data(contentsOf: result))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "43", "48"])
+        #expect(Set((props(try Data(contentsOf: result))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "43", "48"])
         #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removePrivate) }
 
         let whole = try Data(contentsOf: result)
         let filtered = try HEIFMetadataFilter.filter(whole, level: .removePrivate, from: try Data(contentsOf: url))
         #expect(try changedOnlyInMetadataItems(whole, filtered))
-        #expect(Set((props(filtered)[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "48"])
+        #expect(Set((props(filtered)[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "48"])
         try filtered.write(to: result)
         try MetadataCheck.verify(original: url, result: result, level: .removePrivate)
         #expect(headroom(result) == headroom(url))

@@ -421,6 +421,8 @@ enum Pipeline {
 
     // MARK: - HEIC
 
+    /// Lossy mode only (lossless mode never re-encodes): a re-encode that
+    /// saves less than 5 % leaves the image as it was.
     static func heif(quality: Int, metadata: MetadataHandling) -> Candidate {
         Candidate(name: "ImageIO", isLossy: true, minimumGain: 0.05, isRequired: metadata != .keep) { input, output, _ in
             guard try HEIFEncoder.recompress(input, to: output, quality: Double(quality) / 100, metadata: metadata) else { return false }

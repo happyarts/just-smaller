@@ -146,9 +146,11 @@ final class MultiImageJPEGTests {
         let artist = (props(after)[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String
         #expect((artist == "Jane Doe") == (level != .removeAll))
 
-        // Apple's maker note keeps only the HDR headroom; the photo is as bright as before.
+        // Apple's maker note keeps only the HDR headroom and the Live Photo's
+        // identifier, unchanged; the photo is as bright as before.
         let maker = props(after)[kCGImagePropertyMakerAppleDictionary] as? [String: Any]
-        #expect(Set((maker ?? [:]).keys) == (level == .keep ? ["33", "43", "48"] : ["33", "48"]))
+        #expect(Set((maker ?? [:]).keys) == (level == .keep ? ["17", "33", "43", "48"] : ["17", "33", "48"]))
+        #expect(maker?["17"] as? String == (props(before)[kCGImagePropertyMakerAppleDictionary] as? [String: Any])?["17"] as? String)
         #expect(headroom(url) == headroomBefore)
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])

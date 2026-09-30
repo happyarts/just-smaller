@@ -4,7 +4,8 @@ import Foundation
 /// keeps. Values are copied byte for byte in the file's own byte order; only
 /// the layout is new. GPS, MakerNotes and the thumbnail (IFD1) never survive
 /// filtering — except what `MetadataPolicy` keeps of Apple's maker note (the
-/// HDR headroom), in a maker note of its own (`AppleMakerNote`).
+/// HDR headroom, a Live Photo's identifier), in a maker note of its own
+/// (`AppleMakerNote`).
 enum EXIFFilter {
     /// An entry as the writer lays it out.
     fileprivate struct Entry {

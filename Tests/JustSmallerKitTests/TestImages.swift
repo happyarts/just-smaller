@@ -25,7 +25,8 @@ enum TestImages {
 
     /// A photo with an Apple HDR gain map as ImageIO writes it: the main
     /// image with EXIF (creator, location, Apple's maker note with the HDR
-    /// headroom and an identifier) and a gain map — in a JPEG after the
+    /// headroom, a Live Photo's content identifier and another identifier)
+    /// and a gain map — in a JPEG after the
     /// image, indexed by MPF; in a HEIC as an auxiliary item.
     static func gainMapPhoto(at url: URL, type: UTType = .jpeg, location: Bool = true) -> URL {
         let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
@@ -33,7 +34,7 @@ enum TestImages {
             kCGImageDestinationLossyCompressionQuality: 0.9,
             kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Jane Doe", kCGImagePropertyTIFFMake: "Apple"],
             kCGImagePropertyGPSDictionary: location ? gps : [:],
-            kCGImagePropertyMakerAppleDictionary: ["33": 0.5, "48": 0.001, "43": "0F1E2D3C-UUID"],
+            kCGImagePropertyMakerAppleDictionary: ["33": 0.5, "48": 0.001, "43": "0F1E2D3C-UUID", "17": "89175B33-LIVE"],
         ] as CFDictionary)
         let gainMap = CGImageMetadataCreateMutable()
         CGImageMetadataRegisterNamespaceForPrefix(gainMap, "http://ns.apple.com/HDRGainMap/1.0/" as CFString, "HDRGainMap" as CFString, nil)

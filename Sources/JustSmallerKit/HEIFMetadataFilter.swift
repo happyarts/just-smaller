@@ -4,7 +4,7 @@ import Foundation
 /// touching anything else: EXIF items and XMP items get new data, everything
 /// else — the image, its auxiliary images (HDR gain map, depth, mattes) and
 /// their parameters — keeps its bytes. Apple's maker note keeps the HDR
-/// headroom (`EXIFFilter`).
+/// headroom and a Live Photo's identifier (`EXIFFilter`).
 enum HEIFMetadataFilter {
     /// `data` with every EXIF item and every XMP item (but those describing
     /// auxiliary images) as the level keeps them. With an `original`, after
