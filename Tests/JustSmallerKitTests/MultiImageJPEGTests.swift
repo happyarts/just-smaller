@@ -153,7 +153,7 @@ final class MultiImageJPEGTests {
         #expect(maker?["17"] as? String == (props(before)[kCGImagePropertyMakerAppleDictionary] as? [String: Any])?["17"] as? String)
         #expect(headroom(url) == headroomBefore)
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+        #expect(AuxiliaryImages.all(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
         #expect(before.count > after.count)
     }
 

@@ -39,7 +39,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 | JPEG | own metadata filter + own scan optimizer (`Tools/jpeg-scan`: finds the progressive scan split that codes each image smallest, written with [libjpeg-turbo](https://libjpeg-turbo.org)), proven by comparing DCT coefficients (`Tools/jpegcmp`) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
 | WebP | cwebp ([libwebp](https://chromium.googlesource.com/webm/libwebp)), lossless files only | — |
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
-| HEIC | — | Apple ImageIO, keeping HDR gain maps and depth data |
+| HEIC | own metadata filter: EXIF and XMP rewritten in their items, the coded image, HDR gain maps and depth data stay byte for byte | re-encoded with Apple ImageIO, the original's metadata put back; HDR gain maps, depth data and HDR brightness kept |
 | GIF | comes in a later version | |
 
 ## Building

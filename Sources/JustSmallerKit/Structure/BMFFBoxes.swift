@@ -137,6 +137,9 @@ enum HEIFItems {
     /// A still image file's items, read for finding and replacing their data.
     struct File {
         let top: [BMFFBoxes.Box]
+        /// The meta box's version and flags, and its children.
+        let metaHeader: ByteView
+        let meta: [BMFFBoxes.Box]
         let infos: [Info]
         let references: [(type: String, from: Int, to: [Int])]
         let primary: Int
@@ -157,7 +160,9 @@ enum HEIFItems {
             let found = top.filter { $0.type == "meta" }
             guard found.count == 1 else { throw FormatError("meta") }
             let metaStart = found[0].offset + 4
+            metaHeader = try found[0].payload.view(0, 4)
             let meta = try BMFFBoxes.boxes(found[0].payload.view(from: 4))
+            self.meta = meta
             func one(_ type: String) throws -> BMFFBoxes.Box {
                 let found = meta.filter { $0.type == type }
                 guard found.count == 1 else { throw FormatError(type) }
@@ -225,6 +230,40 @@ enum HEIFItems {
             }) else { throw FormatError("item location") }
             return range
         }
+    }
+
+    /// Whether `b` holds the same image as `a`, down to the byte: the same
+    /// boxes, the same items with the same properties and references, and
+    /// every item's data unchanged — all but the EXIF and XMP items the
+    /// metadata filter rewrites. Only where item data lies (iloc) may differ.
+    static func sameImage(_ a: ByteView, _ b: ByteView) throws -> Bool {
+        let x = try File(a), y = try File(b)
+        guard x.top.map(\.type) == y.top.map(\.type), x.meta.map(\.type) == y.meta.map(\.type),
+              x.metaHeader.bytes == y.metaHeader.bytes else { return false }
+        for (p, q) in zip(x.top, y.top) where p.type != "mdat" && p.type != "meta" && p.payload.bytes != q.payload.bytes { return false }
+        for (p, q) in zip(x.meta, y.meta) where p.type != "iloc" && p.type != "idat" && p.payload.bytes != q.payload.bytes { return false }
+
+        let metadata = Set(x.items("Exif") + x.metadataXMP)
+        // One location per item, in both.
+        guard Set(x.locations.items.map(\.id)).count == x.locations.items.count, x.locations.items.count == y.locations.items.count
+        else { return false }
+        let items = Dictionary(y.locations.items.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        guard items.count == y.locations.items.count else { return false }
+        for p in x.locations.items {
+            guard let q = items[p.id], p.method == q.method, p.extents.count == q.extents.count else { return false }
+            guard !metadata.contains(p.id) else { continue }
+            if p.method == 2 {
+                // Data taken from another item: the same part of it.
+                guard p.base == q.base, zip(p.extents, q.extents).allSatisfy({ $0.start == $1.start && $0.length == $1.length }) else { return false }
+                continue
+            }
+            for (e, f) in zip(p.extents, q.extents) {
+                guard let r = try x.range(of: e, method: p.method), let t = try y.range(of: f, method: q.method),
+                      r.count == t.count, try a.view(r.lowerBound, r.count).bytes == b.view(t.lowerBound, t.count).bytes
+                else { return false }
+            }
+        }
+        return true
     }
 
     /// The file with the data of some items replaced by `new`, each stored

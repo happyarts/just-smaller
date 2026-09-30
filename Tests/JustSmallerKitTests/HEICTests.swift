@@ -88,7 +88,7 @@ final class HEICTests {
         #expect(maker?["17"] as? String == live)
         #expect(headroom(url) == headroomBefore)
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+        #expect(AuxiliaryImages.all(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
     }
 
     /// The maker note's identifier alone is enough to filter a photo.
@@ -153,6 +153,56 @@ final class HEICTests {
         #expect(!fields.keys.contains { $0.name == "City" })
     }
 
+    /// Lossless filtering is proven on the file itself, without decoding:
+    /// the same image data and properties. One byte of either is caught.
+    @Test func sameImageIsProvenOnTheBytes() async throws {
+        let data = try Data(contentsOf: photo("same.heic"))
+        let filtered = try HEIFMetadataFilter.filter(data, level: .removePrivate)
+        #expect(filtered != data)
+        #expect(try HEIFItems.sameImage(ByteView(data), ByteView(filtered)))
+
+        let file = try HEIFItems.File(ByteView(filtered))
+        let image = try file.range(of: file.primary)
+        var changed = filtered
+        changed[image.lowerBound + image.count / 2] ^= 1
+        #expect(try !HEIFItems.sameImage(ByteView(data), ByteView(changed)))
+
+        // The verifier proves the filtered file on its bytes, and a changed
+        // image still doesn't pass.
+        let original = dir.appending(path: "same-original.heic"), result = dir.appending(path: "same-result.heic")
+        try data.write(to: original)
+        try filtered.write(to: result)
+        try await Verifier.verify(original: original, result: result, format: .heic, pixelsMustMatch: true)
+        try changed.write(to: result)
+        await #expect(throws: (any Error).self) {
+            try await Verifier.verify(original: original, result: result, format: .heic, pixelsMustMatch: true)
+        }
+
+        // The image's width (ispe: version and flags, width, height).
+        let ispe = try #require(filtered.range(of: Data("ispe".utf8)))
+        var resized = filtered
+        resized[ispe.upperBound + 7] ^= 1
+        #expect(try !HEIFItems.sameImage(ByteView(data), ByteView(resized)))
+    }
+
+    /// XMP that describes no image in particular (here: its link to the
+    /// image renamed) isn't the image's for ImageIO, but is checked too.
+    @Test func xmpBesideTheImageIsChecked() throws {
+        let url = dir.appending(path: "loose-xmp.heic")
+        let metadata = CGImageMetadataCreateMutable()
+        #expect(CGImageMetadataSetValueWithPath(metadata, nil, "photoshop:City" as CFString, "Berlin" as CFString))
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImageAndMetadata(dest, image(), metadata, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        var data = try Data(contentsOf: url)
+        let cdsc = try #require(data.range(of: Data("cdsc".utf8)))
+        data.replaceSubrange(cdsc, with: Data("xxxx".utf8))
+        let loose = dir.appending(path: "loose-result.heic")
+        try data.write(to: loose)
+        #expect(!MetadataCheck.fields(data).keys.contains { $0.name == "City" })
+        #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: loose, level: .removePrivate) }
+    }
+
     /// A HEIC re-encoded without Apple's maker note is shown dimmer.
     @Test func dimmerHEICIsRejected() async throws {
         let url = photo("bright.heic")
@@ -204,7 +254,7 @@ final class HEICTests {
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         let result = dir.appending(path: "maker-whole.heic")
         let dest = CGImageDestinationCreateWithURL(result as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-        let options = [kCGImageDestinationMetadata: ImageIOMetadata.filtered(CGImageSourceCopyMetadataAtIndex(source, 0, nil), .removePrivate),
+        let options = [kCGImageDestinationMetadata: HEIFEncoder.startingMetadata(CGImageSourceCopyMetadataAtIndex(source, 0, nil), .removePrivate),
                        kCGImageDestinationMergeMetadata: false] as CFDictionary
         #expect(CGImageDestinationCopyImageSource(dest, source, options, nil))
         #expect(Set((props(try Data(contentsOf: result))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "43", "48"])

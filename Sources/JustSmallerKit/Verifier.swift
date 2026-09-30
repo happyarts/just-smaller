@@ -77,6 +77,12 @@ enum Verifier {
             // Huffman tables, so JPEGs are compared where the image really
             // lives: the quantized DCT coefficients, read with libjpeg.
             try await compareJPEGCoefficients(original: original, result)
+        } else if format == .heic, (try? HEIFItems.sameImage(ByteView(Data(contentsOf: original, options: .alwaysMapped)),
+                                                             ByteView(Data(contentsOf: result, options: .alwaysMapped)))) == true {
+            // Only EXIF and XMP changed, the coded image didn't: its bytes,
+            // properties and auxiliary images are all the same, so decoding
+            // both would only compare the same data twice.
+            return
         } else {
             // GIF transparency is on/off per palette entry and the colour behind
             // it carries no meaning, so only PNG and WebP must keep it too.
@@ -135,7 +141,7 @@ enum Verifier {
     /// ISO 21496-1) that a filter must not lose. Reading the headroom
     /// doesn't decode the photo.
     private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource, exact: Bool) throws {
-        guard let aux = ImageIOMetadata.sameAuxiliaryImages(a, b, exact: exact) else {
+        guard let aux = AuxiliaryImages.same(a, b, exact: exact) else {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
         guard !aux.isEmpty else { return }

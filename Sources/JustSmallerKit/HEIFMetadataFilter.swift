@@ -43,7 +43,7 @@ enum HEIFMetadataFilter {
 
     /// A TIFF block with an empty first IFD, and an XMP packet without properties.
     private static let emptyTIFF: [UInt8] = Array("MM".utf8) + [0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0]
-    private static let emptyXMP = Array(#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#.utf8)
+    static let emptyXMP = Array(#"<x:xmpmeta xmlns:x="adobe:ns:meta/"/>"#.utf8)
 
     private static func one(_ ids: [Int]) throws -> Int? {
         guard ids.count <= 1 else { throw FormatError("several metadata items") }

@@ -37,6 +37,23 @@ enum MetadataCheck {
            !JPEGStructure.gaps(images, count: b.count).allSatisfy({ (try? bytes.view($0.lowerBound, $0.count))?.isPadding ?? false }) {
             throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
         }
+        // A HEIF can hold XMP ImageIO doesn't show as the image's (a
+        // thumbnail's, or one describing no image): it may hold only what
+        // the level keeps as well.
+        if level != .keep, let file = try? HEIFItems.File(bytes) {
+            // XMP that can't be read can't be shown to hold only what stays;
+            // ImageIO reads none from a packet without properties, so the
+            // empty one the filter writes is known by its bytes.
+            for id in file.metadataXMP {
+                guard let item = try? file.range(of: id), let packet = try? bytes.view(item.lowerBound, item.count) else {
+                    throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+                }
+                if packet.bytes == Data(HEIFMetadataFilter.emptyXMP) { continue }
+                guard let metadata = CGImageMetadataCreateFromXMPData(packet.bytes as CFData),
+                      !fields(metadata).keys.contains(where: { !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level) })
+                else { throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module)) }
+            }
+        }
     }
 
     private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {

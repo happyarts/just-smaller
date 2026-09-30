@@ -22,12 +22,12 @@ enum HEIFEncoder {
             guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
             let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
             if let orientation = original?[kCGImagePropertyOrientation] { properties[kCGImagePropertyOrientation] = orientation }
-            CGImageDestinationAddImageAndMetadata(destination, image, ImageIOMetadata.filtered(CGImageSourceCopyMetadataAtIndex(source, 0, nil), level),
+            CGImageDestinationAddImageAndMetadata(destination, image, startingMetadata(CGImageSourceCopyMetadataAtIndex(source, 0, nil), level),
                                                   properties as CFDictionary)
         }
         // HDR gain maps, depth and portrait mattes: dropping them would lose
         // HDR or portrait editing.
-        for type in ImageIOMetadata.auxiliaryImages(source) {
+        for type in AuxiliaryImages.all(source) {
             if let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type) {
                 CGImageDestinationAddAuxiliaryDataInfo(destination, type, info)
             }
@@ -45,5 +45,23 @@ enum HEIFEncoder {
             }
         }
         return true
+    }
+
+    /// The metadata as a copy of the original's, with every property removed
+    /// the level doesn't keep. ImageIO's own bookkeeping stays: without it,
+    /// ImageIO brings back fields that were removed. The copy also carries
+    /// what ImageIO doesn't show (maker notes), so ImageIO writes an EXIF
+    /// and an XMP item wherever the original has one; `HEIFMetadataFilter`
+    /// then puts in what stays.
+    static func startingMetadata(_ metadata: CGImageMetadata?, _ level: MetadataHandling) -> CGImageMetadata {
+        guard let metadata, let out = CGImageMetadataCreateMutableCopy(metadata) else { return CGImageMetadataCreateMutable() }
+        CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, nil) { path, tag in
+            guard let ns = CGImageMetadataTagCopyNamespace(tag) as String?, let name = CGImageMetadataTagCopyName(tag) as String?,
+                  ns != MetadataCheck.imageIONamespace, !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: ns, name: name), at: level)
+            else { return true }
+            CGImageMetadataRemoveTagWithPath(out, nil, path)
+            return true
+        }
+        return out
     }
 }

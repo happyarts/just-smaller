@@ -310,7 +310,7 @@ final class MetadataTests {
         ] as CFDictionary)
         #expect(CGImageDestinationFinalize(dest))
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+        #expect(AuxiliaryImages.all(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
 
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false
@@ -320,7 +320,7 @@ final class MetadataTests {
         let p = props(url)
         #expect(p[kCGImagePropertyGPSDictionary] == nil)
         #expect((p[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String == "Jane Doe")
-        #expect(ImageIOMetadata.auxiliaryImages(CGImageSourceCreateWithURL(url as CFURL, nil)!) == [kCGImageAuxiliaryDataTypeHDRGainMap])
+        #expect(AuxiliaryImages.all(CGImageSourceCreateWithURL(url as CFURL, nil)!) == [kCGImageAuxiliaryDataTypeHDRGainMap])
 
         // Nothing to remove: the file stays as it is.
         settings.metadata = .keep

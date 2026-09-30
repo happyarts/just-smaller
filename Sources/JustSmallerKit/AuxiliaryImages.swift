@@ -1,10 +1,10 @@
 import Foundation
 import ImageIO
 
-/// What HEIC's lossy re-encode needs from ImageIO: the auxiliary images
-/// (HDR gain map, portrait depth and mattes) that must all come along, and
-/// the metadata to start from.
-enum ImageIOMetadata {
+/// A photo's auxiliary images (HDR gain map, portrait depth and mattes),
+/// as ImageIO reads them: which there are, and whether a result still
+/// holds the same ones.
+enum AuxiliaryImages {
     private static var auxiliaryTypes: [CFString] { [
         kCGImageAuxiliaryDataTypeHDRGainMap,
         kCGImageAuxiliaryDataTypeISOGainMap,
@@ -19,7 +19,7 @@ enum ImageIOMetadata {
     ] }
 
     /// Auxiliary images that belong to the photo; they must all survive.
-    static func auxiliaryImages(_ source: CGImageSource) -> [CFString] {
+    static func all(_ source: CGImageSource) -> [CFString] {
         auxiliaryTypes.filter { CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, $0) != nil }
     }
 
@@ -29,7 +29,7 @@ enum ImageIOMetadata {
     /// reads — differ by at most 1 % of the original's range on average (a
     /// map that is another one's, or broken, differs far more); nil
     /// otherwise. Each is decoded once.
-    static func sameAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource, exact: Bool = true) -> [CFString]? {
+    static func same(_ a: CGImageSource, _ b: CGImageSource, exact: Bool = true) -> [CFString]? {
         var both: [CFString] = []
         for type in auxiliaryTypes {
             let x = CGImageSourceCopyAuxiliaryDataInfoAtIndex(a, 0, type) as? [CFString: Any]
@@ -53,22 +53,6 @@ enum ImageIOMetadata {
         return both
     }
 
-    /// The metadata as a copy of the original's, with every property removed
-    /// the level doesn't keep. ImageIO's own bookkeeping stays: without it,
-    /// ImageIO brings back fields that were removed. The copy also carries
-    /// what ImageIO doesn't show (maker notes), so ImageIO writes items large
-    /// enough for everything; `HEIFMetadataFilter` then puts in what stays.
-    static func filtered(_ metadata: CGImageMetadata?, _ level: MetadataHandling) -> CGImageMetadata {
-        guard let metadata, let out = CGImageMetadataCreateMutableCopy(metadata) else { return CGImageMetadataCreateMutable() }
-        CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, nil) { path, tag in
-            guard let ns = CGImageMetadataTagCopyNamespace(tag) as String?, let name = CGImageMetadataTagCopyName(tag) as String?,
-                  ns != MetadataCheck.imageIONamespace, !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: ns, name: name), at: level)
-            else { return true }
-            CGImageMetadataRemoveTagWithPath(out, nil, path)
-            return true
-        }
-        return out
-    }
 }
 
 /// An auxiliary image's samples, for the one-channel formats photos carry:
