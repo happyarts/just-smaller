@@ -29,6 +29,13 @@ enum MetadataCheck {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
         for pair in pairs?.dropFirst() ?? [] { try verify(pair.original, pair.result, level: level) }
+        // What lies between and after the images could hold anything: it goes
+        // unless everything stays (or the XMP lists the images' lengths).
+        let bytes = ByteView(b)
+        if level != .keep, let images = JPEGStructure.images(bytes), !JPEGStructure.listsLengthsInXMP(ByteView(a)),
+           !JPEGStructure.gaps(images, count: b.count).allSatisfy({ (try? bytes.view($0.lowerBound, $0.count))?.isPadding ?? false }) {
+            throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+        }
     }
 
     private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {

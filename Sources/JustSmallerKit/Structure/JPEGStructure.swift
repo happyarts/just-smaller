@@ -6,8 +6,9 @@ import Foundation
 /// segment; motion photos store a video there. jpeg-scan and the
 /// coefficient check see only one image, so such a file is taken apart
 /// into its images (`images`), each is optimized and checked on its own, and
-/// they are joined again with the index rewritten (`joined`). Reads through
-/// ByteView; a file it can't read counts as a single image.
+/// they are joined again with the index rewritten (`joined`); whatever lies
+/// between and after them stays byte for byte. Reads through ByteView; a
+/// file it can't read counts as a single image.
 enum JPEGStructure {
     /// A multi-picture index, or anything but padding after the first
     /// image's end.
@@ -58,11 +59,11 @@ enum JPEGStructure {
     }
 
     /// Where each image the index lists lies, read from the images
-    /// themselves: each a JPEG from its SOI to its EOI, in the index's order,
-    /// with nothing but padding between and after them. The sizes the index
-    /// gives are not needed (some writers get the first one wrong). nil for
-    /// a single image, a video or other data after the images (motion
-    /// photos), or an index that doesn't fit the file.
+    /// themselves: each a JPEG from its SOI to its EOI, in the index's order.
+    /// The sizes the index gives are not needed (some writers get the first
+    /// one wrong), and cameras leave leftover bytes between and after the
+    /// images (`gaps`). nil for a single image, or an index that doesn't fit
+    /// the file.
     static func images(_ b: ByteView) -> [Range<Int>]? {
         try? findImages(b)
     }
@@ -71,12 +72,33 @@ enum JPEGStructure {
         guard let index = try findIndex(b), index.count > 1 else { return nil }
         var images: [Range<Int>] = [], end = 0
         for entry in index {
-            guard entry.start >= end, try b.view(end, entry.start - end).isPadding else { return nil }
+            guard entry.start >= end else { return nil }
             let image = entry.start..<(try imageEnd(b, from: entry.start))
             images.append(image)
             end = image.upperBound
         }
-        return try b.view(from: end).isPadding ? images : nil
+        return images
+    }
+
+    /// What lies after each image up to the next one, and after the last one
+    /// up to the end of the file.
+    static func gaps(_ images: [Range<Int>], count: Int) -> [Range<Int>] {
+        images.indices.map { images[$0].upperBound..<(images.indices.contains($0 + 1) ? images[$0 + 1].lowerBound : count) }
+    }
+
+    /// A motion photo: a video lies after the images. Google says so in the
+    /// first image's XMP (GCamera:MotionPhoto or MicroVideo set to 1, as an
+    /// attribute or an element); Samsung's trailer has its own signatures,
+    /// and an MP4 file starts with an ftyp box.
+    static func holdsVideo(_ b: ByteView, images: [Range<Int>]) -> Bool {
+        let marks = ["MotionPhoto=\"1\"", "MotionPhoto>1<", "MicroVideo=\"1\"", "MicroVideo>1<"].map { Data($0.utf8) }
+        let xmp = (try? JPEGMarkers.headers(b))?.segments.contains { s in
+            [.xmp, .extendedXMP].contains(JPEGMarkers.part(s.marker, payload: s.payload.bytes))
+                && marks.contains { s.payload.bytes.range(of: $0) != nil }
+        } ?? false
+        let trailer = (try? b.view(from: images.last?.upperBound ?? b.count))?.bytes ?? Data()
+        return xmp || trailer.prefix(64).range(of: Data("ftyp".utf8)) != nil
+            || ["MotionPhoto_Data", "SEFT"].contains { trailer.range(of: Data($0.utf8)) != nil }
     }
 
     /// Where the JPEG that starts at `start` ends: after its EOI.
@@ -90,12 +112,14 @@ enum JPEGStructure {
         }
     }
 
-    /// The writer next to `imageIndex`: `images` one after another, and the
-    /// index in the first rewritten to their sizes and offsets. The index
-    /// keeps its length, so it is written in place and nothing before it
-    /// moves. The index must list exactly these images.
-    static func joined(_ images: [Data]) throws -> Data {
-        guard let first = images.first else { throw FormatError("no image") }
+    /// The writer next to `imageIndex`: `images` one after another, each
+    /// followed by its gap as it was, and the index in the first rewritten to
+    /// their sizes and offsets. The index keeps its length, so it is written
+    /// in place and nothing before it moves. The index must list exactly
+    /// these images.
+    static func joined(_ images: [Data], gaps: [Data]? = nil) throws -> Data {
+        let gaps = gaps ?? images.map { _ in Data() }
+        guard let first = images.first, gaps.count == images.count else { throw FormatError("no image") }
         var out = first
         guard let (tiff, bigEndian, list, at) = try indexList(ByteView(first)), list.count == 16 * images.count
         else { throw FormatError("multi-picture index") }
@@ -108,9 +132,10 @@ enum JPEGStructure {
         for (n, image) in images.enumerated() {
             try write(image.count, at: tiff + at + 16 * n + 4)
             try write(n == 0 ? 0 : start - tiff, at: tiff + at + 16 * n + 8)
-            start += image.count
+            start += image.count + gaps[n].count
         }
-        for image in images.dropFirst() { out.append(image) }
+        out.append(gaps[0])
+        for (image, gap) in zip(images, gaps).dropFirst() { out.append(image + gap) }
         return out
     }
 

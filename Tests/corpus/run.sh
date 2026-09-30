@@ -84,15 +84,15 @@ for line in open(os.path.join(work, "results.jsonl")):
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
         fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("reason", "")))
 def jpeg_images(path):
-    """Each JPEG in the file from its SOI to its EOI, one after another (the
-    first, then those a multi-picture index lists); stops at anything else."""
-    b, out, i = open(path, "rb").read(), [], 0
-    while b.startswith(b"\xff\xd8", i):
-        start, i, end = i, i + 2, None
-        while end is None and i + 1 < len(b) and b[i] == 0xFF:
+    """Each JPEG in the file from its SOI to its EOI: the first, then those its
+    multi-picture index (MPF) lists, found where the index says they start."""
+    b = open(path, "rb").read()
+    def end_of(i):
+        i += 2
+        while i + 1 < len(b) and b[i] == 0xFF:
             m = b[i + 1]
             if m == 0xFF: i += 1
-            elif m == 0xD9: end = i + 2
+            elif m == 0xD9: return i + 2
             elif 0xD0 <= m <= 0xD7 or m == 0x01: i += 2
             else:
                 i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
@@ -100,10 +100,25 @@ def jpeg_images(path):
                     while (k := b.find(b"\xff", i)) >= 0 and k + 1 < len(b) and (b[k + 1] == 0 or 0xD0 <= b[k + 1] <= 0xD7):
                         i = k + 2
                     i = k if k >= 0 else len(b)
-        if end is None: break
-        out.append(b[start:end])
-        i = end
-        while i < len(b) and b[i] in (0x00, 0xFF) and not b.startswith(b"\xff\xd8", i): i += 1
+        return None
+    # The index is an APP2 "MPF" segment among the first image's headers.
+    starts, m, i = [0], -1, 2
+    while b[i:i + 1] == b"\xff" and b[i + 1:i + 2] not in (b"\xda", b"\xd9", b""):
+        if b[i + 1] == 0xE2 and b[i + 4:i + 8] == b"MPF\0": m = i + 4; break
+        i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
+    if m > 0:
+        t = m + 4; e = "big" if b[t:t + 2] == b"MM" else "little"
+        rd = lambda at, n: int.from_bytes(b[at:at + n], e)
+        ifd = t + rd(t + 4, 4)
+        for k in range(rd(ifd, 2)):
+            at = ifd + 2 + 12 * k
+            if rd(at, 2) == 0xB002:
+                entries = t + rd(at + 8, 4)
+                starts += [t + rd(entries + 16 * n + 8, 4) for n in range(1, rd(at + 4, 4) // 16)]
+    out = []
+    for s in starts:
+        if b[s:s + 2] != b"\xff\xd8" or (e := end_of(s)) is None: break
+        out.append(b[s:e])
     return out
 def render(p, outdir):
     subprocess.run(["qlmanage", "-t", "-s", "512", "-o", outdir, p], capture_output=True)

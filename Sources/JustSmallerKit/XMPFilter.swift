@@ -58,6 +58,12 @@ enum XMPFilter {
             }
         }
         for description in (rdf.children ?? []).compactMap({ $0 as? XMLElement }) {
+            // rdf:about may name the document ("uuid:…"); readers take it as
+            // its instance id. The empty name is what XMP recommends.
+            for attribute in description.attributes ?? []
+            where attribute.localName == "about" && namespace(of: attribute, in: description) == MetadataPolicy.NS.rdf {
+                attribute.stringValue = ""
+            }
             filterDescription(description, level: level, digest: digest)
             if (description.attributes ?? []).allSatisfy({ isRDF($0, in: description) }),
                !(description.children ?? []).contains(where: { $0.kind == .element }) {

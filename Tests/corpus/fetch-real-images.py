@@ -15,16 +15,20 @@ Sources:
     test data, MIT-CMU).
   - Files that must stay as they are ("unchanged-"): multi-picture indexes
     that don't fit the file, a gain map listed only in XMP (Skia, Pillow).
+  - PhotoPrism's sample collection (dl.photoprism.app/samples, CC BY-NC-SA
+    4.0): photos from many cameras and phones, motion photos, portraits,
+    panoramas, damaged JPEGs. Non-commercial: used here only for testing
+    this open-source engine, never distributed.
 
 Everything is cached in CACHE; re-running only fetches what's missing.
 The images are for local testing only and never go into the repository.
 
 usage: fetch-real-images.py CACHE
 """
-import json, os, sys, time, urllib.error, urllib.parse, urllib.request
+import json, os, re, sys, time, urllib.error, urllib.parse, urllib.request
 
 CACHE = sys.argv[1]
-UA = "just-smaller-test-corpus/1.0 (local compression benchmark)"
+UA = "just-smaller-test-corpus/1.0 (https://github.com/happyarts/just-smaller; local compression tests)"
 API = "https://commons.wikimedia.org/w/api.php"
 
 def get(url, binary=False):
@@ -124,6 +128,48 @@ for q in ("animation", "diagram", "loading", "cartoon"):
     jobs += [("gif", n, u) for n, u in commons_files(q, "image/gif", 5, 4_000_000)]
 for q in ("", "photo", "screenshot"):
     jobs += [("webp", n, u) for n, u in commons_files(q, "image/webp", 5, 4_000_000)]
+
+def photoprism(path=""):
+    """Every image PhotoPrism's collection holds in a format we optimize."""
+    base = "https://dl.photoprism.app/samples/"
+    html = get(base + path, binary=True).decode("utf8", "replace")
+    for name in re.findall(r'href="\./([^"]+)"', html):
+        if name.endswith("/"):
+            yield from photoprism(path + name)
+        elif re.search(r"\.(jpe?g|mpo|heic|heif|png|gif|webp)$", name, re.I):
+            yield (path + name).replace("%20", " ").replace("/", "_"), base + path + name
+
+jobs += [("photoprism", n, u) for top in ("Formats/", "Brands/") for n, u in photoprism(top)]
+
+def commons_multi_images(category, limit):
+    """Phone photos on Commons that hold more than one image (HDR gain map,
+    depth, motion photo): the first 128 KB of each file are read — gently,
+    one request every two seconds — and those with a multi-picture index or
+    a motion photo's marks are fetched whole."""
+    params = {"action": "query", "format": "json", "generator": "categorymembers", "gcmtitle": category,
+              "gcmtype": "file", "gcmlimit": limit, "prop": "imageinfo", "iiprop": "url|size|mime"}
+    pages = get(API + "?" + urllib.parse.urlencode(params)).get("query", {}).get("pages", {})
+    for p in sorted(pages.values(), key=lambda p: p["title"]):
+        ii = (p.get("imageinfo") or [{}])[0]
+        name = "commons-" + p["title"].removeprefix("File:")
+        if ii.get("mime") != "image/jpeg" or ii.get("size", 0) > 20_000_000:
+            continue
+        if os.path.exists(os.path.join(CACHE, "multi-jpeg", "".join(c if c.isalnum() or c in "._-" else "_" for c in name)[-90:])):
+            yield name, ii["url"]; continue
+        req = urllib.request.Request(ii["url"], headers={"User-Agent": UA, "Range": "bytes=0-131071"})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                head = r.read()
+        except urllib.error.HTTPError as e:
+            print(f"    commons: {e.code}, stopping the scan", flush=True)
+            return
+        time.sleep(2)
+        if any(m in head for m in (b"MPF\0", b"MotionPhoto", b"MicroVideo", b"HDRGainMap", b"hdrgm")):
+            yield name, ii["url"]
+
+for cat in ("Taken with Apple iPhone 15 Pro", "Taken with Apple iPhone 14 Pro", "Taken with Apple iPhone 13 Pro",
+            "Taken with Google Pixel 7", "Taken with Google Pixel 8 Pro", "Taken with Samsung Galaxy S23 Ultra"):
+    jobs += [("multi-jpeg", n, u) for n, u in commons_multi_images("Category:" + cat, 60)]
 
 seen, stats = set(), {}
 for folder, name, url in jobs:

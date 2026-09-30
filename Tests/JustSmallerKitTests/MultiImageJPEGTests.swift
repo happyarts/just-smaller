@@ -263,11 +263,73 @@ final class MultiImageJPEGTests {
     @Test func motionPhotoIsLeftAlone() async throws {
         let url = gainMapPhoto("motion.jpg")
         try (try Data(contentsOf: url) + Data("....ftypmp42".utf8) + Data(repeating: 0x42, count: 5000)).write(to: url)
-        #expect(JPEGStructure.hasSecondaryImage(ByteView(try Data(contentsOf: url))))
-        #expect(JPEGStructure.images(ByteView(try Data(contentsOf: url))) == nil)
+        let bytes = ByteView(try Data(contentsOf: url))
+        #expect(JPEGStructure.hasSecondaryImage(bytes))
+        #expect(JPEGStructure.holdsVideo(bytes, images: try #require(JPEGStructure.images(bytes))))
         let before = try Data(contentsOf: url)
         guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
         #expect(try Data(contentsOf: url) == before)
+    }
+
+    /// Google marks a motion photo in the XMP (1, not 0); Samsung's trailer
+    /// has its own signature.
+    @Test func motionPhotoMarks() throws {
+        let parts = images(try Data(contentsOf: gainMapPhoto("marks.jpg")))
+        func file(xmp: String?, trailer: String = "") throws -> ByteView {
+            var first = parts[0]
+            if let xmp {
+                let packet = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+                    + "<rdf:Description xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\" \(xmp)/></rdf:RDF></x:xmpmeta>"
+                first = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(packet.utf8)), into: first)
+            }
+            return ByteView(try JPEGStructure.joined([first, parts[1]], gaps: [Data(), Data(trailer.utf8)]))
+        }
+        func video(_ b: ByteView) throws -> Bool { JPEGStructure.holdsVideo(b, images: try #require(JPEGStructure.images(b))) }
+        #expect(try video(file(xmp: "GCamera:MotionPhoto=\"1\"")))
+        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"0\"")))
+        #expect(try video(file(xmp: nil, trailer: "...video...MotionPhoto_Data")))
+        #expect(try !video(file(xmp: nil, trailer: "camera buffer")))
+    }
+
+    /// Leftover bytes may stay only as they were, and only when everything is kept.
+    @Test func changedOrKeptLeftoversAreCaught() throws {
+        let url = gainMapPhoto("leftover-check.jpg")
+        let parts = images(try Data(contentsOf: url))
+        try JPEGStructure.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: url)
+        let result = dir.appending(path: "leftover-result.jpg")
+        let reference = StructureCheck.Reference(original: url, format: .jpeg)
+        try JPEGStructure.joined(parts, gaps: [Data("leftovex".utf8), Data()]).write(to: result)
+        #expect(throws: VerificationError.self) { try StructureCheck.verify(result: result, against: reference) }
+        try JPEGStructure.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: result)
+        try StructureCheck.verify(result: result, against: reference)
+        try MetadataCheck.verify(original: url, result: result, level: .keep)
+        // Filtered images: only the leftover bytes make the difference.
+        let filtered = try parts.map { try JPEGMetadataFilter.filter($0, level: .removeAll, orientation: 1) }
+        try JPEGStructure.joined(filtered, gaps: [Data("leftover".utf8), Data()]).write(to: result)
+        #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removeAll) }
+        try JPEGStructure.joined(filtered).write(to: result)
+        try MetadataCheck.verify(original: url, result: result, level: .removeAll)
+    }
+
+    /// Cameras leave leftover bytes between and after the images. Everything
+    /// kept: they stay byte for byte where they were; otherwise they go, like
+    /// unknown metadata.
+    @Test(arguments: [MetadataHandling.keep, .removePrivate])
+    func leftoverBytesBetweenImages(level: MetadataHandling) async throws {
+        let url = gainMapPhoto("leftovers-\(level.rawValue).jpg")
+        let parts = images(try Data(contentsOf: url))
+        let gaps = [Data((0..<340).map { UInt8($0 % 251) }), Data("camera buffer".utf8)]
+        try JPEGStructure.joined(parts, gaps: gaps).write(to: url)
+        let bytes = ByteView(try Data(contentsOf: url))
+        let ranges = try #require(JPEGStructure.images(bytes))
+        #expect(!JPEGStructure.holdsVideo(bytes, images: ranges))
+
+        settings.metadata = level
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
+        let data = try Data(contentsOf: url)
+        let after = try #require(JPEGStructure.images(ByteView(data)))
+        let kept = JPEGStructure.gaps(after, count: data.count).map { data.subdata(in: $0) }
+        #expect(kept == (level == .keep ? gaps : [Data(), Data()]))
     }
 
     /// Stereo cameras name their files .mpo; they are JPEGs and are found in folders.

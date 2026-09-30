@@ -22,6 +22,8 @@ enum JPEGCheck {
         /// Its images after the first, when they must stay byte for byte
         /// (their lengths are listed in the first one's XMP).
         let fixedImages: [Data]?
+        /// What lies between and after its images, which stays byte for byte.
+        let gaps: [Data]?
 
         init(_ a: ByteView) {
             let lenient = (try? JPEGMarkers.headers(a))?.segments ?? []
@@ -39,8 +41,10 @@ enum JPEGCheck {
             self.segments = segments
             trailer = strict.flatMap { try? a.view(from: $0.end).bytes } ?? Data()
             index = JPEGStructure.indexWithoutPositions(a)
+            let images = JPEGStructure.images(a)
             fixedImages = JPEGStructure.listsLengthsInXMP(a)
-                ? JPEGStructure.images(a)?.dropFirst().compactMap { try? a.view($0.lowerBound, $0.count).bytes } : nil
+                ? images?.dropFirst().compactMap { try? a.view($0.lowerBound, $0.count).bytes } : nil
+            gaps = images.map { JPEGStructure.gaps($0, count: a.count).compactMap { try? a.view($0.lowerBound, $0.count).bytes } }
         }
     }
 
@@ -74,8 +78,11 @@ enum JPEGCheck {
         // JPEG after the one before it, of exactly the size the index gives,
         // and nothing else — or exactly what the original had there.
         if let index = JPEGStructure.imageIndex(b), index.count > 1 {
-            guard let images = JPEGStructure.images(b), images[0].upperBound == image.end else {
-                throw Invalid("images overlap, or data between or after them")
+            guard let images = JPEGStructure.images(b), images[0].upperBound == image.end else { throw Invalid("images overlap") }
+            // Between and after the images: the original's bytes, or nothing but padding.
+            let gaps = try JPEGStructure.gaps(images, count: b.count).map { try b.view($0.lowerBound, $0.count) }
+            guard gaps.map(\.bytes) == reference.gaps || gaps.allSatisfy(\.isPadding) else {
+                throw Invalid("data between or after the images changed")
             }
             // Only the sizes and offsets in the index may change.
             guard JPEGStructure.indexWithoutPositions(b) == reference.index else { throw Invalid("multi-picture index changed") }

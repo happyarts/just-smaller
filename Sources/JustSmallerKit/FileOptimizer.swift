@@ -61,12 +61,12 @@ public struct FileOptimizer: Sendable {
                             size: size)
         }
         // A JPEG with more images than the first is optimized image by image;
-        // one with anything else after them (a motion photo's video), or
-        // with an index that doesn't fit, stays as it is.
+        // a motion photo (a video after them), or one whose index doesn't
+        // fit, stays as it is.
         var hasSecondaryImage = false
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
            case let bytes = ByteView(data), JPEGStructure.hasSecondaryImage(bytes) {
-            guard JPEGStructure.images(bytes) != nil else {
+            guard let images = JPEGStructure.images(bytes), !JPEGStructure.holdsVideo(bytes, images: images) else {
                 return .skipped(reason: String(localized: "Contains a video, or images that can’t be read safely – left unchanged", bundle: .module),
                                 size: size)
             }

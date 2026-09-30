@@ -252,8 +252,10 @@ enum Pipeline {
     /// parallel) and joined again with the multi-picture index rewritten.
     /// `change` gets an image and its number and returns it changed or as it
     /// was. Where the first image's XMP lists the lengths of the others
-    /// (Google's container), only the first changes.
-    private static func changeEachImage(of input: URL, to output: URL,
+    /// (Google's container), only the first changes. What lies between and
+    /// after the images (leftover bytes from cameras, unknown data) stays as
+    /// it is, or goes with `droppingGaps`: it could hold anything.
+    private static func changeEachImage(of input: URL, to output: URL, droppingGaps: Bool = false,
                                         _ change: @escaping @Sendable (_ image: Data, _ n: Int) async throws -> Data) async throws {
         let data = try Data(contentsOf: input, options: .alwaysMapped)
         guard let ranges = JPEGStructure.images(ByteView(data)) else { throw JPEGMetadataFilter.Malformed() }
@@ -268,13 +270,15 @@ enum Pipeline {
             for try await (n, image) in group { images[n] = image }
             return images
         }
-        try JPEGStructure.joined(images).write(to: output)
+        let gaps = JPEGStructure.gaps(ranges, count: data.count).map { droppingGaps && !onlyFirst ? Data() : data.subdata(in: $0) }
+        try JPEGStructure.joined(images, gaps: gaps).write(to: output)
     }
 
-    /// Each image keeps its own orientation.
+    /// Each image keeps its own orientation. Unknown data between and after
+    /// the images goes like unknown metadata segments, unless everything stays.
     static func jpegImagesMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, _ in
-            try await changeEachImage(of: input, to: output) { image, n in
+            try await changeEachImage(of: input, to: output, droppingGaps: level != .keep) { image, n in
                 try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image))
             }
             try MetadataCheck.verify(original: input, result: output, level: level)

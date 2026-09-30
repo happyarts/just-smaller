@@ -4,7 +4,8 @@
 Removes exact duplicates anywhere, and within a folder keeps at most KEEP
 JPEGs or PNGs of the same kind — the same encoder settings (frame type,
 sampling, quantization tables), the same chunks or segments, and a size
-within a factor of two. Folders made on purpose (rare codings, multi-image,
+within a factor of two; JPEGs holding more than one image count as a kind
+of their own. Folders made on purpose (rare codings, multi-image,
 files that must stay unchanged) keep every kind; the edge cases are left
 alone entirely (the same image under other names, on purpose). With
 --dry-run it only lists what it would remove.
@@ -14,7 +15,7 @@ usage: dedup.py [--dry-run] FOLDER
 import collections, hashlib, os, struct, sys
 
 KEEP = 3
-EXEMPT = {"edge", "rare-jpeg", "multi-jpeg", "real-multi-jpeg", "unchanged", "real-unchanged"}
+EXEMPT = {"edge", "rare-jpeg", "multi-jpeg", "unchanged", "real-unchanged"}
 
 def jpeg_kind(b):
     tables, frame, segments, i = b"", None, set(), 2
@@ -46,7 +47,11 @@ def png_kind(b):
 
 def kind(b):
     k = jpeg_kind(b) if b[:3] == b"\xff\xd8\xff" else png_kind(b) if b[:4] == b"\x89PNG" else None
-    return k and k + (len(b).bit_length(),)
+    # JPEGs with more than one image (gain map, depth, motion photo video)
+    # are a kind of their own.
+    head = b[:131072]
+    multi = tuple(m for m in (b"MPF\0", b"MotionPhoto", b"MicroVideo", b"Container:Directory") if m in head)
+    return k and k + (len(b).bit_length(), multi)
 
 dry = "--dry-run" in sys.argv
 root = [a for a in sys.argv[1:] if a != "--dry-run"][0]

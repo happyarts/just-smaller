@@ -144,6 +144,18 @@ final class MetadataTests {
 
     // MARK: - XMP
 
+    /// A description named after the document ("uuid:…", as some cameras
+    /// write it) reads as its instance id; filtered, it names nothing.
+    @Test func xmpDocumentNameGoes() throws {
+        let packet = Array("""
+            <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
+            <rdf:Description rdf:about="uuid:d874e788-25f8-4d1d-947a-6e77822b5d6a" xmlns:xmp="http://ns.adobe.com/xap/1.0/">\
+            <xmp:Rating>3</xmp:Rating></rdf:Description></rdf:RDF></x:xmpmeta>
+            """.utf8)
+        let filtered = String(decoding: try #require(XMPFilter.filter(packet, level: .removePrivate)), as: UTF8.self)
+        #expect(!filtered.contains("uuid:") && filtered.contains("rdf:about=\"\"") && filtered.contains("Rating"))
+    }
+
     @Test func xmpIsFilteredByNamespaceAndWrittenCompactly() throws {
         let packet = Array("""
             <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>

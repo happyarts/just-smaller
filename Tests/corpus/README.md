@@ -9,7 +9,7 @@ repository (image rights); they live in a `Testkorpus` folder next to the reposi
 Tests/corpus/fetch-real-images.py   # once: freely licensed files into download-cache/ (sources in the script)
 Tests/corpus/build-corpus.sh        # assemble quick/ and full/ (offline, from the cache and this Mac)
 Tests/corpus/run.sh --quick         # ~80 files, seconds — after every change
-Tests/corpus/run.sh --full          # ~500 files, two minutes — before a release or a tool update
+Tests/corpus/run.sh --full          # ~700 files, 1 GB, four minutes — before a release or a tool update
 Tests/corpus/run.sh --private       # your own photos in Testkorpus/private, if you have that folder
 Tests/corpus/run.sh --quick -- --effort maximum   # pass options to just-smaller
 ```
@@ -44,6 +44,13 @@ and never touches any settings.
   — iPhone and Pixel HDR photos with gain maps, ISO 21496-1 gain maps, MPO
   stereo pairs; ISO gain maps and portraits with depth and mattes written by
   Apple's frameworks (`multi-image.swift`)
+- `full/real-photoprism/`: PhotoPrism's sample collection — photos from many
+  cameras and phones (Canon, Nikon, Panasonic, Sony, GoPro, DJI, iPhone,
+  Pixel, Samsung), motion photos, portraits, panoramas, damaged JPEGs.
+  CC BY-NC-SA 4.0: for testing this engine only, never distributed.
+- Phone photos from Wikimedia Commons that hold more than one image, found
+  by reading the first 128 KB of photos in "Taken with …" categories, one
+  request every two seconds (`fetch-real-images.py`).
 - `full/real-unchanged/`, `full/unchanged/`: files that must stay byte for
   byte as they are (`unchanged-*`, like `broken-*`): multi-picture indexes
   that don't fit the file, a gain map found only through XMP, a motion photo
