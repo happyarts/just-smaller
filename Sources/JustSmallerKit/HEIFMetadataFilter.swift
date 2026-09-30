@@ -38,7 +38,7 @@ enum HEIFMetadataFilter {
                 new[id] = try filteredXMP(data, file.range(of: id), level) ?? emptyXMP
             }
         }
-        return try HEIFItems.replacingData(new, in: data)
+        return try HEIFItems.replacingData(new, in: data, file: file)
     }
 
     /// A TIFF block with an empty first IFD, and an XMP packet without properties.

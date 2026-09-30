@@ -329,6 +329,31 @@ final class MetadataTests {
         #expect(try Data(contentsOf: url) == before)
     }
 
+    /// Whether an image was made or changed by AI stays, even when all
+    /// other metadata goes.
+    @Test(arguments: [UTType.jpeg, .png, .heic])
+    func aiDisclosureStaysAtEveryLevel(type: UTType) async throws {
+        let url = dir.appending(path: "ai.\(type.preferredFilenameExtension ?? "img")")
+        let metadata = CGImageMetadataCreateMutable()
+        CGImageMetadataRegisterNamespaceForPrefix(metadata, MetadataPolicy.NS.iptcExt as CFString, "Iptc4xmpExt" as CFString, nil)
+        let source = "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia"
+        for (path, value) in [("Iptc4xmpExt:DigitalSourceType", source), ("dc:rights", "© Jane Doe"), ("photoshop:City", "Berlin")] {
+            #expect(CGImageMetadataSetValueWithPath(metadata, nil, path as CFString, value as CFString))
+        }
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImageAndMetadata(dest, image(), metadata, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+
+        var settings = OptimizationSettings()
+        settings.moveOriginalsToTrash = false
+        settings.metadata = .removeAll
+        let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        let fields = MetadataCheck.fields(try Data(contentsOf: url))
+        #expect(fields[MetadataCheck.Key(ns: MetadataPolicy.NS.iptcExt, name: "DigitalSourceType")]?.text == source)
+        #expect(!fields.keys.contains { $0.name == "rights" || $0.name == "City" })
+    }
+
     @Test func settingsSavedBeforeTheLevelsBecomeTheDefault() throws {
         let decoded = try JSONDecoder().decode([MetadataHandling].self, from: Data(#"["strip","keep","copyright"]"#.utf8))
         #expect(decoded == [.removePrivate, .keep, .copyrightOnly])

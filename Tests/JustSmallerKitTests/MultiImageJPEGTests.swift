@@ -8,7 +8,6 @@ import UniformTypeIdentifiers
 /// JPEGs that hold several images (HDR gain map, depth, stereo): taken apart,
 /// optimized and checked image by image, joined again with the index
 /// rewritten — and left alone when anything else follows the images.
-/// HEICs with a gain map keep their HDR headroom the same way.
 @Suite(.serialized)
 final class MultiImageJPEGTests {
     let dir: URL
@@ -27,46 +26,9 @@ final class MultiImageJPEGTests {
 
     // MARK: - Fixtures
 
-    private func image(width: Int = 160, height: Int = 120) -> CGImage {
-        let ctx = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
-                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        for y in stride(from: 0, to: height, by: 4) {
-            for x in stride(from: 0, to: width, by: 4) {
-                ctx.setFillColor(red: CGFloat(x) / CGFloat(width), green: CGFloat(y) / CGFloat(height),
-                                 blue: (x / 8 + y / 8) % 2 == 0 ? 0.9 : 0.1, alpha: 1)
-                ctx.fill(CGRect(x: x, y: y, width: 4, height: 4))
-            }
-        }
-        return ctx.makeImage()!
-    }
-
-    private var gps: [CFString: Any] { [kCGImagePropertyGPSLatitude: 48.1, kCGImagePropertyGPSLatitudeRef: "N"] }
-
-    /// A photo with an Apple HDR gain map as ImageIO writes it: the main
-    /// image with EXIF (creator, location, Apple's maker note with the HDR
-    /// headroom and an identifier), a gain map after it, indexed by MPF.
-    private func gainMapPhoto(_ name: String, type: UTType = .jpeg, location: Bool = true) -> URL {
-        let url = dir.appending(path: name)
-        let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImage(dest, image(), [
-            kCGImageDestinationLossyCompressionQuality: 0.9,
-            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Jane Doe", kCGImagePropertyTIFFMake: "Apple"],
-            kCGImagePropertyGPSDictionary: location ? gps : [:],
-            kCGImagePropertyMakerAppleDictionary: ["33": 0.5, "48": 0.001, "43": "0F1E2D3C-UUID"],
-        ] as CFDictionary)
-        let gainMap = CGImageMetadataCreateMutable()
-        CGImageMetadataRegisterNamespaceForPrefix(gainMap, "http://ns.apple.com/HDRGainMap/1.0/" as CFString, "HDRGainMap" as CFString, nil)
-        CGImageMetadataSetValueWithPath(gainMap, nil, "HDRGainMap:HDRGainMapVersion" as CFString, 65536 as CFNumber)
-        CGImageDestinationAddAuxiliaryDataInfo(dest, kCGImageAuxiliaryDataTypeHDRGainMap, [
-            kCGImageAuxiliaryDataInfoData: Data((0..<80 * 60).map { UInt8($0 % 251) }) as CFData,
-            kCGImageAuxiliaryDataInfoDataDescription: [kCGImagePropertyWidth: 80, kCGImagePropertyHeight: 60,
-                                                       kCGImagePropertyBytesPerRow: 80,
-                                                       kCGImagePropertyPixelFormat: 0x4C30_3038], // 'L008'
-            kCGImageAuxiliaryDataInfoMetadata: gainMap,
-        ] as CFDictionary)
-        #expect(CGImageDestinationFinalize(dest))
-        return url
-    }
+    private func image(width: Int = 160, height: Int = 120) -> CGImage { TestImages.pattern(width: width, height: height) }
+    private var gps: [CFString: Any] { TestImages.gps }
+    private func gainMapPhoto(_ name: String) -> URL { TestImages.gainMapPhoto(at: dir.appending(path: name)) }
 
     /// The images of a file, each on its own.
     private func images(_ data: Data) -> [Data] {
@@ -88,14 +50,8 @@ final class MultiImageJPEGTests {
         return try #require(segments.first { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .exif }).whole.bytes
     }
 
-    private func props(_ data: Data) -> [CFString: Any] {
-        CGImageSourceCreateWithData(data as CFData, nil).flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) } as? [CFString: Any] ?? [:]
-    }
-
-    private func headroom(_ url: URL) -> Float? {
-        let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)?.contentHeadroom
-    }
+    private func props(_ data: Data) -> [CFString: Any] { TestImages.properties(data) }
+    private func headroom(_ url: URL) -> Float? { TestImages.headroom(url) }
 
     private func optimize(_ url: URL) async throws -> Outcome {
         try await FileOptimizer(settings: settings).optimize(url) { _ in }
@@ -197,34 +153,6 @@ final class MultiImageJPEGTests {
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
         #expect(before.count > after.count)
-    }
-
-    /// HEIC, with the metadata filtered around the image as it is (lossless)
-    /// and re-encoded (lossy): Apple's maker note keeps the HDR headroom.
-    @Test(arguments: [(MetadataHandling.keep, false), (.removePrivate, false), (.copyrightOnly, false), (.removeAll, false),
-                      (.keep, true), (.removePrivate, true), (.copyrightOnly, true), (.removeAll, true)])
-    func heicKeepsTheHDRHeadroom(level: MetadataHandling, lossy: Bool) async throws {
-        let url = gainMapPhoto("gain-map-\(level.rawValue)-\(lossy).heic", type: .heic)
-        let headroomBefore = try #require(headroom(url))
-        #expect(headroomBefore > 1)
-
-        settings.metadata = level
-        settings.lossy = lossy
-        settings.quality = 40
-        settings.outputLossy = .replace
-        let outcome = try await optimize(url)
-        guard case .optimized(_, _, _, _, _, let identical) = outcome else {
-            // Lossless with nothing to remove: the file stays as it is.
-            #expect(!lossy && level == .keep, "not optimized: \(outcome)"); return
-        }
-        #expect(identical == !lossy)
-        let after = try Data(contentsOf: url)
-        #expect((props(after)[kCGImagePropertyGPSDictionary] != nil) == (level == .keep))
-        let maker = props(after)[kCGImagePropertyMakerAppleDictionary] as? [String: Any]
-        #expect(Set((maker ?? [:]).keys) == (level == .keep ? ["33", "43", "48"] : ["33", "48"]))
-        #expect(headroom(url) == headroomBefore)
-        let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        #expect(ImageIOMetadata.auxiliaryImages(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
     }
 
     /// Google's container lists the lengths of the other images in the
@@ -366,174 +294,6 @@ final class MultiImageJPEGTests {
         parts[0] = try JPEGMetadataFilter.filter(parts[0], level: .removePrivate, orientation: 1)
         try JPEGStructure.joined(parts).write(to: result)
         #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removePrivate) }
-    }
-
-    /// The maker note's identifier alone is enough to filter a photo.
-    @Test func heicWithOnlyAnIdentifierToRemove() async throws {
-        let url = gainMapPhoto("no-location.heic", type: .heic, location: false)
-        #expect(props(try Data(contentsOf: url))[kCGImagePropertyGPSDictionary] == nil)
-        let headroomBefore = headroom(url)
-        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
-        #expect(Set((props(try Data(contentsOf: url))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "48"])
-        #expect(headroom(url) == headroomBefore)
-    }
-
-    /// A 10-bit HEIC (ImageIO decodes it packed, as iPhone screenshots) is
-    /// filtered losslessly; another image in its place is caught.
-    @Test func tenBitHEIC() async throws {
-        let context = CGContext(data: nil, width: 64, height: 48, bitsPerComponent: 16, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.displayP3)!,
-                                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue | CGBitmapInfo.byteOrder16Little.rawValue)!
-        for x in 0..<64 {
-            context.setFillColor(red: CGFloat(x) / 64, green: 0.5, blue: 0.3, alpha: 1)
-            context.fill(CGRect(x: x, y: 0, width: 1, height: 48))
-        }
-        func write(_ name: String, _ image: CGImage) -> URL {
-            let url = dir.appending(path: name)
-            let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-            CGImageDestinationAddImage(dest, image, [kCGImageDestinationLossyCompressionQuality: 0.9,
-                                                     kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Jane Doe"],
-                                                     kCGImagePropertyGPSDictionary: gps] as CFDictionary)
-            #expect(CGImageDestinationFinalize(dest))
-            return url
-        }
-        let url = write("ten.heic", context.makeImage()!)
-        #expect(CGImageSourceCreateImageAtIndex(CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil)?.bitsPerComponent == 10)
-        context.fill(CGRect(x: 10, y: 10, width: 8, height: 8))
-        let other = write("ten-other.heic", context.makeImage()!)
-        await #expect(throws: VerificationError.self) {
-            try await Verifier.verify(original: url, result: other, format: .heic, pixelsMustMatch: true)
-        }
-        guard case .optimized(_, _, _, _, _, let identical) = try await optimize(url) else { Issue.record("not optimized"); return }
-        #expect(identical)
-        let p = props(try Data(contentsOf: url))
-        #expect(p[kCGImagePropertyGPSDictionary] == nil)
-        #expect((p[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String == "Jane Doe")
-    }
-
-    /// A HEIC with XMP of its own (rights, the program that wrote it): the
-    /// rights stay, what the level removes goes.
-    @Test func heicWithItsOwnXMP() async throws {
-        let url = dir.appending(path: "own-xmp.heic")
-        let metadata = CGImageMetadataCreateMutable()
-        for (path, value) in [("dc:rights", "© Jane Doe"), ("xmp:CreatorTool", "Some Editor 1.0"), ("photoshop:City", "Berlin")] {
-            #expect(CGImageMetadataSetValueWithPath(metadata, nil, path as CFString, value as CFString))
-        }
-        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImageAndMetadata(dest, image(), metadata, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-        #expect(CGImageDestinationFinalize(dest))
-        #expect(try HEIFItems.File(ByteView(Data(contentsOf: url))).metadataXMP.count == 1)
-        #expect(MetadataCheck.fields(try Data(contentsOf: url)).keys.contains { $0.name == "City" })
-
-        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
-        let fields = MetadataCheck.fields(try Data(contentsOf: url))
-        #expect(fields.keys.contains { $0.name == "rights" })
-        #expect(!fields.keys.contains { $0.name == "City" })
-    }
-
-    /// Whether an image was made or changed by AI stays, even when all
-    /// other metadata goes.
-    @Test(arguments: [UTType.jpeg, .png, .heic])
-    func aiDisclosureStaysAtEveryLevel(type: UTType) async throws {
-        let url = dir.appending(path: "ai.\(type.preferredFilenameExtension ?? "img")")
-        let metadata = CGImageMetadataCreateMutable()
-        CGImageMetadataRegisterNamespaceForPrefix(metadata, MetadataPolicy.NS.iptcExt as CFString, "Iptc4xmpExt" as CFString, nil)
-        let source = "http://cv.iptc.org/newscodes/digitalsourcetype/compositeWithTrainedAlgorithmicMedia"
-        for (path, value) in [("Iptc4xmpExt:DigitalSourceType", source), ("dc:rights", "© Jane Doe"), ("photoshop:City", "Berlin")] {
-            #expect(CGImageMetadataSetValueWithPath(metadata, nil, path as CFString, value as CFString))
-        }
-        let dest = CGImageDestinationCreateWithURL(url as CFURL, type.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImageAndMetadata(dest, image(), metadata, [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
-        #expect(CGImageDestinationFinalize(dest))
-
-        settings.metadata = .removeAll
-        let outcome = try await optimize(url)
-        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
-        let fields = MetadataCheck.fields(try Data(contentsOf: url))
-        #expect(fields[MetadataCheck.Key(ns: MetadataPolicy.NS.iptcExt, name: "DigitalSourceType")]?.text == source)
-        #expect(!fields.keys.contains { $0.name == "rights" || $0.name == "City" })
-    }
-
-    /// A HEIC re-encoded without Apple's maker note is shown dimmer.
-    @Test func dimmerHEICIsRejected() async throws {
-        let url = gainMapPhoto("bright.heic", type: .heic)
-        let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        let result = dir.appending(path: "dim.heic")
-        let dest = CGImageDestinationCreateWithURL(result as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImage(dest, CGImageSourceCreateImageAtIndex(source, 0, nil)!, nil)
-        CGImageDestinationAddAuxiliaryDataInfo(dest, kCGImageAuxiliaryDataTypeHDRGainMap,
-                                               CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, kCGImageAuxiliaryDataTypeHDRGainMap)!)
-        #expect(CGImageDestinationFinalize(dest))
-        #expect(try #require(headroom(result)) < headroom(url)!)
-        await #expect(throws: VerificationError.self) {
-            try await Verifier.verify(original: url, result: result, format: .heic, pixelsMustMatch: false)
-        }
-    }
-
-    /// Every item's data, by id (items stored in the file).
-    private func itemData(_ data: Data) throws -> [Int: Data] {
-        let file = try HEIFItems.File(ByteView(data))
-        var out: [Int: Data] = [:]
-        for item in file.locations.items where item.method == 0 {
-            out[item.id] = try item.extents.reduce(Data()) { try $0 + ByteView(data).view($1.start, $1.length).bytes }
-        }
-        return out
-    }
-
-    /// Whether `b` holds the same items as `a`, with the same data in all
-    /// but the EXIF and XMP items the filter rewrites.
-    private func changedOnlyInMetadataItems(_ a: Data, _ b: Data) throws -> Bool {
-        let file = try HEIFItems.File(ByteView(a))
-        let metadata = Set(file.items("Exif") + file.metadataXMP)
-        let before = try itemData(a), after = try itemData(b)
-        return before.keys == after.keys && before.allSatisfy { metadata.contains($0.key) || after[$0.key] == $0.value }
-    }
-
-    /// Apple's maker note copied whole by ImageIO (with its identifier) is
-    /// caught by the metadata check; with the original's EXIF and XMP
-    /// filtered in, it passes, and nothing else changed.
-    @Test func wholeAppleMakerNoteIsCaught() throws {
-        let url = gainMapPhoto("maker.heic", type: .heic)
-        let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
-        let result = dir.appending(path: "maker-whole.heic")
-        let dest = CGImageDestinationCreateWithURL(result as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-        let options = [kCGImageDestinationMetadata: ImageIOMetadata.filtered(CGImageSourceCopyMetadataAtIndex(source, 0, nil), .removePrivate),
-                       kCGImageDestinationMergeMetadata: false] as CFDictionary
-        #expect(CGImageDestinationCopyImageSource(dest, source, options, nil))
-        #expect(Set((props(try Data(contentsOf: result))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "43", "48"])
-        #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removePrivate) }
-
-        let whole = try Data(contentsOf: result)
-        let filtered = try HEIFMetadataFilter.filter(whole, level: .removePrivate, from: try Data(contentsOf: url))
-        #expect(try changedOnlyInMetadataItems(whole, filtered))
-        #expect(Set((props(filtered)[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["33", "48"])
-        try filtered.write(to: result)
-        try MetadataCheck.verify(original: url, result: result, level: .removePrivate)
-        #expect(headroom(result) == headroom(url))
-    }
-
-    /// Damaged HEIC: filtering never crashes and never changes anything but
-    /// the EXIF and XMP items.
-    @Test func damagedHEICNeverCrashesTheMetadataFilter() throws {
-        let original = [UInt8](try Data(contentsOf: gainMapPhoto("damaged.heic", type: .heic)))
-        var state: UInt64 = 0x5EED
-        func random(_ n: Int) -> Int {
-            state = state &* 6364136223846793005 &+ 1442695040888963407
-            return Int(state >> 33) % n
-        }
-        for round in 0..<3000 {
-            var m = original
-            let at = random(min(m.count, 4096))
-            switch round % 4 {
-            case 0: m[at] ^= UInt8(1 << random(8))
-            case 1: m[at] = [0x00, 0xFF, 0x7F, 0x80][random(4)]
-            case 2: m.removeSubrange(at..<min(m.count, at + 1 + random(64)))
-            default: m.replaceSubrange(at..<min(m.count, at + 4), with: [0xFF, 0xFF, 0xFF, 0xF0])
-            }
-            // Items whose data lies outside the damaged file can't be compared.
-            if let filtered = try? HEIFMetadataFilter.filter(Data(m), level: .removePrivate), (try? itemData(Data(m))) != nil {
-                #expect(try changedOnlyInMetadataItems(Data(m), filtered))
-            }
-        }
     }
 
     @Test func appleMakerNoteKeepsOnlyTheHeadroom() throws {

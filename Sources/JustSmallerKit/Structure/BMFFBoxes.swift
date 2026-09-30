@@ -143,6 +143,12 @@ enum HEIFItems {
         let locations: Locations
         /// Where the iloc payload starts in the file.
         let ilocStart: Int
+        /// The boxes whose size changes with data inside them, as where
+        /// their header starts and where their payload lies in the file:
+        /// the top-level boxes, and the idat box inside meta.
+        let containers: [(header: Int, payload: Range<Int>)]
+        /// Where the idat payload lies in the file (item data of construction method 1).
+        let idat: Range<Int>?
 
         init(_ b: ByteView) throws {
             top = try BMFFBoxes.boxes(b, topLevel: true)
@@ -164,6 +170,13 @@ enum HEIFItems {
             let iloc = try one("iloc")
             locations = try HEIFItems.locations(iloc.payload)
             ilocStart = metaStart + iloc.offset
+            let idats = meta.filter { $0.type == "idat" }
+            guard idats.count <= 1 else { throw FormatError("idat") }
+            idat = idats.first.map { metaStart + $0.offset..<metaStart + $0.offset + $0.payload.count }
+            func header(_ box: BMFFBoxes.Box, at payload: Int) -> (header: Int, payload: Range<Int>) {
+                (payload - (box.size - box.payload.count), payload..<payload + box.payload.count)
+            }
+            containers = top.map { header($0, at: $0.offset) } + idats.map { header($0, at: metaStart + $0.offset) }
         }
 
         /// The items of `type`.
@@ -181,31 +194,61 @@ enum HEIFItems {
             }.map(\.id)
         }
 
-        /// Where the data of an item lies: one piece inside an mdat box.
+        /// Where in the file an extent's data starts for construction method
+        /// 0 (the file) and 1 (idat); nil for data in another item.
+        func origin(_ method: Int) throws -> Int? {
+            switch method {
+            case 0: return 0
+            case 1: guard let idat else { throw FormatError("idat") }; return idat.lowerBound
+            default: return nil
+            }
+        }
+
+        /// Where an extent's data lies in the file; a length of 0 means up
+        /// to the end of the file or of idat.
+        func range(of extent: Extent, method: Int) throws -> Range<Int>? {
+            guard let origin = try origin(method) else { return nil }
+            let end = method == 0 ? top.last.map { $0.offset + $0.payload.count } ?? 0 : idat?.upperBound ?? 0
+            let start = origin + extent.start
+            guard start <= end, extent.length <= end - start else { throw FormatError("item location") }
+            return start..<(extent.length == 0 ? end : start + extent.length)
+        }
+
+        /// Where the data of an item lies: one piece, inside an mdat box or idat.
         func range(of id: Int) throws -> Range<Int> {
-            guard let location = locations.items.first(where: { $0.id == id }), location.method == 0, location.extents.count == 1,
-                  case let extent = location.extents[0], extent.length > 0,
-                  top.contains(where: { $0.type == "mdat" && extent.start >= $0.offset && extent.length <= $0.offset + $0.payload.count - extent.start })
+            guard let location = locations.items.first(where: { $0.id == id }), location.extents.count == 1, location.extents[0].length > 0,
+                  let range = try range(of: location.extents[0], method: location.method)
             else { throw FormatError("item location") }
-            return extent.start..<extent.start + extent.length
+            // Method 1 lies in idat by construction; method 0 must lie in an mdat box.
+            guard location.method == 1 || top.contains(where: {
+                $0.type == "mdat" && range.lowerBound >= $0.offset && range.upperBound <= $0.offset + $0.payload.count
+            }) else { throw FormatError("item location") }
+            return range
         }
     }
 
     /// The file with the data of some items replaced by `new`, each stored
-    /// in one piece inside an mdat box. Everything else keeps its bytes;
-    /// what follows a replaced item moves, and the item locations (iloc)
-    /// and the sizes of the mdat boxes follow. Fields keep their widths.
-    static func replacingData(_ new: [Int: [UInt8]], in data: Data) throws -> Data {
+    /// in one piece inside an mdat box or idat. Everything else keeps its
+    /// bytes; what follows a replaced item moves, and the item locations
+    /// (iloc) and the sizes of the boxes around it (mdat; idat and meta)
+    /// follow. Fields keep their widths.
+    /// `file` is `data` read already, if at hand.
+    static func replacingData(_ new: [Int: [UInt8]], in data: Data, file: File? = nil) throws -> Data {
         // Positions below count from the start of the file.
         let data = data.startIndex == 0 ? data : Data(data)
-        let file = try File(ByteView(data))
+        let file = try file ?? File(ByteView(data))
         let changes = try new.map { (range: try file.range(of: $0.key), bytes: $0.value) }.sorted { $0.range.lowerBound < $1.range.lowerBound }
-        // Every other item's data lies outside what changes, and ends where it says.
+        guard !changes.isEmpty else { return data }
+        // Every other item's data lies outside what changes; no item takes
+        // its data from a changed one.
         for (a, b) in zip(changes, changes.dropFirst()) where a.range.upperBound > b.range.lowerBound { throw FormatError("item location") }
-        for item in file.locations.items where item.method == 0 && new[item.id] == nil {
+        for item in file.locations.items where new[item.id] == nil {
             for extent in item.extents {
-                guard extent.length > 0 else { throw FormatError("item location") }
-                let range = extent.start..<extent.start + extent.length
+                guard let range = try file.range(of: extent, method: item.method) else {
+                    let sources = file.references.filter { $0.type == "iloc" && $0.from == item.id }.flatMap(\.to)
+                    if sources.contains(where: { new[$0] != nil }) { throw FormatError("item location") }
+                    continue
+                }
                 if changes.contains(where: { $0.range.overlaps(range) }) { throw FormatError("item location") }
             }
         }
@@ -215,7 +258,7 @@ enum HEIFItems {
         }
 
         var out = Data(capacity: data.count)
-        var at = data.startIndex
+        var at = 0
         for change in changes {
             out += data[at..<change.range.lowerBound]
             out += change.bytes
@@ -227,23 +270,24 @@ enum HEIFItems {
             guard value >= 0, size == 8 || value >> (8 * size) == 0 else { throw FormatError("field too small") }
             out.replaceSubrange(position..<position + size, with: (0..<size).map { UInt8(truncatingIfNeeded: value >> (8 * (size - 1 - $0))) })
         }
-        for box in file.top where box.type == "mdat" {
-            let delta = changes.filter { $0.range.lowerBound >= box.offset && $0.range.upperBound <= box.offset + box.payload.count }
-                .reduce(0) { $0 + $1.bytes.count - $1.range.count }
+        // Boxes around a change grow or shrink with it (meta around idat too).
+        for box in file.containers {
+            let delta = changes.filter { box.payload.contains($0.range.lowerBound) }.reduce(0) { $0 + $1.bytes.count - $1.range.count }
             guard delta != 0 else { continue }
-            let start = box.offset - (box.size - box.payload.count)
-            switch try ByteView(data).be(start, 4) {
+            let size = box.payload.upperBound - box.header
+            switch try ByteView(data).be(box.header, 4) {
             case 0: break // to the end of the file
-            case 1: try write(box.size + delta, size: 8, at: moved(start) + 8)
-            default: try write(box.size + delta, size: 4, at: moved(start))
+            case 1: try write(size + delta, size: 8, at: moved(box.header) + 8)
+            default: try write(size + delta, size: 4, at: moved(box.header))
             }
         }
         let l = file.locations
-        for item in l.items where item.method == 0 {
-            let base = l.baseSize > 0 ? moved(item.base) : 0
+        for item in l.items {
+            guard let origin = try file.origin(item.method) else { continue }
+            let base = l.baseSize > 0 ? moved(origin + item.base) - moved(origin) : 0
             if l.baseSize > 0 { try write(base, size: l.baseSize, at: moved(file.ilocStart + item.baseField)) }
             for extent in item.extents {
-                let offset = moved(extent.start) - base
+                let offset = moved(origin + extent.start) - moved(origin) - base
                 if l.offsetSize > 0 {
                     try write(offset, size: l.offsetSize, at: moved(file.ilocStart + extent.offsetField))
                 } else if offset != 0 {
