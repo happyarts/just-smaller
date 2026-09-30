@@ -6,7 +6,9 @@
 # For each file: it must still exist, nothing new may appear next to it, it must
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
-# the same, and files named broken-* must be left byte-for-byte alone. Result
+# the same, and files named broken-* or unchanged-* must be left byte-for-byte
+# alone. --private runs your own photos in Testkorpus/private (a folder or a
+# link to one; never in a repository) the same way. Result
 # sizes are compared with the last baseline so that a compression regression
 # shows up even when everything is still lossless.
 #
@@ -20,7 +22,7 @@ CORPUS=${JUST_SMALLER_CORPUS:-$(dirname "$ROOT")/Testkorpus}
 TIER=quick; UPDATE=no
 while [ $# -gt 0 ]; do
 	case "$1" in
-		--quick) TIER=quick ;; --full) TIER=full ;;
+		--quick) TIER=quick ;; --full) TIER=full ;; --private) TIER=private ;;
 		--update-baseline) UPDATE=yes ;;
 		--) shift; break ;;
 		*) echo >&2 "unknown option $1"; exit 2 ;;
@@ -41,8 +43,8 @@ fi
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/just-smaller-corpus.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT INT TERM
 mkdir -p "$WORK/orig" "$WORK/run"
-if [ "$TIER" = full ]; then
-	find "$CORPUS/full" -type f ! -name '.*' -exec cp -p {} "$WORK/orig/" \;
+if [ "$TIER" != quick ]; then
+	find "$CORPUS/$TIER/" -type f ! -name '.*' -exec cp -p {} "$WORK/orig/" \;
 else
 	cp -pR "$CORPUS/quick/." "$WORK/orig/"
 fi
@@ -54,9 +56,9 @@ STATUS=0
 "$CLI" --tools "$TOOLS" --no-trash --json "$@" "$WORK/run" > "$WORK/results.jsonl" || STATUS=$?
 ELAPSED=$(( $(date +%s) - START ))
 
-python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" <<'PY'
+python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" <<'PY'
 import json, os, re, subprocess, sys, collections
-work, imgcmp, jpegcmp, base_path, update, elapsed, status = sys.argv[1:]
+work, imgcmp, jpegcmp, base_path, update, elapsed, status, root = sys.argv[1:]
 orig, run = os.path.join(work, "orig"), os.path.join(work, "run")
 raster = {".png", ".gif", ".webp", ".heic"}
 baseline = {}
@@ -69,7 +71,10 @@ fails, regress, per = [], [], collections.defaultdict(lambda: [0, 0, 0, 0])
 if status not in ("0", "1", "2"):
     fails.append(("—", f"THE TOOL CRASHED OR WAS KILLED (exit status {status})"))
 reported = [json.loads(l)["file"] for l in open(os.path.join(work, "results.jsonl")) if l.strip()]
-expected = len(os.listdir(os.path.join(work, "orig")))
+# Every file the folder scan picks up (by extension, as FolderScanner.swift lists them).
+scanned = set(re.findall(r'"(\w+)"', re.search(r"extensions: Set<String> = \[(.*?)\]",
+              open(os.path.join(root, "Sources/JustSmallerKit/FolderScanner.swift")).read()).group(1)))
+expected = sum(os.path.splitext(n)[1][1:].lower() in scanned for n in os.listdir(os.path.join(work, "orig")))
 if len(reported) != expected or len(set(reported)) != len(reported):
     fails.append(("—", f"REPORTED {len(reported)} RESULTS ({len(set(reported))} FILES) FOR {expected} FILES"))
 records = {}
@@ -120,7 +125,7 @@ for n in names:
     sa, sb = os.path.getsize(a), os.path.getsize(b); result[n] = sb
     cat[0] += 1; cat[1] += sa; cat[2] += sb
     same = open(a, "rb").read() == open(b, "rb").read()
-    if n.startswith("broken") and not same: fails.append((n, "TOUCHED A BROKEN FILE"))
+    if (n.startswith("broken") or "unchanged-" in n) and not same: fails.append((n, "TOUCHED A FILE THAT MUST STAY AS IT IS"))
     # A file may grow only when private metadata had to go (the promise
     # beats the size); then its only tool is the metadata filter.
     tools = records.get(n, {}).get("tools", [])

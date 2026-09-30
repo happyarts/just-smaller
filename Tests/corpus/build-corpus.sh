@@ -68,16 +68,28 @@ else
 	echo "note: no download-cache; run Tests/corpus/fetch-real-images.py for real photos"
 fi
 
-# --- JPEGs that hold several images: the iPhone photos with an HDR gain map
-# downloaded above, written again by Core Image with an ISO 21496-1 gain map.
+# --- JPEGs that hold several images, written by Apple's frameworks: the
+# iPhone photos with an HDR gain map downloaded above again with an ISO
+# 21496-1 gain map (Core Image), and photos as portraits with depth and
+# mattes (ImageIO). And a motion photo: a video after the images, which must
+# stay as it is.
 if [ -d "$CORPUS/full/real-multi-jpeg" ]; then
-	mkdir -p "$CORPUS/full/multi-jpeg"
-	GAINMAP=$(mktemp -d)/gain-map
-	xcrun swiftc -O -o "$GAINMAP" "$HERE/gain-map.swift"
-	for f in "$CORPUS/full/real-multi-jpeg"/*.jpg; do
-		"$GAINMAP" "$f" "$CORPUS/full/multi-jpeg/iso-$(basename "$f")" || true
+	mkdir -p "$CORPUS/full/multi-jpeg" "$CORPUS/full/unchanged"
+	MULTI=$(mktemp -d)/multi-image
+	xcrun swiftc -O -o "$MULTI" "$HERE/multi-image.swift"
+	for f in "$CORPUS/full/real-multi-jpeg"/apple_gainmap_*.jpg; do
+		"$MULTI" iso "$f" "$CORPUS/full/multi-jpeg/iso-$(basename "$f")" || true
 	done
-	rm -rf "$(dirname "$GAINMAP")"
+	find "$CORPUS/full/real-photo-jpeg" -iname "*.jpg" -size -3000k | LC_ALL=C sort | head -2 | while IFS= read -r f; do
+		"$MULTI" portrait "$f" "$CORPUS/full/multi-jpeg/portrait-$(basename "$f")" || true
+	done
+	rm -rf "$(dirname "$MULTI")"
+	for f in "$CORPUS/full/real-multi-jpeg"/pixel-ultrahdr-*.jpg; do
+		# ISO BMFF: an ftyp box and a media box, as a phone's video starts.
+		{ cat "$f"; printf '\000\000\000\030ftypmp42\000\000\000\000mp42isom\000\000\020\000mdat'; head -c 4088 /dev/urandom; } \
+			> "$CORPUS/full/unchanged/unchanged-motion-photo-$(basename "$f")"
+		break
+	done
 fi
 
 # --- rare codings: arithmetic, restart markers, 12 bit, lossless JPEG; SVG in UTF-16
@@ -111,9 +123,17 @@ if [ -d "$CORPUS/full/real-svg" ]; then
 	done
 fi
 
-# --- quick tier: the edge cases plus a few real files of each format --------
+# --- fewer of a kind: files of the same kind (same encoder settings, same
+# chunks, similar size) test the same thing; a few of each are enough.
+"$PY" "$HERE/dedup.py" "$CORPUS/full"
+
+# --- quick tier: the edge cases, everything that must stay unchanged, plus
+# a few real files of each format
 cp -p "$CORPUS/full/edge/"* "$CORPUS/quick/"
-for d in $(ls "$CORPUS/full" | grep -v "^edge$"); do
+for d in unchanged real-unchanged; do
+	[ -d "$CORPUS/full/$d" ] && cp -p "$CORPUS/full/$d/"* "$CORPUS/quick/"
+done
+for d in $(ls "$CORPUS/full" | grep -v -E "^(edge|unchanged|real-unchanged)$"); do
 	[ -d "$CORPUS/full/$d" ] || continue
 	ls "$CORPUS/full/$d" | LC_ALL=C sort | head -2 | while IFS= read -r f; do cp -p "$CORPUS/full/$d/$f" "$CORPUS/quick/$d-$f"; done
 done

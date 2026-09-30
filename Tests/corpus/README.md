@@ -6,10 +6,11 @@ repository (image rights); they live in a `Testkorpus` folder next to the reposi
 (override with `JUST_SMALLER_CORPUS`).
 
 ```sh
-Tests/corpus/fetch-real-images.py   # once: free photos/graphics (Kodak set, Wikimedia Commons) into download-cache/
+Tests/corpus/fetch-real-images.py   # once: freely licensed files into download-cache/ (sources in the script)
 Tests/corpus/build-corpus.sh        # assemble quick/ and full/ (offline, from the cache and this Mac)
-Tests/corpus/run.sh --quick         # ~60 files, seconds — after every change
-Tests/corpus/run.sh --full          # ~400+ files — before a release or a tool update
+Tests/corpus/run.sh --quick         # ~80 files, seconds — after every change
+Tests/corpus/run.sh --full          # ~500 files, two minutes — before a release or a tool update
+Tests/corpus/run.sh --private       # your own photos in Testkorpus/private, if you have that folder
 Tests/corpus/run.sh --quick -- --effort maximum   # pass options to just-smaller
 ```
 
@@ -39,3 +40,15 @@ and never touches any settings.
 - `full/png`, `jpeg`, … : resources from macOS and installed apps
 - `full/photo/`: photos derived from the system desktop pictures
 - `full/real-*`: downloaded freely licensed images
+- `full/real-multi-jpeg/`, `full/multi-jpeg/`: JPEGs that hold several images
+  — iPhone and Pixel HDR photos with gain maps, ISO 21496-1 gain maps, MPO
+  stereo pairs; ISO gain maps and portraits with depth and mattes written by
+  Apple's frameworks (`multi-image.swift`)
+- `full/real-unchanged/`, `full/unchanged/`: files that must stay byte for
+  byte as they are (`unchanged-*`, like `broken-*`): multi-picture indexes
+  that don't fit the file, a gain map found only through XMP, a motion photo
+  (video after the images). All of them go into the quick tier too.
+
+`build-corpus.sh` keeps the corpus lean (`dedup.py`): exact duplicates go,
+and of JPEGs and PNGs of the same kind (encoder settings, segments or chunks,
+size within a factor of two) three per folder stay.

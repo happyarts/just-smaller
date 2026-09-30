@@ -6,7 +6,7 @@ says which. Deterministic: same output on every run.
 
 usage: generate-edge-cases.py OUTDIR
 """
-import os, random, sys
+import os, random, struct, sys, zlib
 from PIL import Image, ImageDraw, PngImagePlugin
 
 out = sys.argv[1]
@@ -49,7 +49,20 @@ base.convert("I;16").save(P("png-gray16.png"))                         # 16-bit 
 base.convert("P", palette=Image.ADAPTIVE, colors=64).save(P("png-palette64.png"))
 pal = base.convert("RGBA"); pal.putalpha(Image.linear_gradient("L").resize(pal.size))
 pal.convert("P", palette=Image.ADAPTIVE, colors=128).save(P("png-palette-trns.png"), transparency=0)
-base.save(P("png-interlaced.png"), interlace=True)
+def save_interlaced(image, path):
+    """Adam7-interlaced RGB PNG; Pillow ignores interlace=True when writing."""
+    w, h = image.size
+    px = image.convert("RGB").tobytes()
+    raw = b""
+    for x0, y0, dx, dy in ((0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)):
+        for y in range(y0, h, dy):
+            if x0 < w:  # every row starts with filter type 0
+                raw += b"\0" + b"".join(px[3 * (y * w + x):3 * (y * w + x) + 3] for x in range(x0, w, dx))
+    chunk = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d))
+    with open(path, "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 1))
+                + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+save_interlaced(base, P("png-interlaced.png"))
 base.save(P("png-icc-displayp3.png"), icc_profile=icc("Display P3.icc"))  # profile changes colours: must survive
 info = PngImagePlugin.PngInfo(); info.add_text("Comment", "keep or strip, but decide on purpose")
 base.save(P("png-text-chunk.png"), pnginfo=info)

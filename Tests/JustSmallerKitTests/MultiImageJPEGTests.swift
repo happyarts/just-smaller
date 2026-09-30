@@ -270,6 +270,11 @@ final class MultiImageJPEGTests {
         #expect(try Data(contentsOf: url) == before)
     }
 
+    /// Stereo cameras name their files .mpo; they are JPEGs and are found in folders.
+    @Test func mpoFilesAreFoundInFolders() {
+        #expect(FolderScanner.isCandidate(dir.appending(path: "DSCF0001.MPO")))
+    }
+
     // MARK: - Checking
 
     /// Another second image (different coefficients) is caught, even though

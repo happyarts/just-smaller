@@ -8,8 +8,13 @@ Sources:
   - Wikimedia Commons (free licences): featured photos, and PNG / SVG / GIF /
     WebP files found through varied search terms, so they come from many
     different cameras, editors and encoders.
-  - libultrahdr's test data (CC BY 4.0): iPhone photos with an HDR gain map,
-    JPEGs that hold two images.
+  - JPEGs that hold several images: iPhone photos with an HDR gain map
+    (libultrahdr's test data, CC BY 4.0), Pixel 6 Pro Ultra HDR photos
+    (MishaalRahmanGH/Ultra_HDR_Samples, CC BY 4.0), Skia's gain map test
+    files (BSD), stereo MPOs from a Fujifilm camera and others (Pillow's
+    test data, MIT-CMU).
+  - Files that must stay as they are ("unchanged-"): multi-picture indexes
+    that don't fit the file, a gain map listed only in XMP (Skia, Pillow).
 
 Everything is cached in CACHE; re-running only fetches what's missing.
 The images are for local testing only and never go into the repository.
@@ -95,8 +100,20 @@ def featured_photos(limit, thumb_width, originals_max_bytes):
 
 jobs = []
 jobs += [("kodak", f"kodim{i:02d}.png", f"https://r0k.us/graphics/kodak/kodak/kodim{i:02d}.png") for i in range(1, 25)]
-jobs += [("multi-jpeg", f"{n}.jpg", f"https://raw.githubusercontent.com/google/libultrahdr/main/tests/data/{n}.jpg")
+GH = "https://raw.githubusercontent.com"
+jobs += [("multi-jpeg", f"{n}.jpg", f"{GH}/google/libultrahdr/main/tests/data/{n}.jpg")
          for n in ("apple_gainmap_new", "apple_gainmap_old")]
+jobs += [("multi-jpeg", f"pixel-ultrahdr-{n}.jpg", f"{GH}/MishaalRahmanGH/Ultra_HDR_Samples/main/Originals/Ultra_HDR_Samples_Originals_{n}.jpg")
+         for n in ("01", "05")]
+jobs += [("multi-jpeg", f"skia-{n}.jpg", f"{GH}/google/skia/main/resources/images/{n}.jpg")
+         for n in ("gainmap_iso21496_1", "gainmap_iso21496_1_adobe_gcontainer")]
+jobs += [("multi-jpeg", f"pillow-{n}", f"{GH}/python-pillow/Pillow/main/Tests/images/{n}")
+         for n in ("fujifilm.mpo", "frozenpond.mpo", "sugarshack.mpo")]
+jobs += [("unchanged", f"unchanged-skia-{n}.jpg", f"{GH}/google/skia/main/resources/images/{n}.jpg")
+         for n in ("gainmap_gcontainer_only",)]
+jobs += [("unchanged", f"unchanged-pillow-{n}", f"{GH}/python-pillow/Pillow/main/Tests/images/{n}")
+         for n in ("ultrahdr.jpg", "sugarshack_bad_mpo_header.jpg", "sugarshack_ifd_offset.mpo", "sugarshack_no_data.mpo",
+                   "frame_size.mpo")]
 thumbs, originals = featured_photos(30, 1920, 8_000_000)
 jobs += [("photo-jpeg", n, u) for n, u in thumbs + originals]
 for q in ("screenshot", "diagram", "chart", "logo", "map", "photograph", "icon", "drawing"):

@@ -2,7 +2,7 @@ import Foundation
 
 /// Expands dropped folders into the image files they contain.
 public enum FolderScanner {
-    private static let extensions: Set<String> = ["png", "jpg", "jpeg", "jpe", "gif", "webp", "svg", "heic", "heif"]
+    private static let extensions: Set<String> = ["png", "jpg", "jpeg", "jpe", "mpo", "gif", "webp", "svg", "heic", "heif"]
 
     /// Whether a file found in a folder looks like an image Just Smaller handles:
     /// an image extension, not hidden, not inside a package.
