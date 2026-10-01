@@ -7,14 +7,19 @@ import Testing
 /// XMP readers), the multi-picture index, the quality estimate and the
 /// structure check. None may stop the process, whatever the bytes.
 ///
-/// Runs on a folder of real images, off by default:
-///     JUST_SMALLER_FUZZ=../Testkorpus/full [JUST_SMALLER_FUZZ_ROUNDS=200] Tools/test.sh --filter CorpusFuzz
+/// Runs on a folder of real images, off by default. Seconds: two files per
+/// format (by size, the middle one and one from the upper quarter: real
+/// photos with metadata, not edge cases), 40 rounds each. Before a release, every file with 200 rounds:
+///     JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz
+///     JUST_SMALLER_FUZZ=../Testkorpus JUST_SMALLER_FUZZ_ALL=1 Tools/test.sh --filter CorpusFuzz
+/// JUST_SMALLER_FUZZ_ROUNDS sets the rounds.
 /// Before each input is tried it is saved as `fuzz-last-input` in the
 /// temporary folder, so a crash can be reproduced.
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["JUST_SMALLER_FUZZ"] != nil))
 struct CorpusFuzzTests {
     private let environment = ProcessInfo.processInfo.environment
-    private var rounds: Int { Int(environment["JUST_SMALLER_FUZZ_ROUNDS"] ?? "") ?? 200 }
+    private var everything: Bool { environment["JUST_SMALLER_FUZZ_ALL"] != nil }
+    private var rounds: Int { Int(environment["JUST_SMALLER_FUZZ_ROUNDS"] ?? "") ?? (everything ? 200 : 40) }
     private let last = FileManager.default.temporaryDirectory.appending(path: "fuzz-last-input")
 
     private struct Random {
@@ -28,7 +33,13 @@ struct CorpusFuzzTests {
     private func files() throws -> [(URL, ImageFormat)] {
         let root = URL(fileURLWithPath: try #require(environment["JUST_SMALLER_FUZZ"]))
         let all = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? []
-        return all.sorted { $0.path < $1.path }.compactMap { url in ImageFormat.detect(at: url).map { (url, $0) } }
+        let found = all.sorted { $0.path < $1.path }.compactMap { url in ImageFormat.detect(at: url).map { (url, $0) } }
+        guard !everything else { return found }
+        func size(_ url: URL) -> Int { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
+        return Dictionary(grouping: found, by: \.1).values.flatMap { files -> [(URL, ImageFormat)] in
+            let bySize = files.sorted { size($0.0) < size($1.0) }
+            return Set([bySize.count / 2, bySize.count * 3 / 4]).sorted().map { bySize[$0] }
+        }.sorted { $0.0.path < $1.0.path }
     }
 
     /// A few bytes changed, inserted, removed or repeated — or, for `header`,

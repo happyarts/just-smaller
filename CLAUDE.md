@@ -22,6 +22,7 @@
   JPEGMarkers, PNGChunks/RIFFChunks, TIFFReader, IPTCRecords, BMFFBoxes,
   Zlib with a size limit) — filters, detection and the structure check alike.
   Writers live next to their readers and follow the specification.
-- Fuzzing on real files (off by default):
-  `JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz`.
+- Fuzzing on real files (off by default; a sample of two real files per
+  format, seconds): `JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz`.
+  Before a release every file: add `JUST_SMALLER_FUZZ_ALL=1`.
   Cases that once broke a reader go into `HostileInputTests`.
