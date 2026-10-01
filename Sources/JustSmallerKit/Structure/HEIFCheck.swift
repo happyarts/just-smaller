@@ -59,6 +59,12 @@ enum HEIFCheck {
                 try associations(ipma.payload, ids: ids, properties: properties)
             }
         }
+        // Entity groups (e.g. an image with and without its gain map): ids
+        // of their own, shared with no item and no other group.
+        if let grpl = meta.first(where: { $0.type == "grpl" }) {
+            let groups = try boxes(grpl.payload).map { try $0.payload.be(4, 4) }
+            guard Set(groups).count == groups.count, Set(groups).isDisjoint(with: ids) else { throw Invalid("entity group") }
+        }
         // References: from and to existing items.
         if let iref = meta.first(where: { $0.type == "iref" }) {
             guard try HEIFItems.references(iref).allSatisfy({ ids.contains($0.from) && $0.to.allSatisfy(ids.contains) }) else {

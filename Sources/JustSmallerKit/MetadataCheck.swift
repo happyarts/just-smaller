@@ -105,7 +105,7 @@ enum MetadataCheck {
     }
 
     /// ImageIO's own bookkeeping (e.g. whether the file had IIM data).
-    static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
+    private static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"
 
     struct Key: Hashable {
         var ns: String

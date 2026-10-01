@@ -8,26 +8,27 @@ import Foundation
 enum HEIFMetadataFilter {
     /// `data` with every EXIF item and every XMP item (but those describing
     /// auxiliary images) as the level keeps them. With an `original`, after
-    /// a re-encode, the EXIF and XMP of the original go into the result's
-    /// items instead, so the values come byte for byte from the original;
-    /// that needs one of each at most, and an item in the result for what
-    /// the original's metadata keeps.
+    /// a re-encode, the EXIF and XMP of the original go into the result
+    /// instead — into its items, or into new ones where it has none — so
+    /// the values come byte for byte from the original; that needs one of
+    /// each at most.
     static func filter(_ data: Data, level: MetadataHandling, from original: Data? = nil) throws -> Data {
         let file = try HEIFItems.File(ByteView(data))
-        var new: [Int: [UInt8]] = [:]
+        var new: [Int: [UInt8]] = [:], added: [HEIFItems.NewItem] = []
         if let original {
             let source = try HEIFItems.File(ByteView(original))
             let exif = try one(source.items("Exif")).flatMap { try filteredTIFF(split(original, source.range(of: $0)).tiff, level) }
             let xmp = try one(source.metadataXMP).flatMap { try filteredXMP(original, source.range(of: $0), level) }
             if let id = try one(file.items("Exif")) {
                 new[id] = try split(data, file.range(of: id)).header + (exif ?? emptyTIFF)
-            } else if exif != nil {
-                throw FormatError("no EXIF item")
+            } else if let exif {
+                // The TIFF header follows right after its offset.
+                added.append(HEIFItems.NewItem(type: "Exif", contentType: nil, data: [0, 0, 0, 0] + exif))
             }
             if let id = try one(file.metadataXMP) {
                 new[id] = xmp ?? emptyXMP
-            } else if xmp != nil {
-                throw FormatError("no XMP item")
+            } else if let xmp {
+                added.append(HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: xmp))
             }
         } else {
             for id in file.items("Exif") {
@@ -38,7 +39,8 @@ enum HEIFMetadataFilter {
                 new[id] = try filteredXMP(data, file.range(of: id), level) ?? emptyXMP
             }
         }
-        return try HEIFItems.replacingData(new, in: data, file: file)
+        let replaced = try HEIFItems.replacingData(new, in: data, file: file)
+        return try HEIFItems.addingItems(added, in: replaced)
     }
 
     /// A TIFF block with an empty first IFD, and an XMP packet without properties.

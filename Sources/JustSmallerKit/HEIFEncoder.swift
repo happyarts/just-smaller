@@ -15,15 +15,13 @@ enum HEIFEncoder {
         if level == .keep {
             CGImageDestinationAddImageFromSource(destination, source, 0, properties as CFDictionary)
         } else {
-            // The image goes in with only the metadata the level keeps:
-            // removing single dictionaries left EXIF details and XMP behind.
-            // The orientation is carried over; the colour profile is part of
-            // the image itself.
+            // The image goes in without metadata; what the level keeps of the
+            // original's EXIF and XMP is put in afterwards. The orientation
+            // is carried over; the colour profile is part of the image itself.
             guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
             let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
             if let orientation = original?[kCGImagePropertyOrientation] { properties[kCGImagePropertyOrientation] = orientation }
-            CGImageDestinationAddImageAndMetadata(destination, image, startingMetadata(CGImageSourceCopyMetadataAtIndex(source, 0, nil), level),
-                                                  properties as CFDictionary)
+            CGImageDestinationAddImageAndMetadata(destination, image, CGImageMetadataCreateMutable(), properties as CFDictionary)
         }
         // HDR gain maps, depth and portrait mattes: dropping them would lose
         // HDR or portrait editing.
@@ -33,9 +31,8 @@ enum HEIFEncoder {
             }
         }
         guard CGImageDestinationFinalize(destination) else { return false }
-        // ImageIO writes EXIF and XMP anew (numbers rounded differently,
-        // fields of its own); what the level keeps comes from the original
-        // instead, byte for byte.
+        // The original's EXIF and XMP as the level keeps them, byte for byte,
+        // in place of whatever ImageIO wrote.
         if level != .keep {
             let result = try Data(contentsOf: output), original = try Data(contentsOf: input, options: .alwaysMapped)
             do {
@@ -45,23 +42,5 @@ enum HEIFEncoder {
             }
         }
         return true
-    }
-
-    /// The metadata as a copy of the original's, with every property removed
-    /// the level doesn't keep. ImageIO's own bookkeeping stays: without it,
-    /// ImageIO brings back fields that were removed. The copy also carries
-    /// what ImageIO doesn't show (maker notes), so ImageIO writes an EXIF
-    /// and an XMP item wherever the original has one; `HEIFMetadataFilter`
-    /// then puts in what stays.
-    static func startingMetadata(_ metadata: CGImageMetadata?, _ level: MetadataHandling) -> CGImageMetadata {
-        guard let metadata, let out = CGImageMetadataCreateMutableCopy(metadata) else { return CGImageMetadataCreateMutable() }
-        CGImageMetadataEnumerateTagsUsingBlock(metadata, nil, nil) { path, tag in
-            guard let ns = CGImageMetadataTagCopyNamespace(tag) as String?, let name = CGImageMetadataTagCopyName(tag) as String?,
-                  ns != MetadataCheck.imageIONamespace, !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: ns, name: name), at: level)
-            else { return true }
-            CGImageMetadataRemoveTagWithPath(out, nil, path)
-            return true
-        }
-        return out
     }
 }

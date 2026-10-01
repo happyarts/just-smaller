@@ -246,6 +246,42 @@ final class HEICTests {
         }
     }
 
+    /// After a re-encode without metadata, the original's EXIF and XMP go
+    /// into new items: ImageIO reads them as the image's, and every other
+    /// item keeps its data.
+    @Test func metadataItemsAreAdded() throws {
+        let url = photo("source.heic")
+        let metadata = CGImageMetadataCreateMutable()
+        #expect(CGImageMetadataSetValueWithPath(metadata, nil, "dc:rights" as CFString, "© Jane Doe" as CFString))
+        let withXMP = dir.appending(path: "source-xmp.heic")
+        let copy = CGImageDestinationCreateWithURL(withXMP as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        CGImageDestinationCopyImageSource(copy, CGImageSourceCreateWithURL(url as CFURL, nil)!,
+                                          [kCGImageDestinationMetadata: metadata, kCGImageDestinationMergeMetadata: true] as CFDictionary, nil)
+        let original = try Data(contentsOf: withXMP)
+        #expect(try HEIFItems.File(ByteView(original)).metadataXMP.count == 1)
+
+        let bare = dir.appending(path: "bare.heic")
+        let dest = CGImageDestinationCreateWithURL(bare as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), nil)
+        #expect(CGImageDestinationFinalize(dest))
+        let target = try Data(contentsOf: bare)
+        let before = try HEIFItems.File(ByteView(target))
+        try #require(before.items("Exif").isEmpty && before.metadataXMP.isEmpty)
+
+        let result = try HEIFMetadataFilter.filter(target, level: .removePrivate, from: original)
+        try HEIFCheck.check(ByteView(result), against: HEIFCheck.Reference(ByteView(target)))
+        let after = try HEIFItems.File(ByteView(result))
+        #expect(after.items("Exif").count == 1 && after.metadataXMP.count == 1)
+        let old = try itemData(target), new = try itemData(result)
+        #expect(old.allSatisfy { new[$0.key] == $0.value })
+
+        let p = props(result)
+        #expect(p[kCGImagePropertyGPSDictionary] == nil)
+        #expect((p[kCGImagePropertyTIFFDictionary] as? [CFString: Any])?[kCGImagePropertyTIFFArtist] as? String == "Jane Doe")
+        #expect(Set((p[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "48"])
+        #expect(MetadataCheck.fields(result).keys.contains { $0.name == "rights" })
+    }
+
     /// Apple's maker note copied whole by ImageIO (with its identifier) is
     /// caught by the metadata check; with the original's EXIF and XMP
     /// filtered in, it passes, and nothing else changed.
@@ -254,7 +290,8 @@ final class HEICTests {
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         let result = dir.appending(path: "maker-whole.heic")
         let dest = CGImageDestinationCreateWithURL(result as CFURL, UTType.heic.identifier as CFString, 1, nil)!
-        let options = [kCGImageDestinationMetadata: HEIFEncoder.startingMetadata(CGImageSourceCopyMetadataAtIndex(source, 0, nil), .removePrivate),
+        // A copy of the original's metadata carries the maker note along whole.
+        let options = [kCGImageDestinationMetadata: CGImageMetadataCreateMutableCopy(CGImageSourceCopyMetadataAtIndex(source, 0, nil)!)!,
                        kCGImageDestinationMergeMetadata: false] as CFDictionary
         #expect(CGImageDestinationCopyImageSource(dest, source, options, nil))
         #expect(Set((props(try Data(contentsOf: result))[kCGImagePropertyMakerAppleDictionary] as? [String: Any] ?? [:]).keys) == ["17", "33", "43", "48"])
@@ -302,8 +339,12 @@ final class HEICTests {
     /// A HEIF written by hand as other programs may: the EXIF (artist and a
     /// location) in idat, an image in mdat, and a last item that runs to
     /// the end of the file (length 0).
-    /// `overlapping`: the last item starts inside the image's data.
-    private func handMadeHEIF(overlapping: Bool = false) -> (data: Data, image: [UInt8], last: [UInt8]) {
+    /// `overlapping`: the last item starts inside the image's data. `group`:
+    /// an entity group (grpl) with this id, holding items 1 and 3. `toTheEnd`
+    /// false: the last item has its length. `wideMdat`: the mdat box with a
+    /// 64-bit size; `metaLast`: the meta box after it.
+    private func handMadeHEIF(overlapping: Bool = false, group: Int? = nil, toTheEnd: Bool = true,
+                              wideMdat: Bool = false, metaLast: Bool = false) -> (data: Data, image: [UInt8], last: [UInt8]) {
         var tiff: [UInt8] = Array("MM".utf8) + [0, 42] + be(8, 4) + be(2, 2)
         tiff += be(0x013B, 2) + be(2, 2) + be(5, 4) + be(38, 4) // Artist → 38
         tiff += be(0x8825, 2) + be(4, 2) + be(1, 4) + be(44, 4) // GPS IFD → 44
@@ -317,7 +358,7 @@ final class HEICTests {
             var p: [UInt8] = [1, 0, 0, 0, 0x44, 0x00] + be(3, 2)
             p += be(1, 2) + be(0, 2) + be(0, 2) + be(1, 2) + be(mdat, 4) + be(image.count, 4)
             p += be(2, 2) + be(1, 2) + be(0, 2) + be(1, 2) + be(0, 4) + be(exif.count, 4)
-            p += be(3, 2) + be(0, 2) + be(0, 2) + be(1, 2) + be(mdat + (overlapping ? 100 : image.count), 4) + be(0, 4)
+            p += be(3, 2) + be(0, 2) + be(0, 2) + be(1, 2) + be(mdat + (overlapping ? 100 : image.count), 4) + be(toTheEnd ? 0 : last.count, 4)
             return box("iloc", p)
         }
         let ftyp = box("ftyp", Array("heic".utf8) + be(0, 4) + Array("mif1heic".utf8))
@@ -328,10 +369,14 @@ final class HEICTests {
                 + iloc(mdat: mdat)
                 + box("iinf", [0, 0, 0, 0] + be(3, 2) + infe(1, "hvc1") + infe(2, "Exif") + infe(3, "hvc1"))
                 + box("iref", [0, 0, 0, 0] + box("cdsc", be(2, 2) + be(1, 2) + be(1, 2)))
+                + (group.map { box("grpl", box("altr", [0, 0, 0, 0] + be($0, 4) + be(2, 4) + be(1, 4) + be(3, 4))) } ?? [])
                 + box("idat", exif))
         }
-        let mdatStart = ftyp.count + meta(mdat: 0).count + 8
-        return (Data(ftyp + meta(mdat: mdatStart) + box("mdat", image + last)), image, last)
+        let mdat = wideMdat ? be(1, 4) + Array("mdat".utf8) + be(16 + image.count + last.count, 8) + image + last : box("mdat", image + last)
+        let header = wideMdat ? 16 : 8
+        if metaLast { return (Data(ftyp + mdat + meta(mdat: ftyp.count + header)), image, last) }
+        let mdatStart = ftyp.count + meta(mdat: 0).count + header
+        return (Data(ftyp + meta(mdat: mdatStart) + mdat), image, last)
     }
 
     /// EXIF in idat is filtered too: idat and meta change size, the image
@@ -361,5 +406,37 @@ final class HEICTests {
         // The EXIF in idat lies apart from both and may change.
         let changed = try HEIFItems.replacingData([2: [1, 2, 3]], in: data)
         try HEIFCheck.check(ByteView(changed), against: HEIFCheck.Reference(ByteView(data)))
+    }
+
+    /// New items take ids no item and no entity group has; a result where
+    /// they collide doesn't pass the structure check.
+    @Test func newItemsAvoidGroupIDs() throws {
+        let (data, _, _) = handMadeHEIF(group: 4, toTheEnd: false)
+        try HEIFCheck.check(ByteView(data), against: HEIFCheck.Reference(ByteView(data)))
+        let added = try HEIFItems.addingItems([HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: Array("<x/>".utf8))], in: data)
+        try HEIFCheck.check(ByteView(added), against: HEIFCheck.Reference(ByteView(data)))
+        let file = try HEIFItems.File(ByteView(added))
+        #expect(file.infos.map(\.id) == [1, 2, 3, 5])
+        #expect([UInt8](added[try file.range(of: 5)]) == Array("<x/>".utf8))
+
+        let (clash, _, _) = handMadeHEIF(group: 3)
+        #expect(throws: FormatError.self) { try HEIFCheck.check(ByteView(clash), against: HEIFCheck.Reference(ByteView(clash))) }
+    }
+
+    /// New items' data goes at the end of a last mdat box, also one with a
+    /// 64-bit size, or into an mdat box of its own when meta comes last.
+    @Test(arguments: [(false, false), (true, false), (false, true), (true, true)])
+    func newItemsInEveryLayout(wideMdat: Bool, metaLast: Bool) throws {
+        let (data, image, last) = handMadeHEIF(toTheEnd: false, wideMdat: wideMdat, metaLast: metaLast)
+        try HEIFCheck.check(ByteView(data), against: HEIFCheck.Reference(ByteView(data)))
+        let xmp = Array("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".utf8)
+        let added = try HEIFItems.addingItems([HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: xmp)], in: data)
+        try HEIFCheck.check(ByteView(added), against: HEIFCheck.Reference(ByteView(data)))
+        let file = try HEIFItems.File(ByteView(added))
+        #expect(file.top.filter { $0.type == "mdat" }.count == (metaLast ? 2 : 1))
+        #expect([UInt8](added[try file.range(of: 1)]) == image)
+        #expect([UInt8](added[try file.range(of: 3)]) == last)
+        #expect([UInt8](added[try file.range(of: 4)]) == xmp)
+        #expect(file.metadataXMP == [4])
     }
 }

@@ -187,6 +187,14 @@ enum HEIFItems {
         /// The items of `type`.
         func items(_ type: String) -> [Int] { infos.filter { $0.type == type }.map(\.id) }
 
+        /// The ids of entity groups (grpl, e.g. an image with and without its
+        /// gain map): they share one space with the item ids.
+        func groupIDs() throws -> [Int] {
+            guard let grpl = meta.first(where: { $0.type == "grpl" }) else { return [] }
+            // Each group: version and flags, then its id.
+            return try BMFFBoxes.boxes(grpl.payload).map { try $0.payload.be(4, 4) }
+        }
+
         /// XMP items but those that describe auxiliary images only (a gain
         /// map's parameters, a matte's version): the primary image's, a
         /// thumbnail's, or no image's in particular.
@@ -340,4 +348,129 @@ enum HEIFItems {
         }
         return out
     }
+
+    /// A metadata item to add: "Exif", or "mime" with its content type.
+    struct NewItem {
+        let type: String
+        let contentType: String?
+        let data: [UInt8]
+    }
+
+    /// The file with items added that describe the primary image (cdsc):
+    /// their entries go into iinf, iloc and iref, their data into a new mdat
+    /// box at the end. Everything else keeps its bytes; what follows the
+    /// meta box moves by as much as it grows, and the item locations follow.
+    static func addingItems(_ new: [NewItem], in data: Data, file: File? = nil) throws -> Data {
+        let data = data.startIndex == 0 ? data : Data(data)
+        let file = try file ?? File(ByteView(data))
+        guard !new.isEmpty else { return data }
+        let b = ByteView(data), l = file.locations
+        guard let meta = file.top.first(where: { $0.type == "meta" }) else { throw FormatError("meta") }
+        // New data goes after everything: nothing may run to the end of the file.
+        guard l.offsetSize > 0, l.lengthSize > 0, !l.items.contains(where: { $0.method == 0 && $0.extents.contains { $0.length == 0 } }),
+              file.top.last.map({ b.has([0, 0, 0, 0], at: $0.offset - ($0.size - $0.payload.count)) }) != true
+        else { throw FormatError("item location") }
+
+        func be(_ value: Int, _ size: Int) throws -> [UInt8] {
+            guard value >= 0, size == 8 || value >> (8 * size) == 0 else { throw FormatError("field too small") }
+            return (0..<size).map { UInt8(truncatingIfNeeded: value >> (8 * (size - 1 - $0))) }
+        }
+        func box(_ type: String, _ payload: [UInt8]) throws -> [UInt8] { try be(8 + payload.count, 4) + Array(type.utf8) + payload }
+        let childrenStart = meta.offset + 4
+        func raw(_ child: BMFFBoxes.Box) throws -> [UInt8] {
+            [UInt8](try b.view(childrenStart + child.offset - (child.size - child.payload.count), child.size).bytes)
+        }
+        func one(_ type: String) throws -> BMFFBoxes.Box {
+            guard let found = file.meta.first(where: { $0.type == type }) else { throw FormatError(type) }
+            return found
+        }
+        // New ids after every item and entity group id.
+        let first = try (file.infos.map(\.id) + file.groupIDs()).max().map { $0 + 1 } ?? 1
+        let ids = new.indices.map { first + $0 }
+
+        // iinf: the count, the old entries, the new ones (version 2, or 3 for wide ids).
+        let iinf = [UInt8](try one("iinf").payload.bytes)
+        let countSize = iinf[0] != 0 ? 4 : 2
+        var infes: [UInt8] = []
+        for (id, item) in zip(ids, new) {
+            let wide = id > 0xFFFF
+            infes += try box("infe", [wide ? 3 : 2, 0, 0, 0] + be(id, wide ? 4 : 2) + be(0, 2) + Array(item.type.utf8) + [0]
+                             + (item.contentType.map { Array($0.utf8) + [0] } ?? []))
+        }
+        let newIinf = try box("iinf", Array(iinf[..<4]) + be(file.infos.count + new.count, countSize) + Array(iinf[(4 + countSize)...]) + infes)
+
+        // iref: a cdsc reference from each new item to the primary image.
+        let oldIref = file.meta.first { $0.type == "iref" }
+        let irefHeader: [UInt8] = try oldIref.map { [UInt8](try $0.payload.view(0, 4).bytes) } ?? [max(ids.last ?? 0, file.primary) > 0xFFFF ? 1 : 0, 0, 0, 0]
+        let idSize = irefHeader[0] != 0 ? 4 : 2
+        var cdsc: [UInt8] = []
+        for id in ids { cdsc += try box("cdsc", be(id, idSize) + be(1, 2) + be(file.primary, idSize)) }
+        let newIref = try box("iref", (oldIref.map { [UInt8]($0.payload.bytes) } ?? irefHeader) + cdsc)
+
+        // iloc: the old entries, patched below, then one entry per new item.
+        var iloc = [UInt8](try one("iloc").payload.bytes)
+        let version = Int(iloc[0]), itemIDSize = version < 2 ? 2 : 4, indexSize = version > 0 ? Int(iloc[5] & 15) : 0
+        iloc.replaceSubrange(6..<6 + itemIDSize, with: try be(l.items.count + new.count, itemIDSize))
+        var newOffsetFields: [Int] = []
+        for (id, item) in zip(ids, new) {
+            iloc += try be(id, itemIDSize) + (version > 0 ? [0, 0] : []) + [0, 0] + be(0, l.baseSize) + be(1, 2) + be(0, indexSize)
+            newOffsetFields.append(iloc.count)
+            iloc += try be(0, l.offsetSize) + be(item.data.count, l.lengthSize)
+        }
+
+        func children(_ iloc: [UInt8]) throws -> [UInt8] {
+            var out: [UInt8] = []
+            for child in file.meta {
+                switch child.type {
+                case "iinf": out += newIinf + (oldIref == nil ? newIref : [])
+                case "iloc": out += try box("iloc", iloc)
+                case "iref": out += newIref
+                default: out += try raw(child)
+                }
+            }
+            return out
+        }
+        let metaHeader = [UInt8](try meta.payload.view(0, 4).bytes)
+        let delta = try box("meta", metaHeader + children(iloc)).count - meta.size
+        let metaEnd = meta.offset + meta.payload.count
+        func moved(_ at: Int) -> Int { at >= metaEnd ? at + delta : at }
+
+        // Item data after the meta box moves with it.
+        for item in l.items where item.method == 0 {
+            let base = l.baseSize > 0 ? moved(item.base) : 0
+            if l.baseSize > 0 { iloc.replaceSubrange(item.baseField..<item.baseField + l.baseSize, with: try be(base, l.baseSize)) }
+            for extent in item.extents {
+                iloc.replaceSubrange(extent.offsetField..<extent.offsetField + l.offsetSize, with: try be(moved(extent.start) - base, l.offsetSize))
+            }
+        }
+        let appends = file.top.last.map { $0.type == "mdat" && [8, 16].contains($0.size - $0.payload.count) } ?? false
+        var at = data.count + delta + (appends ? 0 : 8)
+        for (field, item) in zip(newOffsetFields, new) {
+            iloc.replaceSubrange(field..<field + l.offsetSize, with: try be(at, l.offsetSize))
+            at += item.data.count
+        }
+
+        var out = Data(capacity: data.count + delta + 8 + new.reduce(0) { $0 + $1.data.count })
+        for top in file.top {
+            let start = top.offset - (top.size - top.payload.count)
+            out += top.type == "meta" ? Data(try box("meta", metaHeader + children(iloc))) : try b.view(start, top.size).bytes
+        }
+        // The new data at the end of the last mdat box, when that ends the
+        // file (one mdat, as writers make it); in an mdat of its own otherwise.
+        let added = new.flatMap(\.data)
+        if let last = file.top.last, last.type == "mdat", case let header = last.size - last.payload.count, header == 8 || header == 16 {
+            // A 32-bit size, or 1 and a 64-bit size after the type.
+            let at = out.count - last.size
+            if header == 8 {
+                out.replaceSubrange(at..<at + 4, with: try be(last.size + added.count, 4))
+            } else {
+                out.replaceSubrange(at + 8..<at + 16, with: try be(last.size + added.count, 8))
+            }
+            out += added
+        } else {
+            out += try box("mdat", added)
+        }
+        return out
+    }
 }
+

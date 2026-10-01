@@ -89,6 +89,7 @@ struct CorpusFuzzTests {
             _ = SVGText.utf8(data)
         case .heic:
             _ = try? HEIFMetadataFilter.filter(data, level: .removePrivate)
+            _ = try? HEIFItems.addingItems([HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: [0x3C])], in: data)
         default: break
         }
         _ = try? StructureCheck.verify(ByteView(data), against: reference)
