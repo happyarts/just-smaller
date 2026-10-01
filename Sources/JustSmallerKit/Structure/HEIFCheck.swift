@@ -44,8 +44,7 @@ enum HEIFCheck {
         let infos = try HEIFItems.infos(iinf)
         guard infos.count == (try iinf.payload.be(4, wide ? 4 : 2)) else { throw Invalid("iinf") }
         let ids = Set(infos.map(\.id))
-        let pitm = try one("pitm", in: meta).payload
-        guard ids.contains(try pitm.u8(0) == 0 ? pitm.be(4, 2) : pitm.be(4, 4)) else { throw Invalid("pitm") }
+        guard ids.contains(try HEIFItems.primary(one("pitm", in: meta))) else { throw Invalid("pitm") }
 
         try locations(one("iloc", in: meta).payload, ids: ids,
                       mdat: top.filter { $0.type == "mdat" }.map { $0.offset..<$0.offset + $0.payload.count },
@@ -62,7 +61,7 @@ enum HEIFCheck {
         // Entity groups (e.g. an image with and without its gain map): ids
         // of their own, shared with no item and no other group.
         if let grpl = meta.first(where: { $0.type == "grpl" }) {
-            let groups = try boxes(grpl.payload).map { try $0.payload.be(4, 4) }
+            let groups = try HEIFItems.groupIDs(grpl)
             guard Set(groups).count == groups.count, Set(groups).isDisjoint(with: ids) else { throw Invalid("entity group") }
         }
         // References: from and to existing items.

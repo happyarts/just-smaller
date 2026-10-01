@@ -35,7 +35,7 @@ enum MetadataCheck {
         let bytes = ByteView(b)
         if level != .keep, let images = JPEGStructure.images(bytes), !JPEGStructure.listsLengthsInXMP(ByteView(a)),
            !JPEGStructure.gaps(images, count: b.count).allSatisfy({ (try? bytes.view($0.lowerBound, $0.count))?.isPadding ?? false }) {
-            throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+            throw leftover
         }
         // A HEIF can hold XMP ImageIO doesn't show as the image's (a
         // thumbnail's, or one describing no image): it may hold only what
@@ -45,24 +45,22 @@ enum MetadataCheck {
             // ImageIO reads none from a packet without properties, so the
             // empty one the filter writes is known by its bytes.
             for id in file.metadataXMP {
-                guard let item = try? file.range(of: id), let packet = try? bytes.view(item.lowerBound, item.count) else {
-                    throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
-                }
+                guard let item = try? file.range(of: id), let packet = try? bytes.view(item.lowerBound, item.count) else { throw leftover }
                 if packet.bytes == Data(HEIFMetadataFilter.emptyXMP) { continue }
                 guard let metadata = CGImageMetadataCreateFromXMPData(packet.bytes as CFData),
-                      !fields(metadata).keys.contains(where: { !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level) })
-                else { throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module)) }
+                      !fields(metadata).keys.contains(where: { removes($0, at: level) })
+                else { throw leftover }
             }
         }
     }
 
     private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {
-        if level != .keep { try verifyMakerNotes(result, level: level) }
+        if level != .keep, hasMakerNotesToRemove(result, level: level) { throw leftover }
         let merged = fields(original), after = fields(result)
         var sources: [[Key: Value]]?
         for (key, value) in after {
-            if level != .keep, !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: key.ns, name: key.name), at: level) {
-                throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+            if level != .keep, removes(key, at: level) {
+                throw leftover
             }
             // The IIM digest is updated together with the IIM block.
             if merged[key] == value || key.name == "LegacyIPTCDigest" { continue }
@@ -79,10 +77,13 @@ enum MetadataCheck {
         }
     }
 
-    private static func verifyMakerNotes(_ result: Data, level: MetadataHandling) throws {
-        if hasMakerNotesToRemove(result, level: level) {
-            throw VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
-        }
+    private static var leftover: VerificationError {
+        VerificationError(reason: String(localized: "metadata that should have been removed is still there", bundle: .module))
+    }
+
+    /// Whether the level removes this field.
+    private static func removes(_ key: Key, at level: MetadataHandling) -> Bool {
+        !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: key.ns, name: key.name), at: level)
     }
 
     /// Whether the file holds a maker note, or tags of Apple's, the level removes.
@@ -100,7 +101,7 @@ enum MetadataCheck {
     static func hasFieldsToRemove(_ url: URL, level: MetadataHandling) -> Bool {
         guard level != .keep, let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
         return fields(data).keys.contains {
-            !MetadataPolicy.keeps(MetadataPolicy.group(xmpNamespace: $0.ns, name: $0.name), at: level)
+            removes($0, at: level)
         } || hasMakerNotesToRemove(data, level: level)
     }
 

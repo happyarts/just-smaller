@@ -25,10 +25,8 @@ enum HEIFEncoder {
         }
         // HDR gain maps, depth and portrait mattes: dropping them would lose
         // HDR or portrait editing.
-        for type in AuxiliaryImages.all(source) {
-            if let info = CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type) {
-                CGImageDestinationAddAuxiliaryDataInfo(destination, type, info)
-            }
+        for (type, info) in AuxiliaryImages.infos(source) {
+            CGImageDestinationAddAuxiliaryDataInfo(destination, type, info)
         }
         guard CGImageDestinationFinalize(destination) else { return false }
         // The original's EXIF and XMP as the level keeps them, byte for byte,

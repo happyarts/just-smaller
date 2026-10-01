@@ -19,8 +19,11 @@ enum AuxiliaryImages {
     ] }
 
     /// Auxiliary images that belong to the photo; they must all survive.
-    static func all(_ source: CGImageSource) -> [CFString] {
-        auxiliaryTypes.filter { CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, $0) != nil }
+    static func all(_ source: CGImageSource) -> [CFString] { infos(source).map(\.type) }
+
+    /// Each auxiliary image with what ImageIO reads of it (data, description, metadata).
+    static func infos(_ source: CGImageSource) -> [(type: CFString, info: CFDictionary)] {
+        auxiliaryTypes.compactMap { type in CGImageSourceCopyAuxiliaryDataInfoAtIndex(source, 0, type).map { (type, $0) } }
     }
 
     /// The auxiliary images both hold, when they hold the same ones and they

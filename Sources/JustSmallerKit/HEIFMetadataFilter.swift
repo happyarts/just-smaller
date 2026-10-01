@@ -17,7 +17,7 @@ enum HEIFMetadataFilter {
         var new: [Int: [UInt8]] = [:], added: [HEIFItems.NewItem] = []
         if let original {
             let source = try HEIFItems.File(ByteView(original))
-            let exif = try one(source.items("Exif")).flatMap { try filteredTIFF(split(original, source.range(of: $0)).tiff, level) }
+            let exif = try one(source.items("Exif")).flatMap { try EXIFFilter.filter(split(original, source.range(of: $0)).tiff, level: level) }
             let xmp = try one(source.metadataXMP).flatMap { try filteredXMP(original, source.range(of: $0), level) }
             if let id = try one(file.items("Exif")) {
                 new[id] = try split(data, file.range(of: id)).header + (exif ?? emptyTIFF)
@@ -33,14 +33,13 @@ enum HEIFMetadataFilter {
         } else {
             for id in file.items("Exif") {
                 let item = try split(data, file.range(of: id))
-                new[id] = item.header + (filteredTIFF(item.tiff, level) ?? emptyTIFF)
+                new[id] = item.header + (EXIFFilter.filter(item.tiff, level: level) ?? emptyTIFF)
             }
             for id in file.metadataXMP {
                 new[id] = try filteredXMP(data, file.range(of: id), level) ?? emptyXMP
             }
         }
-        let replaced = try HEIFItems.replacingData(new, in: data, file: file)
-        return try HEIFItems.addingItems(added, in: replaced)
+        return try HEIFItems.rewrite(data, replacing: new, adding: added, file: file)
     }
 
     /// A TIFF block with an empty first IFD, and an XMP packet without properties.
@@ -50,10 +49,6 @@ enum HEIFMetadataFilter {
     private static func one(_ ids: [Int]) throws -> Int? {
         guard ids.count <= 1 else { throw FormatError("several metadata items") }
         return ids.first
-    }
-
-    private static func filteredTIFF(_ tiff: [UInt8], _ level: MetadataHandling) -> [UInt8]? {
-        EXIFFilter.filter(tiff, level: level)
     }
 
     private static func filteredXMP(_ data: Data, _ item: Range<Int>, _ level: MetadataHandling) throws -> [UInt8]? {

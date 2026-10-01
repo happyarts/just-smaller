@@ -307,7 +307,7 @@ enum Pipeline {
     /// HEIC's EXIF and XMP, in their items; nothing else changes.
     static func heifMetadata(_ level: MetadataHandling, required: Bool) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: required) { input, output, _ in
-            try HEIFMetadataFilter.filter(Data(contentsOf: input), level: level).write(to: output)
+            try HEIFMetadataFilter.filter(Data(contentsOf: input, options: .alwaysMapped), level: level).write(to: output)
             try MetadataCheck.verify(original: input, result: output, level: level)
             return true
         }

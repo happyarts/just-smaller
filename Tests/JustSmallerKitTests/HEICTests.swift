@@ -38,12 +38,15 @@ final class HEICTests {
         try await FileOptimizer(settings: settings).optimize(url) { _ in }
     }
 
-    /// Every item's data, by id (items stored in the file).
+    /// Every item's data, by id (stored in the file or in idat).
     private func itemData(_ data: Data) throws -> [Int: Data] {
         let file = try HEIFItems.File(ByteView(data))
         var out: [Int: Data] = [:]
-        for item in file.locations.items where item.method == 0 {
-            out[item.id] = try item.extents.reduce(Data()) { try $0 + ByteView(data).view($1.start, $1.length).bytes }
+        for item in file.locations.items where item.method < 2 {
+            out[item.id] = try item.extents.reduce(Data()) { joined, extent in
+                let range = try #require(try file.range(of: extent, method: item.method))
+                return try joined + ByteView(data).view(range.lowerBound, range.count).bytes
+            }
         }
         return out
     }
@@ -342,9 +345,11 @@ final class HEICTests {
     /// `overlapping`: the last item starts inside the image's data. `group`:
     /// an entity group (grpl) with this id, holding items 1 and 3. `toTheEnd`
     /// false: the last item has its length. `wideMdat`: the mdat box with a
-    /// 64-bit size; `metaLast`: the meta box after it.
-    private func handMadeHEIF(overlapping: Bool = false, group: Int? = nil, toTheEnd: Bool = true,
-                              wideMdat: Bool = false, metaLast: Bool = false) -> (data: Data, image: [UInt8], last: [UInt8]) {
+    /// 64-bit size; `metaLast`: the meta box after it. `bareMeta`: no iref,
+    /// and meta ends with iinf directly before iloc (`true`) or with iinf
+    /// (`false`).
+    private func handMadeHEIF(overlapping: Bool = false, group: Int? = nil, toTheEnd: Bool = true, wideMdat: Bool = false,
+                              metaLast: Bool = false, bareMeta: Bool? = nil) -> (data: Data, image: [UInt8], last: [UInt8]) {
         var tiff: [UInt8] = Array("MM".utf8) + [0, 42] + be(8, 4) + be(2, 2)
         tiff += be(0x013B, 2) + be(2, 2) + be(5, 4) + be(38, 4) // Artist → 38
         tiff += be(0x8825, 2) + be(4, 2) + be(1, 4) + be(44, 4) // GPS IFD → 44
@@ -363,7 +368,14 @@ final class HEICTests {
         }
         let ftyp = box("ftyp", Array("heic".utf8) + be(0, 4) + Array("mif1heic".utf8))
         func meta(mdat: Int) -> [UInt8] {
-            box("meta", [0, 0, 0, 0]
+            let hdlr = box("hdlr", [0, 0, 0, 0] + be(0, 4) + Array("pict".utf8) + [UInt8](repeating: 0, count: 13))
+            let pitm = box("pitm", [0, 0, 0, 0] + be(1, 2))
+            let iinf = box("iinf", [0, 0, 0, 0] + be(3, 2) + infe(1, "hvc1") + infe(2, "Exif") + infe(3, "hvc1"))
+            if let ilocLast = bareMeta {
+                let children = hdlr + pitm + box("idat", exif)
+                return box("meta", [0, 0, 0, 0] + children + (ilocLast ? iinf + iloc(mdat: mdat) : iloc(mdat: mdat) + iinf))
+            }
+            return box("meta", [0, 0, 0, 0]
                 + box("hdlr", [0, 0, 0, 0] + be(0, 4) + Array("pict".utf8) + [UInt8](repeating: 0, count: 13))
                 + box("pitm", [0, 0, 0, 0] + be(1, 2))
                 + iloc(mdat: mdat)
@@ -402,9 +414,9 @@ final class HEICTests {
     /// the end of the file, is never replaced.
     @Test func sharedDataIsNotReplaced() throws {
         let (data, _, _) = handMadeHEIF(overlapping: true)
-        #expect(throws: FormatError.self) { try HEIFItems.replacingData([1: [1, 2, 3]], in: data) }
+        #expect(throws: FormatError.self) { try HEIFItems.rewrite(data, replacing: [1: [1, 2, 3]]) }
         // The EXIF in idat lies apart from both and may change.
-        let changed = try HEIFItems.replacingData([2: [1, 2, 3]], in: data)
+        let changed = try HEIFItems.rewrite(data, replacing: [2: [1, 2, 3]])
         try HEIFCheck.check(ByteView(changed), against: HEIFCheck.Reference(ByteView(data)))
     }
 
@@ -413,7 +425,7 @@ final class HEICTests {
     @Test func newItemsAvoidGroupIDs() throws {
         let (data, _, _) = handMadeHEIF(group: 4, toTheEnd: false)
         try HEIFCheck.check(ByteView(data), against: HEIFCheck.Reference(ByteView(data)))
-        let added = try HEIFItems.addingItems([HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: Array("<x/>".utf8))], in: data)
+        let added = try HEIFItems.rewrite(data, adding: [HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: Array("<x/>".utf8))])
         try HEIFCheck.check(ByteView(added), against: HEIFCheck.Reference(ByteView(data)))
         let file = try HEIFItems.File(ByteView(added))
         #expect(file.infos.map(\.id) == [1, 2, 3, 5])
@@ -424,19 +436,42 @@ final class HEICTests {
     }
 
     /// New items' data goes at the end of a last mdat box, also one with a
-    /// 64-bit size, or into an mdat box of its own when meta comes last.
+    /// 64-bit size, or into an mdat box of its own when meta comes last —
+    /// in the same pass as the EXIF in idat is replaced.
     @Test(arguments: [(false, false), (true, false), (false, true), (true, true)])
     func newItemsInEveryLayout(wideMdat: Bool, metaLast: Bool) throws {
         let (data, image, last) = handMadeHEIF(toTheEnd: false, wideMdat: wideMdat, metaLast: metaLast)
         try HEIFCheck.check(ByteView(data), against: HEIFCheck.Reference(ByteView(data)))
         let xmp = Array("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".utf8)
-        let added = try HEIFItems.addingItems([HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: xmp)], in: data)
+        let exif: [UInt8] = [0, 0, 0, 0] + Array("MM".utf8) + [0, 42, 0, 0, 0, 8, 0, 0, 0, 0, 0, 0]
+        let added = try HEIFItems.rewrite(data, replacing: [2: exif],
+                                          adding: [HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: xmp)])
         try HEIFCheck.check(ByteView(added), against: HEIFCheck.Reference(ByteView(data)))
         let file = try HEIFItems.File(ByteView(added))
         #expect(file.top.filter { $0.type == "mdat" }.count == (metaLast ? 2 : 1))
         #expect([UInt8](added[try file.range(of: 1)]) == image)
         #expect([UInt8](added[try file.range(of: 3)]) == last)
         #expect([UInt8](added[try file.range(of: 4)]) == xmp)
+        #expect([UInt8](added[try file.range(of: 2)]) == exif)
         #expect(file.metadataXMP == [4])
+    }
+
+    /// Without an iref box, a new one goes right after iinf — before an
+    /// iloc that follows it, or at the very end of meta, which then grows
+    /// by it too.
+    @Test(arguments: [true, false])
+    func newIrefAfterIinf(ilocLast: Bool) throws {
+        let (data, image, last) = handMadeHEIF(toTheEnd: false, bareMeta: ilocLast)
+        try HEIFCheck.check(ByteView(data), against: HEIFCheck.Reference(ByteView(data)))
+        #expect(try HEIFItems.File(ByteView(data)).references.isEmpty)
+        let xmp = Array("<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"/>".utf8)
+        let added = try HEIFItems.rewrite(data, adding: [HEIFItems.NewItem(type: "mime", contentType: "application/rdf+xml", data: xmp)])
+        try HEIFCheck.check(ByteView(added), against: HEIFCheck.Reference(ByteView(data)))
+        let file = try HEIFItems.File(ByteView(added))
+        #expect(file.meta.map(\.type).suffix(ilocLast ? 3 : 2) == (ilocLast ? ["iinf", "iref", "iloc"] : ["iinf", "iref"]))
+        #expect(file.references.map { "\($0.type) \($0.from) \($0.to)" } == ["cdsc 4 [1]"])
+        #expect([UInt8](added[try file.range(of: 1)]) == image)
+        #expect([UInt8](added[try file.range(of: 3)]) == last)
+        #expect([UInt8](added[try file.range(of: 4)]) == xmp)
     }
 }

@@ -56,8 +56,15 @@ enum Verifier {
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
+        // A HEIC whose coded image, properties and auxiliary images are the
+        // same bytes (only EXIF and XMP changed) is proven without decoding.
+        let sameImage = format == .heic && pixelsMustMatch
+            && (try? HEIFItems.sameImage(ByteView(Data(contentsOf: original, options: .alwaysMapped)),
+                                         ByteView(Data(contentsOf: result, options: .alwaysMapped)))) == true
         // HEIC's lossy re-encode encodes the auxiliary images anew too.
-        if format == .jpeg || format == .heic { try compareAuxiliaryImages(a, b, exact: format == .jpeg || pixelsMustMatch) }
+        if format == .jpeg || format == .heic {
+            try compareAuxiliaryImages(a, b, exact: format == .jpeg || pixelsMustMatch, knownSame: sameImage)
+        }
         // Every image of the file must read to its end.
         guard CGImageSourceGetStatus(b) == .statusComplete,
               (0..<framesB).allSatisfy({ CGImageSourceGetStatusAtIndex(b, $0) == .statusComplete })
@@ -77,11 +84,7 @@ enum Verifier {
             // Huffman tables, so JPEGs are compared where the image really
             // lives: the quantized DCT coefficients, read with libjpeg.
             try await compareJPEGCoefficients(original: original, result)
-        } else if format == .heic, (try? HEIFItems.sameImage(ByteView(Data(contentsOf: original, options: .alwaysMapped)),
-                                                             ByteView(Data(contentsOf: result, options: .alwaysMapped)))) == true {
-            // Only EXIF and XMP changed, the coded image didn't: its bytes,
-            // properties and auxiliary images are all the same, so decoding
-            // both would only compare the same data twice.
+        } else if sameImage {
             return
         } else {
             // GIF transparency is on/off per palette entry and the colour behind
@@ -140,11 +143,15 @@ enum Verifier {
     /// before: the HDR headroom comes from metadata (Apple's maker note, XMP,
     /// ISO 21496-1) that a filter must not lose. Reading the headroom
     /// doesn't decode the photo.
-    private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource, exact: Bool) throws {
-        guard let aux = AuxiliaryImages.same(a, b, exact: exact) else {
-            throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+    /// `knownSame`: their bytes are proven the same, only the brightness is
+    /// left to compare.
+    private static func compareAuxiliaryImages(_ a: CGImageSource, _ b: CGImageSource, exact: Bool, knownSame: Bool = false) throws {
+        if !knownSame {
+            guard let aux = AuxiliaryImages.same(a, b, exact: exact) else {
+                throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
+            }
+            guard !aux.isEmpty else { return }
         }
-        guard !aux.isEmpty else { return }
         let hdr = [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary
         guard CGImageSourceCreateImageAtIndex(a, 0, hdr)?.contentHeadroom == CGImageSourceCreateImageAtIndex(b, 0, hdr)?.contentHeadroom else {
             throw VerificationError(reason: String(localized: "HDR brightness changed", bundle: .module))
