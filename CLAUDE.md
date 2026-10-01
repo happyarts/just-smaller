@@ -20,7 +20,8 @@
 - Untrusted input never crashes the app: every read of a file's bytes goes
   through the readers in `Sources/JustSmallerKit/Structure/` (ByteView,
   JPEGMarkers, PNGChunks/RIFFChunks, TIFFReader, IPTCRecords, BMFFBoxes,
-  Zlib with a size limit) — filters, detection and the structure check alike.
+  GoogleXMP, Zlib with a size limit) — filters, detection and the structure
+  check alike.
   Writers live next to their readers and follow the specification.
 - A JPEG's parts (several images, leftover bytes, motion photo video) and
   what may change in them: only `JPEGLayout`. The optimizer, the pipeline

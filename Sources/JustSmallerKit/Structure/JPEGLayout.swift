@@ -12,9 +12,11 @@ import Foundation
 /// Most JPEGs are one image (`isPlain`). Others hold more: HDR gain maps,
 /// depth and mattes of portraits, stereo pairs and previews, listed by a
 /// multi-picture index; motion photos have a video after the images; and
-/// cameras leave leftover bytes between and after them. Reads through
-/// ByteView; `read` is nil when not even the first image reads to its end —
-/// then what follows it can't be told apart, and the file stays as it is.
+/// cameras leave leftover bytes between and after them. What Google's XMP
+/// says about them (container directory, motion photo mark) comes from
+/// `GoogleXMP`. Reads through ByteView; `read` is nil when not even the
+/// first image reads to its end — then what follows it can't be told apart,
+/// and the file stays as it is.
 ///
 /// To come (the users stay as they are): Google's container as a second
 /// `Index` (Pixel portraits, whose images only the XMP lists); each image's
@@ -26,15 +28,15 @@ struct JPEGLayout: Sendable {
         case none, multiPicture
     }
 
-    /// Why a file must stay as it is.
+    /// Why a file must stay as it is (besides `read` being nil).
     enum Problem: Sendable {
-        /// Not even the first image reads to its end (`read` is nil): what
-        /// follows it can't be told apart.
-        case unreadable
         /// A motion photo: its video lies after the images.
         case video
         /// A multi-picture index that doesn't fit the file.
         case unfittingIndex
+        /// Google's XMP names its photo namespaces but can't be read, and
+        /// something follows the photo: what it counts is unknown.
+        case unreadableXMP
         /// Images no multi-picture index lists: only Google's container
         /// (Pixel portraits), or none at all — this reader doesn't take them
         /// apart, and won't drop them as leftover bytes.
@@ -50,16 +52,16 @@ struct JPEGLayout: Sendable {
     let problem: Problem?
     /// One image, and nothing but padding after it.
     let isPlain: Bool
-    /// Google's container (Ultra HDR, motion photos, portraits) lists the
-    /// lengths of the images after the first in the first one's XMP,
-    /// counted from the end of the file. Only the rules below read it.
-    private let lengthsInXMP: Bool
+    /// Google's container directory lists the images after the first by
+    /// their lengths, counted from the end of the file: they, and the bytes
+    /// between them, must stay where they are. Only the rules below read it.
+    private let countedFromEnd: Bool
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
     static func read(_ b: ByteView, firstEnd: Int? = nil) -> JPEGLayout? {
         guard let headers = try? JPEGMarkers.headers(b).segments,
               let firstEnd = firstEnd ?? (try? JPEGMarkers.imageEnd(from: 0, in: b)) else { return nil }
-        var images = [0..<firstEnd], index = Index.none, unfitting = false
+        var images = [0..<firstEnd], index = Index.none, indexFits = true
         switch MultiPictureIndex.read(b, headers: headers) {
         case nil: break
         case let entries? where entries.count == 1: break // lists only the image itself
@@ -68,21 +70,40 @@ struct JPEGLayout: Sendable {
                 images += rest
                 index = .multiPicture
             } else {
-                unfitting = true
+                indexFits = false
             }
         }
         let gaps = images.indices.map { images[$0].upperBound..<(images.indices.contains($0 + 1) ? images[$0 + 1].lowerBound : b.count) }
         let trailer = (try? b.view(gaps[gaps.count - 1])) ?? ByteView(Data())
-        let trailerIsPadding = trailer.isPadding
-        let marks = xmpMarks(headers)
-        let isPlain = images.count == 1 && trailerIsPadding
-        let problem: Problem? = if !trailerIsPadding && (marks.video || holdsVideo(trailer)) { .video }
-            else if unfitting { .unfittingIndex }
-            else if index == .none, !trailerIsPadding, marks.container || trailer.bytes.range(of: Data([0xFF, 0xD8, 0xFF])) != nil { .unlistedImages }
-            else { nil }
-        // A single image that the container lists alone counts nothing after it.
-        return JPEGLayout(images: images, gaps: gaps, index: index, problem: problem, isPlain: isPlain,
-                          lengthsInXMP: marks.container && !isPlain)
+        // Nothing follows a plain JPEG's photo: whatever its XMP says counts nothing.
+        if images.count == 1, trailer.isPadding {
+            return JPEGLayout(images: images, gaps: gaps, index: index, problem: indexFits ? nil : .unfittingIndex,
+                              isPlain: true, countedFromEnd: false)
+        }
+        let xmp = GoogleXMP.read(headers)
+        return JPEGLayout(images: images, gaps: gaps, index: index,
+                          problem: problem(index: index, indexFits: indexFits, xmp: xmp, trailer: trailer),
+                          isPlain: false, countedFromEnd: xmp?.listsMoreThanThePhoto == true)
+    }
+
+    /// Why the file must stay as it is, asked in this order:
+    /// 1. A video after the images: Google's XMP marks a motion photo or
+    ///    lists a video, or the bytes after the images hold one. A mark with
+    ///    nothing after the images counts for nothing (editors drop the
+    ///    video and leave the mark).
+    /// 2. A multi-picture index that doesn't fit the file.
+    /// 3. Google's XMP that can't be read.
+    /// 4. Without a multi-picture index, images after the photo: the
+    ///    container lists some, or another JPEG starts in the bytes after it.
+    /// Asked only where something follows the photo.
+    private static func problem(index: Index, indexFits: Bool, xmp: GoogleXMP?, trailer: ByteView) -> Problem? {
+        let somethingAfter = !trailer.isPadding
+        if somethingAfter, xmp?.marksMotionPhoto == true || xmp?.listsVideo == true || holdsVideo(trailer) { return .video }
+        if !indexFits { return .unfittingIndex }
+        guard let xmp else { return .unreadableXMP }
+        if index == .none, somethingAfter,
+           xmp.listsMoreThanThePhoto || trailer.bytes.range(of: Data([0xFF, 0xD8, 0xFF])) != nil { return .unlistedImages }
+        return nil
     }
 
     /// The images the index lists after the first, each read to its EOI, in
@@ -100,17 +121,22 @@ struct JPEGLayout: Sendable {
 
     // MARK: - Rules
 
-    /// Where the container lists lengths, they count the images after the
-    /// first: those stay byte for byte.
-    func mayChange(image n: Int) -> Bool {
-        n == 0 || !lengthsInXMP
+    /// Whether image n may change. Without loss, every image but those the
+    /// container counts from the end of the file. With loss (encoded anew),
+    /// only a plain JPEG's photo for now: a gain map or a depth image is
+    /// made for its photo, and neither may simply change with it.
+    func mayChange(image n: Int, withLoss lossy: Bool = false) -> Bool {
+        lossy ? isPlain && n == 0 : n == 0 || !countedFromEnd
     }
+
+    /// Whether any image may change with loss: a lossy step is worth trying.
+    var mayChangeWithLoss: Bool { images.indices.contains { mayChange(image: $0, withLoss: true) } }
 
     /// Leftover bytes could hold anything: like unknown metadata they go
     /// unless everything stays — or the container counts from the end of
     /// the file across them.
     func keepsGaps(at level: MetadataHandling) -> Bool {
-        level == .keep || lengthsInXMP
+        level == .keep || countedFromEnd
     }
 
     /// Holds `result` (laid out as `after`), made from the original `a` this
@@ -128,7 +154,7 @@ struct JPEGLayout: Sendable {
         for (gap, original) in zip(after.gaps, gaps) {
             let bytes = try result.view(gap), before = try a.view(original)
             let kept = bytes.bytes == before.bytes
-            guard lengthsInXMP ? kept : kept && keepsGaps(at: level) || bytes.isPadding else {
+            guard countedFromEnd ? kept : kept && keepsGaps(at: level) || bytes.isPadding else {
                 throw FormatError("data between or after the images changed")
             }
         }
@@ -177,22 +203,6 @@ struct JPEGLayout: Sendable {
     }
 
     // MARK: - Recognising
-
-    /// What the first image's XMP (main or extended) says: Google's container
-    /// lists lengths; a motion photo (GCamera:MotionPhoto or MicroVideo set
-    /// to 1, as an attribute or an element — editors that drop the video
-    /// often leave the mark, so it counts only with data after the images).
-    private static func xmpMarks(_ headers: [JPEGMarkers.Segment]) -> (container: Bool, video: Bool) {
-        let container = Data("http://ns.google.com/photos/1.0/container/".utf8)
-        let video = ["MotionPhoto=\"1\"", "MotionPhoto>1<", "MicroVideo=\"1\"", "MicroVideo>1<"].map { Data($0.utf8) }
-        var marks = (container: false, video: false)
-        for s in headers where [.xmp, .extendedXMP].contains(JPEGMarkers.part(s.marker, payload: s.payload.bytes)) {
-            let p = s.payload.bytes
-            marks.container = marks.container || p.range(of: container) != nil
-            marks.video = marks.video || video.contains { p.range(of: $0) != nil }
-        }
-        return marks
-    }
 
     /// A video after the images: Samsung's trailer with its signatures, or
     /// an MP4 file's ftyp box, recognised by the box size before the type.

@@ -41,6 +41,12 @@ enum MetadataPolicy {
 
     enum NS {
         static let rdf = "http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+        static let googleContainer = "http://ns.google.com/photos/1.0/container/"
+        static let googleItem = "http://ns.google.com/photos/1.0/container/item/"
+        static let googleCamera = "http://ns.google.com/photos/1.0/camera/"
+        /// Dynamic Depth (Pixel portraits).
+        static let depthContainer = "http://ns.google.com/photos/dd/1.0/container/"
+        static let depthItem = "http://ns.google.com/photos/dd/1.0/item/"
         static let dc = "http://purl.org/dc/elements/1.1/"
         static let xmp = "http://ns.adobe.com/xap/1.0/"
         static let xmpRights = "http://ns.adobe.com/xap/1.0/rights/"
@@ -68,9 +74,9 @@ enum MetadataPolicy {
         "http://ns.apple.com/depthData/1.0/",
         "http://ns.apple.com/portraitEffectsMatte/1.0/",
         "http://ns.apple.com/semanticSegmentationMatte/1.0/",
-        "http://ns.google.com/photos/1.0/container/",
-        "http://ns.google.com/photos/1.0/container/item/",
-        "http://ns.google.com/photos/1.0/camera/",
+        NS.googleContainer,
+        NS.googleItem,
+        NS.googleCamera,
         "http://ns.google.com/photos/1.0/panorama/",
         "http://ns.google.com/photos/1.0/depthmap/",
         "http://ns.google.com/photos/1.0/image/",

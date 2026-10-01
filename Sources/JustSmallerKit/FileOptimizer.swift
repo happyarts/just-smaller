@@ -60,25 +60,24 @@ public struct FileOptimizer: Sendable {
             return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
                             size: size)
         }
-        // A JPEG with more than one image, or bytes after it, is optimized
-        // part by part along its layout — unless the layout says it must
-        // stay as it is.
-        var jpegHasParts = false
+        // A JPEG is optimized image by image along its layout — unless the
+        // layout says it must stay as it is.
+        var jpegLayout: JPEGLayout?
         if format == .jpeg {
-            let layout = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap { JPEGLayout.read(ByteView($0)) }
-            switch layout == nil ? .unreadable : layout?.problem {
-            case .unreadable:
+            guard let layout = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap({ JPEGLayout.read(ByteView($0)) }) else {
                 return .skipped(reason: String(localized: "The file is damaged or incomplete", bundle: .module), size: size)
+            }
+            switch layout.problem {
             case .video:
                 return .skipped(reason: String(localized: "Motion photo (a photo with a video) – left unchanged", bundle: .module), size: size)
-            case .unfittingIndex, .unlistedImages:
+            case .unfittingIndex, .unreadableXMP, .unlistedImages:
                 return .skipped(reason: String(localized: "Holds images that can’t be read safely – left unchanged", bundle: .module), size: size)
             case nil:
-                jpegHasParts = layout?.isPlain == false
+                jpegLayout = layout
             }
         }
         var facts = Self.facts(about: url, format: format, size: size)
-        facts.jpegHasParts = jpegHasParts
+        facts.jpegLayout = jpegLayout
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
         // that step is proven on the text. Only when all metadata stays,
         // since filtering it needs the rendering check.

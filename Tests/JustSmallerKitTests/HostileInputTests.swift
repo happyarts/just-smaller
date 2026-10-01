@@ -82,7 +82,43 @@ struct HostileInputTests {
     @Test func extendedXMPClaimingGigabytes() {
         let guid = Array("0123456789ABCDEF0123456789ABCDEF".utf8)
         let part = guid + [0xFF, 0xFF, 0xFF, 0xF0, 0, 0, 0, 0] + Array("<x/>".utf8)
-        #expect(JPEGMetadataFilter.reassembleExtendedXMP([part], for: Array("xmpNote:HasExtendedXMP=\"".utf8) + guid) == nil)
+        #expect(JPEGMarkers.extendedXMP([Data(part)], for: Data("xmpNote:HasExtendedXMP=\"".utf8 + guid)) == nil)
+    }
+
+    /// Google's XMP with lengths that aren't byte counts, entities that
+    /// expand a billion times, nesting thousands deep, a hundred thousand
+    /// items, unclosed elements: unreadable or read, never a crash.
+    @Test func hostileGoogleXMP() throws {
+        func directory(_ length: String) -> String {
+            GoogleXMPSamples.directory(gainMapLength: 0).replacingOccurrences(of: "Item:Length=\"0\"", with: "Item:Length=\"\(length)\"")
+        }
+        for length in ["-1", "12a", "", "0x10", "99999999999999999999999"] {
+            #expect(GoogleXMP.read(try GoogleXMPSamples.headers(directory(length))) == nil, "\(length)")
+        }
+        let ns = "xmlns:Container=\"\(GoogleXMP.container[0])\" xmlns:Item=\"\(GoogleXMP.item[0])\""
+        let laughs = "<!DOCTYPE x [<!ENTITY a \"aaaaaaaaaa\">" + (1...9).map { n in
+            "<!ENTITY \(Character(UnicodeScalar(97 + n)!)) \"" + String(repeating: "&\(Character(UnicodeScalar(96 + n)!));", count: 10) + "\">"
+        }.joined() + "]>"
+        let bomb = JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array((laughs + GoogleXMPSamples.packet(
+            "<rdf:Description \(ns)><Container:Directory><rdf:Seq><rdf:li><Item:Mime>&j;</Item:Mime></rdf:li></rdf:Seq></Container:Directory></rdf:Description>")).utf8))
+        let deep = String(repeating: "<rdf:li>", count: 50_000) + String(repeating: "</rdf:li>", count: 50_000)
+        let many = String(repeating: "<rdf:li rdf:parseType=\"Resource\"><Container:Item Item:Length=\"7\"/></rdf:li>", count: 100_000)
+        let descriptions = [
+            "<rdf:Description \(ns)><Container:Directory><rdf:Seq>\(deep)</rdf:Seq></Container:Directory></rdf:Description>",
+            "<rdf:Description \(ns)><Container:Directory><rdf:Seq>\(many)</rdf:Seq></Container:Directory></rdf:Description>",
+            "<rdf:Description \(ns)><Container:Directory><rdf:Seq><rdf:li>",
+        ]
+        for description in descriptions {
+            _ = GoogleXMP.read(try GoogleXMPSamples.headers(nil, extended: description))
+        }
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(nil, extended: descriptions[1]))?.directories.first?.count == 100_000)
+        let file = Data([0xFF, 0xD8]) + bomb + Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+        #expect(GoogleXMP.read(try JPEGMarkers.headers(ByteView(file)).segments) == nil)
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(descriptions[2])) == nil)
+        // An extended packet whose parts don't add up.
+        var headers = try GoogleXMPSamples.headers(nil, extended: GoogleXMPSamples.directory(gainMapLength: 1))
+        headers.removeLast()
+        #expect(GoogleXMP.read(headers) == nil)
     }
 
     /// Compressed text that inflates to more than 64 MB (a zip bomb) is

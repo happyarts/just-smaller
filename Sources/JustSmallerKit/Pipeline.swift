@@ -42,9 +42,11 @@ struct FileFacts: Sendable {
     var isLosslessWebP = false
     /// WebP with EXIF or XMP chunks.
     var hasWebPMetadata = false
-    /// JPEG that is more than one image, or has bytes after it
-    /// (`JPEGLayout.isPlain` false): changed part by part.
-    var jpegHasParts = false
+    /// JPEG only: the original's parts and what may change in them, read
+    /// once. A plain JPEG stays plain through every step (the checks see to
+    /// it); any other is read again from each step's input, where gaps may
+    /// have gone.
+    var jpegLayout: JPEGLayout?
     var isAnimated = false
     var bitsPerComponent = 8
     /// SVG in UTF-16.
@@ -71,18 +73,19 @@ enum Pipeline {
             // jpeg-scan rewrites the entropy coding (Huffman tables, progressive
             // scans) without touching the DCT coefficients: lossless. It keeps
             // whatever markers are left; filtering is done by our own filter.
-            // A JPEG with more than one image, or bytes after it, gets both
-            // part by part (`JPEGLayout`), and no lossy re-encode.
-            if facts.jpegHasParts {
-                return [[jpegImagesMetadata(s.metadata, orientation: facts.orientation)], [jpegImagesScan(effort: s.effort)]]
-            }
+            // Every step works image by image along the layout; a plain JPEG
+            // is its one image, changed as a whole.
+            let layout = facts.jpegLayout
             var stages: [[Candidate]] = []
             // Re-encode only when the original is of higher quality than the
             // target; otherwise re-encoding only adds generation loss and the
-            // lossless steps below are all it gets (jpegoptim's rule).
-            if s.lossy, (facts.jpegQuality ?? 100) > s.jpegQuality { stages.append([jpegli(quality: s.jpegQuality)]) }
-            stages.append([jpegMetadata(s.metadata, orientation: facts.orientation)])
-            stages.append([jpegScan(effort: s.effort)])
+            // lossless steps below are all it gets (jpegoptim's rule). And
+            // only where the layout lets an image change with loss.
+            if s.lossy, layout?.mayChangeWithLoss ?? true, (facts.jpegQuality ?? 100) > s.jpegQuality {
+                stages.append([jpegli(quality: s.jpegQuality, layout: layout)])
+            }
+            stages.append([jpegMetadata(s.metadata, orientation: facts.orientation, layout: layout)])
+            stages.append([jpegScan(effort: s.effort, layout: layout)])
             return stages
 
         case .gif:
@@ -217,85 +220,87 @@ enum Pipeline {
 
     // MARK: - JPEG
 
-    static func jpegMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
-        metadata(level) { try JPEGMetadataFilter.filter($0, level: level, orientation: orientation) }
-    }
-
-    /// Tools/jpeg-scan: finds the progressive scan split that codes this
-    /// image's coefficients smallest, and writes it with libjpeg-turbo.
-    /// Exit status 3: a JPEG it doesn't handle (12-bit, lossless, arithmetic).
-    static func jpegScan(effort: Effort) -> Candidate {
-        Candidate(name: "jpeg-scan") { input, output, work in
-            do {
-                try await ToolRunner.run("jpeg-scan", ["--effort", effort.rawValue, input.path, output.path], in: work)
-            } catch let error as ToolError where error.status == 3 {
-                return false
-            }
-            return true
-        }
-    }
-
-    /// jpegli (Google, BSD). It drops metadata, so the original's is put back.
-    static func jpegli(quality: Int) -> Candidate {
-        Candidate(name: "jpegli", isLossy: true) { input, output, work in
-            let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")
-            try await ToolRunner.run("cjpegli", [input.path, encoded.path, "--quality=\(quality)"], in: work)
-            let merged = try JPEGMetadataFilter.transplant(metadataFrom: Data(contentsOf: input),
-                                                           into: Data(contentsOf: encoded))
-            try merged.write(to: output)
-            return true
-        }
-    }
-
-    /// A JPEG taken apart along its `JPEGLayout`: each image that may change
-    /// is changed on its own (in parallel), and all are joined again, the
-    /// multi-picture index rewritten. `change` gets an image and its number
-    /// and returns it changed or as it was. The bytes between and after the
-    /// images stay, or go where the layout's rules let them at `level`.
-    private static func changeEachImage(of input: URL, to output: URL, level: MetadataHandling,
-                                        _ change: @escaping @Sendable (_ image: Data, _ n: Int) async throws -> Data) async throws {
-        let data = try Data(contentsOf: input, options: .alwaysMapped)
-        guard let layout = JPEGLayout.read(ByteView(data)), layout.problem == nil else { throw FormatError("JPEG layout") }
-        let images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
-            for (n, range) in layout.images.enumerated() {
-                let image = data.subdata(in: range)
-                group.addTask { (n, layout.mayChange(image: n) ? try await change(image, n) : image) }
-            }
-            var images = [Data](repeating: Data(), count: layout.images.count)
-            for try await (n, image) in group { images[n] = image }
-            return images
-        }
-        try layout.assembled(images, from: data, keepingGaps: layout.keepsGaps(at: level)).write(to: output)
-    }
-
     /// Each image keeps its own orientation.
-    static func jpegImagesMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
-        Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, _ in
-            try await changeEachImage(of: input, to: output, level: level) { image, n in
+    static func jpegMetadata(_ level: MetadataHandling, orientation: Int, layout: JPEGLayout?) -> Candidate {
+        Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, work in
+            _ = try await eachImage(of: input, to: output, layout: layout, work: work, level: level) { from, to, n in
+                let image = try Data(contentsOf: from)
                 try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image))
+                    .write(to: to)
+                return true
             }
             try MetadataCheck.verify(original: input, result: output, level: level)
             return true
         }
     }
 
-    /// Each image through jpeg-scan; one it doesn't handle or can't make
-    /// smaller stays as it was.
-    static func jpegImagesScan(effort: Effort) -> Candidate {
-        let scan = jpegScan(effort: effort)
-        return Candidate(name: scan.name) { input, output, work in
+    /// Tools/jpeg-scan: finds the progressive scan split that codes this
+    /// image's coefficients smallest, and writes it with libjpeg-turbo.
+    /// Exit status 3: a JPEG it doesn't handle (12-bit, lossless,
+    /// arithmetic); that image stays as it was.
+    static func jpegScan(effort: Effort, layout: JPEGLayout?) -> Candidate {
+        Candidate(name: "jpeg-scan") { input, output, work in
             // Gaps the metadata step left stay.
-            try await changeEachImage(of: input, to: output, level: .keep) { image, n in
-                let id = UUID().uuidString
-                let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-scan.jpg")
-                defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }
-                try image.write(to: from)
-                guard try await scan.run(from, to, work) else { return image }
-                let scanned = try Data(contentsOf: to)
-                return scanned.count < image.count ? scanned : image
+            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, onlySmaller: true) { from, to, _ in
+                do {
+                    try await ToolRunner.run("jpeg-scan", ["--effort", effort.rawValue, from.path, to.path], in: work)
+                } catch let error as ToolError where error.status == 3 {
+                    return false
+                }
+                return true
             }
-            return true
         }
+    }
+
+    /// jpegli (Google, BSD). It drops metadata, so the original's is put back.
+    static func jpegli(quality: Int, layout: JPEGLayout?) -> Candidate {
+        Candidate(name: "jpegli", isLossy: true) { input, output, work in
+            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _ in
+                let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")
+                try await ToolRunner.run("cjpegli", [from.path, encoded.path, "--quality=\(quality)"], in: work)
+                try JPEGMetadataFilter.transplant(metadataFrom: Data(contentsOf: from), into: Data(contentsOf: encoded)).write(to: to)
+                return true
+            }
+        }
+    }
+
+    /// A step on a JPEG, image by image along its `JPEGLayout` (the
+    /// original's; nil counts as plain). A plain JPEG is its one image:
+    /// `change` gets the file itself, nothing is copied or read. Otherwise
+    /// the input's own layout is read (the images may have moved), and each
+    /// image it lets change (`withLoss`: encoded anew) gets a file of its
+    /// own; all are changed in parallel and joined again, the multi-picture
+    /// index rewritten; the bytes between and after them stay, or go where
+    /// the layout lets them at `level`.
+    /// `change` writes image `n` changed and returns true, or returns false
+    /// to leave it as it was; `onlySmaller` keeps it only when it got
+    /// smaller. Returns what `change` returned for a plain JPEG, else true.
+    private static func eachImage(of input: URL, to output: URL, layout original: JPEGLayout?, work: URL, level: MetadataHandling,
+                                  withLoss lossy: Bool = false, onlySmaller: Bool = false,
+                                  _ change: @escaping @Sendable (_ from: URL, _ to: URL, _ n: Int) async throws -> Bool) async throws -> Bool {
+        if original?.isPlain ?? true { return try await change(input, output, 0) }
+        let data = try Data(contentsOf: input, options: .alwaysMapped)
+        guard let layout = JPEGLayout.read(ByteView(data)), layout.problem == nil else { throw FormatError("JPEG layout") }
+        let images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for (n, range) in layout.images.enumerated() {
+                let image = data.subdata(in: range)
+                guard layout.mayChange(image: n, withLoss: lossy) else { group.addTask { (n, image) }; continue }
+                group.addTask {
+                    let id = UUID().uuidString
+                    let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-changed.jpg")
+                    defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }
+                    try image.write(to: from)
+                    guard try await change(from, to, n) else { return (n, image) }
+                    let changed = try Data(contentsOf: to)
+                    return (n, !onlySmaller || changed.count < image.count ? changed : image)
+                }
+            }
+            var images = [Data](repeating: Data(), count: layout.images.count)
+            for try await (n, image) in group { images[n] = image }
+            return images
+        }
+        try layout.assembled(images, from: data, keepingGaps: layout.keepsGaps(at: level)).write(to: output)
+        return true
     }
 
     /// HEIC's EXIF and XMP, in their items; nothing else changes.

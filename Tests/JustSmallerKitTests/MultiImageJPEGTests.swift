@@ -162,15 +162,7 @@ final class MultiImageJPEGTests {
     @Test func imagesListedInXMPStayAsTheyAre() async throws {
         let url = gainMapPhoto("container.jpg")
         var parts = images(try Data(contentsOf: url))
-        let xmp = """
-            <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
-            <rdf:Description xmlns:Container="http://ns.google.com/photos/1.0/container/" \
-            xmlns:Item="http://ns.google.com/photos/1.0/container/item/"><Container:Directory><rdf:Seq>\
-            <rdf:li rdf:parseType="Resource"><Container:Item Item:Semantic="Primary" Item:Mime="image/jpeg"/></rdf:li>\
-            <rdf:li rdf:parseType="Resource"><Container:Item Item:Semantic="GainMap" Item:Mime="image/jpeg" \
-            Item:Length="\(parts[1].count)"/></rdf:li></rdf:Seq></Container:Directory></rdf:Description></rdf:RDF></x:xmpmeta>
-            """
-        parts[0] = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)), into: parts[0])
+        parts[0] = inserting(GoogleXMPSamples.segment(GoogleXMPSamples.directory(gainMapLength: parts[1].count)), into: parts[0])
         try JPEGLayout.joined(parts).write(to: url)
 
         let original = dir.appending(path: "container-original.jpg")
@@ -208,15 +200,15 @@ final class MultiImageJPEGTests {
         let segments = try JPEGMarkers.headers(ByteView(parts[0])).segments
         let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
         var first = parts[0].prefix(index.offset) + parts[0].dropFirst(index.end)
-        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
-            + "<rdf:Description xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"/></rdf:RDF></x:xmpmeta>"
-        first = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)), into: first)
+        first = inserting(GoogleXMPSamples.segment(GoogleXMPSamples.directory(gainMapLength: parts[1].count)), into: first)
         let url = dir.appending(path: "portrait.jpg")
         try (first + parts[1]).write(to: url)
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.problem == .unlistedImages)
         let before = try Data(contentsOf: url)
         guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
         #expect(try Data(contentsOf: url) == before)
+        // The directory alone says so, whatever the bytes after the photo look like.
+        #expect(JPEGLayout.read(ByteView(first + Data("depth map".utf8)))?.problem == .unlistedImages)
     }
 
     /// A single photo that the container lists alone, with padding after it:
@@ -225,9 +217,7 @@ final class MultiImageJPEGTests {
         let first = images(try Data(contentsOf: gainMapPhoto("alone.jpg")))[0]
         let segments = try JPEGMarkers.headers(ByteView(first)).segments
         let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
-        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
-            + "<rdf:Description xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"/></rdf:RDF></x:xmpmeta>"
-        let photo = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)),
+        let photo = inserting(GoogleXMPSamples.segment(GoogleXMPSamples.directory(gainMapLength: nil)),
                               into: first.prefix(index.offset) + first.dropFirst(index.end))
         let url = dir.appending(path: "alone-padded.jpg")
         try (photo + Data(count: 300)).write(to: url)
@@ -255,26 +245,118 @@ final class MultiImageJPEGTests {
         }
     }
 
-    /// Google marks a motion photo in the XMP (1, not 0); Samsung's trailer
-    /// has its own signature.
+    /// Google marks a motion photo in the XMP (1, not 0; an attribute or an
+    /// element, by namespace, whatever the prefix), or its directory lists
+    /// a video; Samsung's trailer has its own signature.
     @Test func motionPhotoMarks() throws {
         let parts = images(try Data(contentsOf: gainMapPhoto("marks.jpg")))
-        func file(xmp: String?, trailer: String = "") throws -> ByteView {
+        func file(_ description: String?, trailer: String = "") throws -> ByteView {
             var first = parts[0]
-            if let xmp {
-                let packet = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
-                    + "<rdf:Description xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\" \(xmp)/></rdf:RDF></x:xmpmeta>"
-                first = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(packet.utf8)), into: first)
-            }
+            if let description { first = inserting(GoogleXMPSamples.segment(description), into: first) }
             return ByteView(try JPEGLayout.joined([first, parts[1]], gaps: [Data(), Data(trailer.utf8)]))
         }
         func video(_ b: ByteView) throws -> Bool { try #require(JPEGLayout.read(b)).problem == .video }
-        #expect(try video(file(xmp: "GCamera:MotionPhoto=\"1\"", trailer: "video")))
-        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"0\"", trailer: "video")))
+        let camera = "xmlns:GCamera=\"\(GoogleXMP.camera)\""
+        #expect(try video(file("<rdf:Description \(camera) GCamera:MotionPhoto=\"1\"/>", trailer: "video")))
+        #expect(try video(file("<rdf:Description xmlns:Cam=\"\(GoogleXMP.camera)\"><Cam:MicroVideo> 1 </Cam:MicroVideo></rdf:Description>",
+                               trailer: "video")))
+        #expect(try !video(file("<rdf:Description \(camera) GCamera:MotionPhoto=\"0\"/>", trailer: "video")))
+        // The prefix alone says nothing.
+        #expect(try !video(file("<rdf:Description xmlns:GCamera=\"http://example.com/\" GCamera:MotionPhoto=\"1\"/>", trailer: "video")))
         // The mark without anything after the images: an editor dropped the video.
-        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"1\"")))
-        #expect(try video(file(xmp: nil, trailer: "...video...MotionPhoto_Data")))
-        #expect(try !video(file(xmp: nil, trailer: "camera buffer")))
+        #expect(try !video(file("<rdf:Description \(camera) GCamera:MotionPhoto=\"1\"/>")))
+        #expect(try video(file(GoogleXMPSamples.directory(gainMapLength: parts[1].count, videoLength: 5), trailer: "video")))
+        #expect(try video(file(nil, trailer: "...video...MotionPhoto_Data")))
+        #expect(try !video(file(nil, trailer: "camera buffer")))
+    }
+
+    // MARK: - Google's XMP
+
+    /// The directory as Ultra HDR writes it (attributes), as elements, and
+    /// as Dynamic Depth writes it in the extended XMP (rdf:value) — read by
+    /// namespace, whatever the prefixes.
+    @Test func googleDirectoryIsReadInEveryForm() throws {
+        let gainMap = GoogleXMP.Item(semantic: "GainMap", mime: "image/jpeg", length: 1531)
+        let attributes = try #require(GoogleXMP.read(GoogleXMPSamples.headers(GoogleXMPSamples.directory(gainMapLength: 1531))))
+        #expect(attributes == GoogleXMP(directories: [[GoogleXMP.Item(semantic: "Primary", mime: "image/jpeg"), gainMap]]))
+        #expect(attributes.listsMoreThanThePhoto && !attributes.listsVideo && !attributes.marksMotionPhoto)
+
+        let elements = """
+            <rdf:Description xmlns:C="\(GoogleXMP.container[0])" xmlns:I="\(GoogleXMP.item[0])"><C:Directory><rdf:Seq>\
+            <rdf:li rdf:parseType="Resource"><C:Item><I:Mime>image/jpeg</I:Mime><I:Semantic>Primary</I:Semantic>\
+            <I:Padding>59</I:Padding></C:Item></rdf:li>\
+            <rdf:li rdf:parseType="Resource"><C:Item><I:Mime>video/mp4</I:Mime><I:Semantic>MotionPhoto</I:Semantic>\
+            <I:Length> 4708929 </I:Length></C:Item></rdf:li></rdf:Seq></C:Directory></rdf:Description>
+            """
+        let read = try #require(GoogleXMP.read(GoogleXMPSamples.headers(elements)))
+        #expect(read.directories == [[GoogleXMP.Item(semantic: "Primary", mime: "image/jpeg", padding: 59),
+                                      GoogleXMP.Item(semantic: "MotionPhoto", mime: "video/mp4", length: 4708929)]])
+        #expect(read.listsVideo)
+
+        let depth = """
+            <rdf:Description xmlns:Device="http://ns.google.com/photos/dd/1.0/device/" \
+            xmlns:Container="\(GoogleXMP.container[1])" xmlns:Item="\(GoogleXMP.item[1])"><Device:Container rdf:parseType="Resource">\
+            <Container:Directory><rdf:Seq>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
+            <Item:Length>0</Item:Length><Item:DataURI>primary_image</Item:DataURI></rdf:value></rdf:li>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
+            <Item:Length>179722</Item:Length><Item:DataURI>android/depthmap</Item:DataURI></rdf:value></rdf:li>\
+            </rdf:Seq></Container:Directory></Device:Container></rdf:Description>
+            """
+        let extended = try #require(GoogleXMP.read(GoogleXMPSamples.headers(nil, extended: depth)))
+        #expect(extended.directories == [[GoogleXMP.Item(mime: "image/jpeg"), GoogleXMP.Item(mime: "image/jpeg", length: 179722)]])
+
+        // Items straight in the list, without rdf:li: the same; a directory with no item: unreadable.
+        let bare = GoogleXMPSamples.directory(gainMapLength: 1531).replacingOccurrences(of: "<rdf:li rdf:parseType=\"Resource\">", with: "")
+            .replacingOccurrences(of: "</rdf:li>", with: "")
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(bare)) == attributes)
+        let empty = "<rdf:Description xmlns:Container=\"\(GoogleXMP.container[0])\"><Container:Directory><rdf:Seq/></Container:Directory></rdf:Description>"
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(empty)) == nil)
+        // Other prefixes for the same namespaces: the same.
+        let renamed = GoogleXMPSamples.directory(gainMapLength: 1531).replacingOccurrences(of: "Item:", with: "i:")
+            .replacingOccurrences(of: "xmlns:Item=", with: "xmlns:i=")
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(renamed)) == attributes)
+        // The item prefix bound to another namespace: items without properties.
+        let foreign = GoogleXMPSamples.directory(gainMapLength: 1531).replacingOccurrences(of: GoogleXMP.item[0], with: "http://example.com/")
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(foreign)) == GoogleXMP(directories: [[GoogleXMP.Item(), GoogleXMP.Item()]]))
+        // Another namespace under the same prefixes: nothing; no Google namespace at all: not even parsed.
+        let other = GoogleXMPSamples.directory(gainMapLength: 1531).replacingOccurrences(of: GoogleXMP.container[0], with: "http://example.com/")
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers(other)) == GoogleXMP())
+        #expect(GoogleXMP.read(try GoogleXMPSamples.headers("<rdf:Description xmlns:a=\"http://example.com/\" a:x=\"<\"/>")) == GoogleXMP())
+    }
+
+    /// Google's XMP that can't be read stops a file only where something
+    /// follows the photo; then it is left as it is.
+    @Test func unreadableGoogleXMP() throws {
+        let parts = images(try Data(contentsOf: gainMapPhoto("unreadable-xmp.jpg")))
+        let broken = GoogleXMPSamples.directory(gainMapLength: -1)
+        let first = inserting(GoogleXMPSamples.segment(broken), into: parts[0])
+        #expect(JPEGLayout.read(ByteView(try JPEGLayout.joined([first, parts[1]])))?.problem == .unreadableXMP)
+        let segments = try JPEGMarkers.headers(ByteView(first)).segments
+        let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
+        let alone = try #require(JPEGLayout.read(ByteView(first.prefix(index.offset) + first.dropFirst(index.end))))
+        #expect(alone.isPlain && alone.problem == nil)
+    }
+
+    /// Only a plain JPEG's photo may be encoded anew: a photo with a gain
+    /// map gets no lossy step, and stays lossless in lossy mode.
+    @Test func onlyAPlainPhotoIsReencoded() async throws {
+        let url = gainMapPhoto("lossy.jpg")
+        let layout = try #require(JPEGLayout.read(ByteView(try Data(contentsOf: url))))
+        let first = images(try Data(contentsOf: url))[0]
+        let index = try #require(try JPEGMarkers.headers(ByteView(first)).segments.first(where: MultiPictureIndex.isIndex))
+        let plain = try #require(JPEGLayout.read(ByteView(first.prefix(index.offset) + first.dropFirst(index.end))))
+        #expect(!layout.mayChange(image: 0, withLoss: true) && !layout.mayChange(image: 1, withLoss: true))
+        #expect(plain.mayChange(image: 0, withLoss: true))
+        settings.lossy = true
+        settings.quality = 50
+        func lossy(_ layout: JPEGLayout) -> Bool {
+            Pipeline.stages(for: .jpeg, facts: FileFacts(byteSize: 1, jpegQuality: 90, jpegLayout: layout), settings: settings)
+                .joined().contains(where: \.isLossy)
+        }
+        #expect(!lossy(layout) && lossy(plain))
+        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(identical && !tools.contains("jpegli"))
     }
 
     /// Leftover bytes may stay only as they were, and only when everything is kept.

@@ -60,3 +60,49 @@ enum TestImages {
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)?.contentHeadroom
     }
 }
+
+/// Google's XMP as cameras write it, for the tests.
+enum GoogleXMPSamples {
+    /// An XMP packet around one rdf:Description.
+    static func packet(_ description: String) -> String {
+        "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            + description + "</rdf:RDF></x:xmpmeta>"
+    }
+
+    /// An APP1 XMP segment with `description` in its packet.
+    static func segment(_ description: String) -> Data {
+        JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(packet(description).utf8))
+    }
+
+    /// Ultra HDR's directory (attributes): the photo, a gain map of that
+    /// length (none for nil), a video of that length.
+    static func directory(gainMapLength: Int?, videoLength: Int? = nil) -> String {
+        func item(_ attributes: String) -> String { "<rdf:li rdf:parseType=\"Resource\"><Container:Item \(attributes)/></rdf:li>" }
+        var items = item("Item:Semantic=\"Primary\" Item:Mime=\"image/jpeg\"")
+        if let gainMapLength { items += item("Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\" Item:Length=\"\(gainMapLength)\"") }
+        if let videoLength { items += item("Item:Semantic=\"MotionPhoto\" Item:Mime=\"video/mp4\" Item:Length=\"\(videoLength)\"") }
+        return "<rdf:Description xmlns:Container=\"\(GoogleXMP.container[0])\" xmlns:Item=\"\(GoogleXMP.item[0])\">"
+            + "<Container:Directory><rdf:Seq>\(items)</rdf:Seq></Container:Directory></rdf:Description>"
+    }
+
+    /// The segments of a tiny JPEG with `main` in its XMP packet and
+    /// `extended` in an extended packet, in parts as large as a segment
+    /// allows (at least two).
+    static func headers(_ main: String?, extended: String? = nil) throws -> [JPEGMarkers.Segment] {
+        let guid = Array("0123456789ABCDEF0123456789ABCDEF".utf8)
+        var file = Data([0xFF, 0xD8])
+        let note = "<rdf:Description xmlns:xmpNote=\"http://ns.adobe.com/xmp/note/\" xmpNote:HasExtendedXMP=\"\(String(decoding: guid, as: UTF8.self))\"/>"
+        if main != nil || extended != nil { file += segment((main ?? "") + (extended == nil ? "" : note)) }
+        if let extended {
+            let whole = Array(packet(extended).utf8)
+            func be(_ v: Int) -> [UInt8] { withUnsafeBytes(of: UInt32(v).bigEndian, Array.init) }
+            let size = min(65_000, whole.count / 2 + 1)
+            for offset in stride(from: 0, to: whole.count, by: size) {
+                let part = whole[offset..<min(whole.count, offset + size)]
+                file += JPEGMarkers.write(0xE1, JPEGMarkers.extendedXMPHeader + guid + be(whole.count) + be(offset) + Array(part))
+            }
+        }
+        file += Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+        return try JPEGMarkers.headers(ByteView(file)).segments
+    }
+}

@@ -51,6 +51,26 @@ enum JPEGMarkers {
         return part
     }
 
+    /// The extended XMP packet with `packet`'s GUID, put together from its
+    /// parts; nil unless the parts fill it exactly. Its length is taken from
+    /// the file only once the parts' data adds up to it.
+    static func extendedXMP(_ chunks: [Data], for packet: Data) -> Data? {
+        let parts = chunks.compactMap { try? extendedXMPPart(ByteView($0)) }
+        guard let guid = parts.map(\.guid).first(where: { packet.range(of: Data($0.utf8)) != nil }) else { return nil }
+        let mine = parts.filter { $0.guid == guid }
+        let length = mine[0].length
+        guard mine.allSatisfy({ $0.length == length }), mine.reduce(0, { $0 + $1.data.count }) == length else { return nil }
+        var whole = Data(count: length)
+        var covered = IndexSet()
+        for part in mine {
+            let range = part.offset..<part.offset + part.data.count
+            guard !covered.intersects(integersIn: range) else { return nil }
+            covered.insert(integersIn: range)
+            whole.replaceSubrange(range, with: part.data.bytes)
+        }
+        return whole
+    }
+
     /// The quantization tables of a DQT payload: id and 64 steps (8 or 16
     /// bit). Leniently, the tables before a truncated one.
     static func quantTables(_ p: ByteView, strict: Bool = true) throws -> [(id: Int, precision: Int, steps: [Int])] {

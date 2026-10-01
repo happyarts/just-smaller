@@ -49,8 +49,8 @@ enum JPEGMetadataFilter {
         var xmp: [UInt8]?
         if let xmpIndex {
             let packet = Array(payloads[xmpIndex].dropFirst(JPEGMarkers.xmpHeader.count))
-            let extended = reassembleExtendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, JPEGMarkers.extendedXMPHeader) }
-                .map { Array($0.element.dropFirst(JPEGMarkers.extendedXMPHeader.count)) }, for: packet)
+            let extended = JPEGMarkers.extendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, JPEGMarkers.extendedXMPHeader) }
+                .map { Data($0.element.dropFirst(JPEGMarkers.extendedXMPHeader.count)) }, for: Data(packet)).map(Array.init)
             xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest)
             if let merged = xmp, merged.count + JPEGMarkers.xmpHeader.count > maxPayload {
                 xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
@@ -93,26 +93,6 @@ enum JPEGMetadataFilter {
         }
         out.append(imageData)
         return out
-    }
-
-    /// The extended XMP packet with `packet`'s GUID, put together from its
-    /// parts; nil unless the parts fill it exactly. Its length is taken from
-    /// the file only once the parts' data adds up to it.
-    static func reassembleExtendedXMP(_ chunks: [[UInt8]], for packet: [UInt8]) -> [UInt8]? {
-        let parts = chunks.compactMap { try? JPEGMarkers.extendedXMPPart(ByteView($0)) }
-        guard let guid = parts.map(\.guid).first(where: { packet.firstRange(of: Array($0.utf8)) != nil }) else { return nil }
-        let mine = parts.filter { $0.guid == guid }
-        let length = mine[0].length
-        guard mine.allSatisfy({ $0.length == length }), mine.reduce(0, { $0 + $1.data.count }) == length else { return nil }
-        var whole = [UInt8](repeating: 0, count: length)
-        var covered = IndexSet()
-        for part in mine {
-            let range = part.offset..<part.offset + part.data.count
-            guard !covered.intersects(integersIn: range) else { return nil }
-            covered.insert(integersIn: range)
-            whole.replaceSubrange(range, with: part.data.bytes)
-        }
-        return whole
     }
 
     /// APP1 "Exif" holding the minimal TIFF block below.
