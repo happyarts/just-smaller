@@ -269,6 +269,25 @@ final class MultiImageJPEGTests {
 
     // MARK: - Checking
 
+    /// Coefficients the same, but the gain map lost the XMP that makes it
+    /// one: ImageIO's view of the auxiliary images catches it. (That view
+    /// stays even for steps that copy every segment: whether ImageIO applies
+    /// a gain map can depend on how the main image is coded — a Commons
+    /// photo shows HDR only after jpeg-scan.)
+    @Test func gainMapWithoutItsMetadataIsRejected() async throws {
+        let url = gainMapPhoto("bare.jpg")
+        var parts = images(try Data(contentsOf: url))
+        let segments = try JPEGMarkers.headers(ByteView(parts[1])).segments
+        let xmp = try #require(segments.first { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .xmp })
+        parts[1] = parts[1].prefix(xmp.offset) + parts[1].dropFirst(xmp.end)
+        let result = dir.appending(path: "bare-result.jpg")
+        try JPEGStructure.joined(parts).write(to: result)
+        await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: url, result: result, format: .jpeg, pixelsMustMatch: true)
+        }
+        try await Verifier.verify(original: url, result: url, format: .jpeg, pixelsMustMatch: true)
+    }
+
     /// Another second image (different coefficients) is caught, even though
     /// jpegcmp alone reads only the first.
     @Test func changedSecondImageIsRejected() async throws {
