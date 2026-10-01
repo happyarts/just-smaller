@@ -333,24 +333,31 @@ final class FileOptimizerTests {
         }
     }
 
-    @Test func jpegWithDataAfterTheImageIsLeftAlone() async throws {
-        let plain = try Data(contentsOf: write(image(), "plain.jpg", type: .jpeg,
+    /// Bytes after the image (cameras leave buffer leftovers there) stay
+    /// where they were when everything is kept, and go otherwise — like
+    /// unknown metadata. A multi-picture index that lists nothing leaves the
+    /// file as it is: the images it should list can't be found.
+    @Test(arguments: [MetadataHandling.keep, .removePrivate])
+    func jpegWithDataAfterTheImage(level: MetadataHandling) async throws {
+        let plain = try Data(contentsOf: write(image(), "plain-\(level.rawValue).jpg", type: .jpeg,
                                                properties: [kCGImageDestinationLossyCompressionQuality: 0.95]))
-        #expect(!JPEGStructure.hasSecondaryImage(ByteView(plain)))
+        #expect(JPEGLayout.read(ByteView(plain))?.isPlain == true)
+        settings.metadata = level
 
-        // A motion-photo video or other trailer after the end of the image.
-        let trailing = dir.appending(path: "trailing.jpg")
-        try (plain + Data(repeating: 0x42, count: 3000)).write(to: trailing)
-        // A multi-picture index (APP2 "MPF") right after SOI that lists nothing.
-        let mpf = dir.appending(path: "mpf.jpg")
+        let trailing = dir.appending(path: "trailing-\(level.rawValue).jpg")
+        let leftover = Data(repeating: 0x42, count: 3000)
+        try (plain + leftover).write(to: trailing)
+        guard case .optimized = try await optimize(trailing) else { Issue.record("not optimized"); return }
+        let data = try Data(contentsOf: trailing)
+        #expect(data.suffix(leftover.count) == leftover || level != .keep)
+        #expect(!data.contains(leftover) || level == .keep)
+
+        let mpf = dir.appending(path: "mpf-\(level.rawValue).jpg")
         let segment: [UInt8] = [0xFF, 0xE2, 0x00, 0x0A] + Array("MPF\0".utf8) + [0, 0, 0, 0]
         try (plain.prefix(2) + Data(segment) + plain.dropFirst(2)).write(to: mpf)
-
-        for url in [trailing, mpf] {
-            let before = try Data(contentsOf: url)
-            guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
-            #expect(try Data(contentsOf: url) == before)
-        }
+        let before = try Data(contentsOf: mpf)
+        guard case .skipped = try await optimize(mpf) else { Issue.record("not skipped"); return }
+        #expect(try Data(contentsOf: mpf) == before)
     }
 
     @Test func fileChangedDuringOptimizationIsNotOverwritten() async throws {

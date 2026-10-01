@@ -60,20 +60,25 @@ public struct FileOptimizer: Sendable {
             return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
                             size: size)
         }
-        // A JPEG with more images than the first is optimized image by image;
-        // a motion photo (a video after them), or one whose index doesn't
-        // fit, stays as it is.
-        var hasSecondaryImage = false
-        if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
-           case let bytes = ByteView(data), JPEGStructure.hasSecondaryImage(bytes) {
-            guard let images = JPEGStructure.images(bytes), !JPEGStructure.holdsVideo(bytes, images: images) else {
-                return .skipped(reason: String(localized: "Contains a video, or images that can’t be read safely – left unchanged", bundle: .module),
-                                size: size)
+        // A JPEG with more than one image, or bytes after it, is optimized
+        // part by part along its layout — unless the layout says it must
+        // stay as it is.
+        var jpegHasParts = false
+        if format == .jpeg {
+            let layout = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap { JPEGLayout.read(ByteView($0)) }
+            switch layout == nil ? .unreadable : layout?.problem {
+            case .unreadable:
+                return .skipped(reason: String(localized: "The file is damaged or incomplete", bundle: .module), size: size)
+            case .video:
+                return .skipped(reason: String(localized: "Motion photo (a photo with a video) – left unchanged", bundle: .module), size: size)
+            case .unfittingIndex, .unlistedImages:
+                return .skipped(reason: String(localized: "Holds images that can’t be read safely – left unchanged", bundle: .module), size: size)
+            case nil:
+                jpegHasParts = layout?.isPlain == false
             }
-            hasSecondaryImage = true
         }
         var facts = Self.facts(about: url, format: format, size: size)
-        facts.hasSecondaryImage = hasSecondaryImage
+        facts.jpegHasParts = jpegHasParts
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
         // that step is proven on the text. Only when all metadata stays,
         // since filtering it needs the rendering check.
@@ -152,7 +157,7 @@ public struct FileOptimizer: Sendable {
                 // less compactly), as long as there was something to remove.
                 let promised = candidate.isRequired && hasFieldsToRemove
                 guard outSize < limit || promised else { continue }
-                if structure == nil { structure = StructureCheck.Reference(original: input, format: format) }
+                if structure == nil { structure = StructureCheck.Reference(original: input, format: format, level: settings.metadata) }
                 do {
                     // Against this stage's input: after a lossy stage the
                     // following lossless ones must keep the lossy result's pixels.

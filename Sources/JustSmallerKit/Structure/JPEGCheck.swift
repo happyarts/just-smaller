@@ -2,8 +2,11 @@ import Foundation
 
 /// JPEG after ITU T.81: markers and lengths, tables defined before use, one
 /// frame, scans that follow the progression rules, restart markers in
-/// sequence and in the right number, nothing unexpected after the end — and
-/// every image a multi-picture index lists, sound in the same way.
+/// sequence and in the right number — and every image a multi-picture index
+/// lists, sound in the same way. Around the images, the rules of
+/// `JPEGLayout`: as many images as before, only those that may change
+/// changed, the index exact, the bytes between and after them as they were
+/// or gone.
 enum JPEGCheck {
     typealias Invalid = FormatError
 
@@ -15,36 +18,30 @@ enum JPEGCheck {
         let complete: Bool?
         /// The APPn and COM segments of all its images, whole.
         let segments: Set<Data>
-        /// What follows its end of image.
-        let trailer: Data
-        /// Its multi-picture index without sizes and offsets.
-        let index: Data?
-        /// Its images after the first, when they must stay byte for byte
-        /// (their lengths are listed in the first one's XMP).
-        let fixedImages: [Data]?
-        /// What lies between and after its images, which stays byte for byte.
-        let gaps: [Data]?
+        /// The original as it is, its layout, and the metadata level the
+        /// rules for the bytes around its images follow.
+        let original: ByteView
+        let layout: JPEGLayout?
+        let level: MetadataHandling
 
-        init(_ a: ByteView) {
+        init(_ a: ByteView, level: MetadataHandling = .keep) {
             let lenient = (try? JPEGMarkers.headers(a))?.segments ?? []
             let frame = lenient.first { JPEGCheck.isFrame($0.marker) }?.marker
             self.frame = frame
             let strict = try? JPEGCheck.parse(a, allowing: frame)
             complete = strict?.complete
             var segments = Set(strict?.segments ?? lenient.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
-            // Those of the images a multi-picture index lists, too.
-            for entry in JPEGStructure.imageIndex(a)?.dropFirst() ?? [] {
-                if let image = try? a.view(from: entry.start), let s = try? JPEGMarkers.headers(image).segments {
+            let layout = JPEGLayout.read(a, firstEnd: strict?.end)
+            // Those of the images after the first, too.
+            for image in layout?.images.dropFirst() ?? [] {
+                if let s = try? JPEGMarkers.headers(a.view(image)).segments {
                     segments.formUnion(s.filter { JPEGCheck.isMetadata($0.marker) }.map(\.whole.bytes))
                 }
             }
             self.segments = segments
-            trailer = strict.flatMap { try? a.view(from: $0.end).bytes } ?? Data()
-            index = JPEGStructure.indexWithoutPositions(a)
-            let images = JPEGStructure.images(a)
-            fixedImages = JPEGStructure.listsLengthsInXMP(a)
-                ? images?.dropFirst().compactMap { try? a.view($0.lowerBound, $0.count).bytes } : nil
-            gaps = images.map { JPEGStructure.gaps($0, count: a.count).compactMap { try? a.view($0.lowerBound, $0.count).bytes } }
+            self.layout = layout
+            original = a
+            self.level = level
         }
     }
 
@@ -74,35 +71,26 @@ enum JPEGCheck {
         if reference.complete != false, !image.complete { throw Invalid("image data incomplete") }
         try metadata(image.segments, original: reference.segments)
 
-        // After EOI: the images a multi-picture index lists, each a sound
-        // JPEG after the one before it, of exactly the size the index gives,
-        // and nothing else — or exactly what the original had there.
-        if let index = JPEGStructure.imageIndex(b), index.count > 1 {
-            guard let images = JPEGStructure.images(b), images[0].upperBound == image.end else { throw Invalid("images overlap") }
-            // Between and after the images: the original's bytes, or nothing but padding.
-            let gaps = try JPEGStructure.gaps(images, count: b.count).map { try b.view($0.lowerBound, $0.count) }
-            guard gaps.map(\.bytes) == reference.gaps || gaps.allSatisfy(\.isPadding) else {
-                throw Invalid("data between or after the images changed")
-            }
-            // Only the sizes and offsets in the index may change.
-            guard JPEGStructure.indexWithoutPositions(b) == reference.index else { throw Invalid("multi-picture index changed") }
-            if let fixed = reference.fixedImages {
-                guard try images.dropFirst().map({ try b.view($0.lowerBound, $0.count).bytes }) == fixed else {
-                    throw Invalid("images listed in the XMP changed")
-                }
-            }
-            for (n, (entry, range)) in zip(index, images).enumerated() {
-                try Invalid.within("image \(n + 1)") {
-                    guard range.count == entry.size else { throw Invalid("multi-picture index: size") }
-                    guard n > 0 else { return }
-                    let image = try parse(b, from: range.lowerBound)
-                    guard image.end == range.upperBound else { throw Invalid("end of image") }
-                    try metadata(image.segments, original: reference.segments)
-                }
-            }
+        try layout(b, firstEnd: image.end, against: reference)
+    }
+
+    /// Around the images, the rules of the original's `JPEGLayout`; each
+    /// image after the first a sound JPEG with only metadata changed that
+    /// may change. An original whose layout can't be read gives one image,
+    /// and nothing but padding after it.
+    private static func layout(_ b: ByteView, firstEnd: Int, against reference: Reference) throws {
+        guard let after = JPEGLayout.read(b, firstEnd: firstEnd) else { throw Invalid("unreadable") }
+        if let layout = reference.layout {
+            try layout.check(after, in: b, original: reference.original, level: reference.level)
         } else {
-            let trailer = try b.view(from: image.end)
-            guard trailer.isEmpty || trailer.bytes == reference.trailer else { throw Invalid("data after the end of the image") }
+            guard after.isPlain else { throw Invalid("data after the end of the image") }
+        }
+        for (n, range) in after.images.enumerated().dropFirst() {
+            try Invalid.within("image \(n + 1)") {
+                let image = try parse(b, from: range.lowerBound)
+                guard image.end == range.upperBound else { throw Invalid("end of image") }
+                try metadata(image.segments, original: reference.segments)
+            }
         }
     }
 

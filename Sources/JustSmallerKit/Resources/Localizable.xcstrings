@@ -381,12 +381,22 @@
         }
       }
     },
-    "Contains a video, or images that can’t be read safely – left unchanged": {
+    "Holds images that can’t be read safely – left unchanged": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enthält ein Video oder Bilder, die sich nicht sicher lesen lassen – unverändert gelassen"
+            "value": "Enthält Bilder, die sich nicht sicher lesen lassen – unverändert gelassen"
+          }
+        }
+      }
+    },
+    "Motion photo (a photo with a video) – left unchanged": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewegtfoto (Foto mit Video) – unverändert gelassen"
           }
         }
       }

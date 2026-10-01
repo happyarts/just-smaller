@@ -22,6 +22,9 @@
   JPEGMarkers, PNGChunks/RIFFChunks, TIFFReader, IPTCRecords, BMFFBoxes,
   Zlib with a size limit) — filters, detection and the structure check alike.
   Writers live next to their readers and follow the specification.
+- A JPEG's parts (several images, leftover bytes, motion photo video) and
+  what may change in them: only `JPEGLayout`. The optimizer, the pipeline
+  and the checks all ask it; a new JPEG rule goes there, never into one of them.
 - Fuzzing on real files (off by default; a sample of two real files per
   format, seconds): `JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz`.
   Before a release every file: add `JUST_SMALLER_FUZZ_ALL=1`.

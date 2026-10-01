@@ -25,18 +25,12 @@ enum MetadataCheck {
     static func verify(original: URL, result: URL, level: MetadataHandling) throws {
         let a = try Data(contentsOf: original, options: .alwaysMapped), b = try Data(contentsOf: result, options: .alwaysMapped)
         try verify(a, b, level: level)
-        let pairs: [(original: Data, result: Data)]?
-        do { pairs = try JPEGStructure.imagePairs(a, b) } catch {
+        let pairs: [(original: Data, result: Data)]
+        do { pairs = try JPEGLayout.imagePairs(a, b) } catch {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
-        for pair in pairs?.dropFirst() ?? [] { try verify(pair.original, pair.result, level: level) }
-        // What lies between and after the images could hold anything: it goes
-        // unless everything stays (or the XMP lists the images' lengths).
+        for pair in pairs { try verify(pair.original, pair.result, level: level) }
         let bytes = ByteView(b)
-        if level != .keep, let images = JPEGStructure.images(bytes), !JPEGStructure.listsLengthsInXMP(ByteView(a)),
-           !JPEGStructure.gaps(images, count: b.count).allSatisfy({ (try? bytes.view($0.lowerBound, $0.count))?.isPadding ?? false }) {
-            throw leftover
-        }
         // A HEIF can hold XMP ImageIO doesn't show as the image's (a
         // thumbnail's, or one describing no image): it may hold only what
         // the level keeps as well.

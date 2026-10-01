@@ -79,9 +79,8 @@ struct CorpusFuzzTests {
         }
         switch format {
         case .jpeg:
-            _ = JPEGStructure.hasSecondaryImage(ByteView(data))
-            _ = JPEGStructure.imageIndex(ByteView(data))
-            if let images = JPEGStructure.images(ByteView(data)) { _ = try? JPEGStructure.joined(images.map { data.subdata(in: $0) }) }
+            _ = MultiPictureIndex.read(ByteView(data))
+            if let layout = JPEGLayout.read(ByteView(data)) { _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, keepingGaps: true) }
             _ = JPEGQuality.estimate(data)
         case .webp:
             _ = RIFFChunks.webp(ByteView(data))

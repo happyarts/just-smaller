@@ -60,6 +60,10 @@ struct ByteView {
         return ByteView(data[s..<s + length])
     }
 
+    func view(_ range: Range<Int>) throws -> ByteView {
+        try view(range.lowerBound, range.count)
+    }
+
     func view(from at: Int) throws -> ByteView {
         try view(at, count - at)
     }

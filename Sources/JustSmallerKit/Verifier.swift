@@ -100,19 +100,18 @@ enum Verifier {
     /// the first.
     private static func compareJPEGCoefficients(original: URL?, _ result: URL) async throws {
         guard let original else { return try await jpegcmp(nil, result) }
-        let pairs: [(original: Data, result: Data)]?
+        let pairs: [(original: Data, result: Data)]
         do {
-            pairs = try JPEGStructure.imagePairs(Data(contentsOf: original, options: .alwaysMapped),
-                                                 Data(contentsOf: result, options: .alwaysMapped))
+            pairs = try JPEGLayout.imagePairs(Data(contentsOf: original, options: .alwaysMapped),
+                                              Data(contentsOf: result, options: .alwaysMapped))
         } catch is FormatError {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
-        guard let pairs else { return try await jpegcmp(original, result) }
         let folder = result.deletingLastPathComponent()
         try await withThrowingTaskGroup(of: Void.self) { group in
             // The first image: jpegcmp reads it from the whole files.
             group.addTask { try await jpegcmp(original, result) }
-            for pair in pairs.dropFirst() {
+            for pair in pairs {
                 group.addTask {
                     let a = folder.appending(path: "image-\(UUID().uuidString).jpg"), b = folder.appending(path: "image-\(UUID().uuidString).jpg")
                     defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }

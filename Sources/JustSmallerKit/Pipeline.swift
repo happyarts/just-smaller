@@ -42,9 +42,9 @@ struct FileFacts: Sendable {
     var isLosslessWebP = false
     /// WebP with EXIF or XMP chunks.
     var hasWebPMetadata = false
-    /// JPEG with more images indexed after the first (gain map, depth,
-    /// stereo), which `JPEGStructure.images` can take apart.
-    var hasSecondaryImage = false
+    /// JPEG that is more than one image, or has bytes after it
+    /// (`JPEGLayout.isPlain` false): changed part by part.
+    var jpegHasParts = false
     var isAnimated = false
     var bitsPerComponent = 8
     /// SVG in UTF-16.
@@ -71,9 +71,9 @@ enum Pipeline {
             // jpeg-scan rewrites the entropy coding (Huffman tables, progressive
             // scans) without touching the DCT coefficients: lossless. It keeps
             // whatever markers are left; filtering is done by our own filter.
-            // A JPEG that holds several images gets both image by image, and
-            // no lossy re-encode.
-            if facts.hasSecondaryImage {
+            // A JPEG with more than one image, or bytes after it, gets both
+            // part by part (`JPEGLayout`), and no lossy re-encode.
+            if facts.jpegHasParts {
                 return [[jpegImagesMetadata(s.metadata, orientation: facts.orientation)], [jpegImagesScan(effort: s.effort)]]
             }
             var stages: [[Candidate]] = []
@@ -247,38 +247,31 @@ enum Pipeline {
         }
     }
 
-    /// A JPEG that holds several images (HDR gain map, depth and mattes,
-    /// stereo), taken apart into its images, each changed on its own (in
-    /// parallel) and joined again with the multi-picture index rewritten.
-    /// `change` gets an image and its number and returns it changed or as it
-    /// was. Where the first image's XMP lists the lengths of the others
-    /// (Google's container), only the first changes. What lies between and
-    /// after the images (leftover bytes from cameras, unknown data) stays as
-    /// it is, or goes with `droppingGaps`: it could hold anything.
-    private static func changeEachImage(of input: URL, to output: URL, droppingGaps: Bool = false,
+    /// A JPEG taken apart along its `JPEGLayout`: each image that may change
+    /// is changed on its own (in parallel), and all are joined again, the
+    /// multi-picture index rewritten. `change` gets an image and its number
+    /// and returns it changed or as it was. The bytes between and after the
+    /// images stay, or go where the layout's rules let them at `level`.
+    private static func changeEachImage(of input: URL, to output: URL, level: MetadataHandling,
                                         _ change: @escaping @Sendable (_ image: Data, _ n: Int) async throws -> Data) async throws {
         let data = try Data(contentsOf: input, options: .alwaysMapped)
-        guard let ranges = JPEGStructure.images(ByteView(data)) else { throw JPEGMetadataFilter.Malformed() }
-        // The first image starts the file; its header segments are read.
-        let onlyFirst = JPEGStructure.listsLengthsInXMP(ByteView(data))
+        guard let layout = JPEGLayout.read(ByteView(data)), layout.problem == nil else { throw FormatError("JPEG layout") }
         let images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
-            for (n, range) in ranges.enumerated() {
+            for (n, range) in layout.images.enumerated() {
                 let image = data.subdata(in: range)
-                group.addTask { (n, n > 0 && onlyFirst ? image : try await change(image, n)) }
+                group.addTask { (n, layout.mayChange(image: n) ? try await change(image, n) : image) }
             }
-            var images = [Data](repeating: Data(), count: ranges.count)
+            var images = [Data](repeating: Data(), count: layout.images.count)
             for try await (n, image) in group { images[n] = image }
             return images
         }
-        let gaps = JPEGStructure.gaps(ranges, count: data.count).map { droppingGaps && !onlyFirst ? Data() : data.subdata(in: $0) }
-        try JPEGStructure.joined(images, gaps: gaps).write(to: output)
+        try layout.assembled(images, from: data, keepingGaps: layout.keepsGaps(at: level)).write(to: output)
     }
 
-    /// Each image keeps its own orientation. Unknown data between and after
-    /// the images goes like unknown metadata segments, unless everything stays.
+    /// Each image keeps its own orientation.
     static func jpegImagesMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, _ in
-            try await changeEachImage(of: input, to: output, droppingGaps: level != .keep) { image, n in
+            try await changeEachImage(of: input, to: output, level: level) { image, n in
                 try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image))
             }
             try MetadataCheck.verify(original: input, result: output, level: level)
@@ -291,7 +284,8 @@ enum Pipeline {
     static func jpegImagesScan(effort: Effort) -> Candidate {
         let scan = jpegScan(effort: effort)
         return Candidate(name: scan.name) { input, output, work in
-            try await changeEachImage(of: input, to: output) { image, n in
+            // Gaps the metadata step left stay.
+            try await changeEachImage(of: input, to: output, level: .keep) { image, n in
                 let id = UUID().uuidString
                 let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-scan.jpg")
                 defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }

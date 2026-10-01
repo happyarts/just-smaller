@@ -23,7 +23,7 @@ struct HostileInputTests {
         let jpeg = Data([0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF, 0x45, 0x78])
         _ = try? JPEGMetadataFilter.filter(jpeg, level: .removePrivate, orientation: 6)
         _ = JPEGQuality.estimate(Data([0xFF, 0xD8, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x01]))
-        _ = JPEGStructure.hasSecondaryImage(ByteView(jpeg))
+        _ = JPEGLayout.read(ByteView(jpeg))
         let webp = Data(Array("RIFF".utf8) + [0xFF, 0xFF, 0xFF, 0xFF] + Array("WEBPEXIF".utf8) + [0xFF, 0xFF, 0xFF, 0x7F, 0x4D])
         _ = try? WebPMetadataFilter.filter(webp, level: .removePrivate)
         let png = png([PNGChunks.write("IHDR", [UInt8](repeating: 1, count: 13)), Data([0x7F, 0xFF, 0xFF, 0xFF]) + Data("eXIf".utf8)])
@@ -55,10 +55,9 @@ struct HostileInputTests {
             file([]),
         ]
         for data in cases {
-            _ = JPEGStructure.hasSecondaryImage(ByteView(data))
-            _ = JPEGStructure.imageIndex(ByteView(data))
-            #expect(JPEGStructure.images(ByteView(data)) == nil)
-            _ = try? JPEGStructure.joined([data, Data(image)])
+            _ = MultiPictureIndex.read(ByteView(data))
+            #expect(JPEGLayout.read(ByteView(data))?.problem == .unfittingIndex)
+            _ = try? JPEGLayout.joined([data, Data(image)])
         }
         var note: [UInt8] = Array("Apple iOS\0".utf8) + [0, 1] + Array("MM".utf8) + [0xFF, 0xFF]
         note += [0, 33, 0, 10, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF] + [0, 48, 0, 10, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0x00]

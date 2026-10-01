@@ -32,7 +32,7 @@ final class MultiImageJPEGTests {
 
     /// The images of a file, each on its own.
     private func images(_ data: Data) -> [Data] {
-        (JPEGStructure.images(ByteView(data)) ?? []).map { data.subdata(in: $0) }
+        (JPEGLayout.read(ByteView(data))?.images ?? []).map { data.subdata(in: $0) }
     }
 
     /// `image` with a segment inserted right after its SOI.
@@ -61,19 +61,19 @@ final class MultiImageJPEGTests {
 
     @Test func imagesAreFoundAndJoinedAgain() throws {
         let data = try Data(contentsOf: gainMapPhoto("round-trip.jpg"))
-        let ranges = try #require(JPEGStructure.images(ByteView(data)))
+        let ranges = try #require(JPEGLayout.read(ByteView(data))?.images)
         #expect(ranges.count == 2)
         #expect(ranges.first?.lowerBound == 0 && ranges.last?.upperBound == data.count)
         // ImageIO writes the index exactly; joining the same images gives the same file.
-        #expect(try JPEGStructure.joined(images(data)) == data)
+        #expect(try JPEGLayout.joined(images(data)) == data)
 
         // Another size for the first image: the index follows it.
         var parts = images(data)
         parts[0] = inserting(JPEGMarkers.write(0xFE, Array("a comment".utf8)), into: parts[0])
-        let joined = try JPEGStructure.joined(parts)
-        let index = try #require(JPEGStructure.imageIndex(ByteView(joined)))
-        #expect(index == [JPEGStructure.IndexEntry(start: 0, size: parts[0].count),
-                          JPEGStructure.IndexEntry(start: parts[0].count, size: parts[1].count)])
+        let joined = try JPEGLayout.joined(parts)
+        let index = try #require(MultiPictureIndex.read(ByteView(joined)))
+        #expect(index == [MultiPictureIndex.Entry(start: 0, size: parts[0].count),
+                          MultiPictureIndex.Entry(start: parts[0].count, size: parts[1].count)])
         #expect(images(joined).map(\.count) == parts.map(\.count) && images(joined)[1] == parts[1])
     }
 
@@ -85,12 +85,12 @@ final class MultiImageJPEGTests {
         var tiff: [UInt8] = Array("II".utf8) + [42, 0] + le(8) + [1, 0] + [0x02, 0xB0, 7, 0] + le(32) + le(26) + le(0)
         tiff += le(0x2003_0000) + le(999) + le(0) + [1, 0, 0, 0] + le(0) + le(999) + le(999) + [0, 0, 0, 0]
         let first = Data([0xFF, 0xD8]) + JPEGMarkers.write(0xE2, Array("MPF\0".utf8) + tiff) + Data(image.dropFirst(2))
-        let joined = try JPEGStructure.joined([first, Data(image)])
-        #expect(JPEGStructure.imageIndex(ByteView(joined)) == [JPEGStructure.IndexEntry(start: 0, size: first.count),
-                                                               JPEGStructure.IndexEntry(start: first.count, size: image.count)])
-        #expect(JPEGStructure.images(ByteView(joined)) == [0..<first.count, first.count..<joined.count])
+        let joined = try JPEGLayout.joined([first, Data(image)])
+        #expect(MultiPictureIndex.read(ByteView(joined)) == [MultiPictureIndex.Entry(start: 0, size: first.count),
+                                                               MultiPictureIndex.Entry(start: first.count, size: image.count)])
+        #expect(JPEGLayout.read(ByteView(joined))?.images == [0..<first.count, first.count..<joined.count])
         // Attributes and dependent-image entries stay as they were.
-        #expect(JPEGStructure.indexWithoutPositions(ByteView(joined)) == JPEGStructure.indexWithoutPositions(ByteView(first + Data(image))))
+        #expect(MultiPictureIndex.withoutPositions(ByteView(joined)) == MultiPictureIndex.withoutPositions(ByteView(first + Data(image))))
     }
 
     @Test func wrongSizesInTheIndexAreRejected() throws {
@@ -106,7 +106,7 @@ final class MultiImageJPEGTests {
         #expect(throws: VerificationError.self) {
             try StructureCheck.verify(result: result, against: StructureCheck.Reference(original: url, format: .jpeg))
         }
-        var joined = try JPEGStructure.joined(parts)
+        var joined = try JPEGLayout.joined(parts)
         try joined.write(to: result)
         try StructureCheck.verify(result: result, against: StructureCheck.Reference(original: url, format: .jpeg))
 
@@ -128,7 +128,7 @@ final class MultiImageJPEGTests {
         // The gain map carries a location of its own.
         var parts = images(try Data(contentsOf: url))
         parts[1] = inserting(try exifWithLocation(), into: parts[1])
-        try JPEGStructure.joined(parts).write(to: url)
+        try JPEGLayout.joined(parts).write(to: url)
         let before = try Data(contentsOf: url), headroomBefore = headroom(url)
         #expect(props(parts[1])[kCGImagePropertyGPSDictionary] != nil)
 
@@ -171,7 +171,7 @@ final class MultiImageJPEGTests {
             Item:Length="\(parts[1].count)"/></rdf:li></rdf:Seq></Container:Directory></rdf:Description></rdf:RDF></x:xmpmeta>
             """
         parts[0] = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)), into: parts[0])
-        try JPEGStructure.joined(parts).write(to: url)
+        try JPEGLayout.joined(parts).write(to: url)
 
         let original = dir.appending(path: "container-original.jpg")
         try FileManager.default.copyItem(at: url, to: original)
@@ -182,7 +182,7 @@ final class MultiImageJPEGTests {
 
         // The check holds it too: a changed second image is rejected.
         let changed = dir.appending(path: "container-changed.jpg")
-        try JPEGStructure.joined([result[0], inserting(Data([0xFF]), into: result[1])]).write(to: changed)
+        try JPEGLayout.joined([result[0], inserting(Data([0xFF]), into: result[1])]).write(to: changed)
         #expect(throws: VerificationError.self) {
             try StructureCheck.verify(result: changed, against: StructureCheck.Reference(original: original, format: .jpeg))
         }
@@ -192,13 +192,67 @@ final class MultiImageJPEGTests {
     /// that doesn't fit the file: left exactly as it is.
     @Test func motionPhotoIsLeftAlone() async throws {
         let url = gainMapPhoto("motion.jpg")
-        try (try Data(contentsOf: url) + Data("....ftypmp42".utf8) + Data(repeating: 0x42, count: 5000)).write(to: url)
-        let bytes = ByteView(try Data(contentsOf: url))
-        #expect(JPEGStructure.hasSecondaryImage(bytes))
-        #expect(JPEGStructure.holdsVideo(bytes, images: try #require(JPEGStructure.images(bytes))))
+        // An MP4 file starts with its ftyp box: size, type, brand.
+        try (try Data(contentsOf: url) + Data([0, 0, 0, 0x18]) + Data("ftypmp42".utf8) + Data(repeating: 0x42, count: 5000)).write(to: url)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.problem == .video)
         let before = try Data(contentsOf: url)
         guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
         #expect(try Data(contentsOf: url) == before)
+    }
+
+    /// Images that only Google's container lists (Pixel portraits: no
+    /// multi-picture index) can't be taken apart: the file stays as it is.
+    @Test func imagesOnlyTheContainerListsStay() async throws {
+        let parts = images(try Data(contentsOf: gainMapPhoto("pixel.jpg")))
+        // The first image without its index, the container in its XMP, the second after it.
+        let segments = try JPEGMarkers.headers(ByteView(parts[0])).segments
+        let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
+        var first = parts[0].prefix(index.offset) + parts[0].dropFirst(index.end)
+        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            + "<rdf:Description xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"/></rdf:RDF></x:xmpmeta>"
+        first = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)), into: first)
+        let url = dir.appending(path: "portrait.jpg")
+        try (first + parts[1]).write(to: url)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.problem == .unlistedImages)
+        let before = try Data(contentsOf: url)
+        guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
+        #expect(try Data(contentsOf: url) == before)
+    }
+
+    /// A single photo that the container lists alone, with padding after it:
+    /// nothing counts from the end, so it is an ordinary JPEG.
+    @Test func containerWithOnlyThePhotoIsPlain() async throws {
+        let first = images(try Data(contentsOf: gainMapPhoto("alone.jpg")))[0]
+        let segments = try JPEGMarkers.headers(ByteView(first)).segments
+        let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
+        let xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\"><rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            + "<rdf:Description xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"/></rdf:RDF></x:xmpmeta>"
+        let photo = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(xmp.utf8)),
+                              into: first.prefix(index.offset) + first.dropFirst(index.end))
+        let url = dir.appending(path: "alone-padded.jpg")
+        try (photo + Data(count: 300)).write(to: url)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.isPlain == true)
+        settings.metadata = .keep // the container's mark stays
+        guard case .optimized(_, _, let tools, _, _, _) = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(tools.contains("jpeg-scan"))
+    }
+
+    /// Another JPEG after the photo that no index lists, and a photo cut off
+    /// before its end: both stay exactly as they are.
+    @Test func unlistedOrCutOffJPEGsStay() async throws {
+        let parts = images(try Data(contentsOf: gainMapPhoto("unlisted.jpg")))
+        let segments = try JPEGMarkers.headers(ByteView(parts[0])).segments
+        let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
+        let unlisted = dir.appending(path: "appended.jpg"), cut = dir.appending(path: "cut.jpg")
+        try (parts[0].prefix(index.offset) + parts[0].dropFirst(index.end) + parts[1]).write(to: unlisted)
+        try parts[0].prefix(parts[0].count - 200).write(to: cut)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: unlisted)))?.problem == .unlistedImages)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: cut))) == nil)
+        for url in [unlisted, cut] {
+            let before = try Data(contentsOf: url)
+            guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
+            #expect(try Data(contentsOf: url) == before)
+        }
     }
 
     /// Google marks a motion photo in the XMP (1, not 0); Samsung's trailer
@@ -212,11 +266,13 @@ final class MultiImageJPEGTests {
                     + "<rdf:Description xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\" \(xmp)/></rdf:RDF></x:xmpmeta>"
                 first = inserting(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + Array(packet.utf8)), into: first)
             }
-            return ByteView(try JPEGStructure.joined([first, parts[1]], gaps: [Data(), Data(trailer.utf8)]))
+            return ByteView(try JPEGLayout.joined([first, parts[1]], gaps: [Data(), Data(trailer.utf8)]))
         }
-        func video(_ b: ByteView) throws -> Bool { JPEGStructure.holdsVideo(b, images: try #require(JPEGStructure.images(b))) }
-        #expect(try video(file(xmp: "GCamera:MotionPhoto=\"1\"")))
-        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"0\"")))
+        func video(_ b: ByteView) throws -> Bool { try #require(JPEGLayout.read(b)).problem == .video }
+        #expect(try video(file(xmp: "GCamera:MotionPhoto=\"1\"", trailer: "video")))
+        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"0\"", trailer: "video")))
+        // The mark without anything after the images: an editor dropped the video.
+        #expect(try !video(file(xmp: "GCamera:MotionPhoto=\"1\"")))
         #expect(try video(file(xmp: nil, trailer: "...video...MotionPhoto_Data")))
         #expect(try !video(file(xmp: nil, trailer: "camera buffer")))
     }
@@ -225,20 +281,18 @@ final class MultiImageJPEGTests {
     @Test func changedOrKeptLeftoversAreCaught() throws {
         let url = gainMapPhoto("leftover-check.jpg")
         let parts = images(try Data(contentsOf: url))
-        try JPEGStructure.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: url)
+        try JPEGLayout.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: url)
         let result = dir.appending(path: "leftover-result.jpg")
         let reference = StructureCheck.Reference(original: url, format: .jpeg)
-        try JPEGStructure.joined(parts, gaps: [Data("leftovex".utf8), Data()]).write(to: result)
+        try JPEGLayout.joined(parts, gaps: [Data("leftovex".utf8), Data()]).write(to: result)
         #expect(throws: VerificationError.self) { try StructureCheck.verify(result: result, against: reference) }
-        try JPEGStructure.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: result)
+        try JPEGLayout.joined(parts, gaps: [Data("leftover".utf8), Data()]).write(to: result)
         try StructureCheck.verify(result: result, against: reference)
-        try MetadataCheck.verify(original: url, result: result, level: .keep)
-        // Filtered images: only the leftover bytes make the difference.
-        let filtered = try parts.map { try JPEGMetadataFilter.filter($0, level: .removeAll, orientation: 1) }
-        try JPEGStructure.joined(filtered, gaps: [Data("leftover".utf8), Data()]).write(to: result)
-        #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removeAll) }
-        try JPEGStructure.joined(filtered).write(to: result)
-        try MetadataCheck.verify(original: url, result: result, level: .removeAll)
+        // Below "keep everything" they may only go.
+        let removing = StructureCheck.Reference(original: url, format: .jpeg, level: .removeAll)
+        #expect(throws: VerificationError.self) { try StructureCheck.verify(result: result, against: removing) }
+        try JPEGLayout.joined(parts).write(to: result)
+        try StructureCheck.verify(result: result, against: removing)
     }
 
     /// Cameras leave leftover bytes between and after the images. Everything
@@ -249,16 +303,14 @@ final class MultiImageJPEGTests {
         let url = gainMapPhoto("leftovers-\(level.rawValue).jpg")
         let parts = images(try Data(contentsOf: url))
         let gaps = [Data((0..<340).map { UInt8($0 % 251) }), Data("camera buffer".utf8)]
-        try JPEGStructure.joined(parts, gaps: gaps).write(to: url)
+        try JPEGLayout.joined(parts, gaps: gaps).write(to: url)
         let bytes = ByteView(try Data(contentsOf: url))
-        let ranges = try #require(JPEGStructure.images(bytes))
-        #expect(!JPEGStructure.holdsVideo(bytes, images: ranges))
+        #expect(try #require(JPEGLayout.read(bytes)).problem == nil)
 
         settings.metadata = level
         guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
         let data = try Data(contentsOf: url)
-        let after = try #require(JPEGStructure.images(ByteView(data)))
-        let kept = JPEGStructure.gaps(after, count: data.count).map { data.subdata(in: $0) }
+        let kept = try #require(JPEGLayout.read(ByteView(data))).gaps.map { data.subdata(in: $0) }
         #expect(kept == (level == .keep ? gaps : [Data(), Data()]))
     }
 
@@ -281,7 +333,7 @@ final class MultiImageJPEGTests {
         let xmp = try #require(segments.first { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .xmp })
         parts[1] = parts[1].prefix(xmp.offset) + parts[1].dropFirst(xmp.end)
         let result = dir.appending(path: "bare-result.jpg")
-        try JPEGStructure.joined(parts).write(to: result)
+        try JPEGLayout.joined(parts).write(to: result)
         await #expect(throws: VerificationError.self) {
             try await Verifier.verify(original: url, result: result, format: .jpeg, pixelsMustMatch: true)
         }
@@ -299,7 +351,7 @@ final class MultiImageJPEGTests {
         #expect(CGImageDestinationFinalize(dest))
         parts[1] = try Data(contentsOf: other)
         let result = dir.appending(path: "result.jpg")
-        try JPEGStructure.joined(parts).write(to: result)
+        try JPEGLayout.joined(parts).write(to: result)
         await #expect(throws: VerificationError.self) {
             try await Verifier.verify(original: url, result: result, format: .jpeg, pixelsMustMatch: true)
         }
@@ -310,10 +362,10 @@ final class MultiImageJPEGTests {
         let url = gainMapPhoto("private.jpg")
         var parts = images(try Data(contentsOf: url))
         parts[1] = inserting(try exifWithLocation(), into: parts[1])
-        try JPEGStructure.joined(parts).write(to: url)
+        try JPEGLayout.joined(parts).write(to: url)
         let result = dir.appending(path: "leaky.jpg")
         parts[0] = try JPEGMetadataFilter.filter(parts[0], level: .removePrivate, orientation: 1)
-        try JPEGStructure.joined(parts).write(to: result)
+        try JPEGLayout.joined(parts).write(to: result)
         #expect(throws: VerificationError.self) { try MetadataCheck.verify(original: url, result: result, level: .removePrivate) }
     }
 

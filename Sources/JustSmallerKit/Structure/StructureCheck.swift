@@ -23,14 +23,15 @@ enum StructureCheck {
         }
         fileprivate let summary: Summary
 
-        init(original: URL, format: ImageFormat) {
+        /// `level`: the metadata level the result was made for (what may go).
+        init(original: URL, format: ImageFormat, level: MetadataHandling = .keep) {
             guard let data = try? Data(contentsOf: original, options: .alwaysMapped) else {
                 summary = .none
                 return
             }
             let a = ByteView(data)
             switch format {
-            case .jpeg: summary = .jpeg(JPEGCheck.Reference(a))
+            case .jpeg: summary = .jpeg(JPEGCheck.Reference(a, level: level))
             case .png: summary = .png(PNGCheck.Reference(a))
             case .webp: summary = .webp(WebPCheck.Reference(a))
             case .heic: summary = .heif(HEIFCheck.Reference(a))

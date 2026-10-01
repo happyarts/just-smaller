@@ -108,6 +108,17 @@ enum JPEGMarkers {
         }
     }
 
+    /// Where the JPEG that starts at `start` ends: after its EOI.
+    static func imageEnd(from start: Int, in b: ByteView) throws -> Int {
+        guard try b.be(start, 2) == 0xFFD8 else { throw FormatError("no SOI") }
+        var i = start + 2
+        while true {
+            let s = try segment(at: i, in: b)
+            if s.marker == 0xD9 { return s.end }
+            i = s.marker == 0xDA ? entropyData(from: s.end, in: b).end : s.end
+        }
+    }
+
     /// Entropy-coded data from `start`: where the marker after it begins
     /// (the view's end when none follows), how many restart markers are on
     /// the way, and whether they count 0–7 in turn.
