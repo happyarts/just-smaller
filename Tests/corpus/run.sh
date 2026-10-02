@@ -7,10 +7,12 @@
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
 # the same, and files named broken-* or unchanged-* must be left byte-for-byte
-# alone. --private runs your own photos in Testkorpus/private (a folder or a
-# link to one; never in a repository) the same way. Result
-# sizes are compared with the last baseline so that a compression regression
-# shows up even when everything is still lossless.
+# alone. Google's XMP in the JPEGs is read a second time by an independent
+# reader (google-xmp.py) and must read the same. --private runs your own
+# photos in Testkorpus/private (a folder or a link to one; never in a
+# repository) the same way. Result sizes are compared with the last baseline
+# so that a compression regression shows up even when everything is still
+# lossless.
 #
 # Works on a copy; replaced originals are deleted (--no-trash), never moved to
 # the Trash, and no settings are read or written.
@@ -56,7 +58,8 @@ STATUS=0
 "$CLI" --tools "$TOOLS" --no-trash --json "$@" "$WORK/run" > "$WORK/results.jsonl" || STATUS=$?
 ELAPSED=$(( $(date +%s) - START ))
 
-python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" <<'PY'
+RESULT=0
+python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" <<'PY' || RESULT=$?
 import json, os, re, subprocess, sys, collections
 work, imgcmp, jpegcmp, base_path, update, elapsed, status, root = sys.argv[1:]
 orig, run = os.path.join(work, "orig"), os.path.join(work, "run")
@@ -194,3 +197,14 @@ if update == "yes":
 print("RESULT:", "PASS" if not fails else f"{len(fails)} FAILURE(S)")
 sys.exit(1 if fails else 0)
 PY
+
+# Google's XMP in the originals, read a second time by an independent reader
+# (google-xmp.py) and compared with the engine's.
+if JUST_SMALLER_SECOND_OPINION="$WORK/orig" "$ROOT/Tools/test.sh" -q --filter GoogleXMPSecondOpinion > "$WORK/second-opinion.log" 2>&1; then
+	echo "Google XMP, second opinion: same"
+else
+	grep -E "Expectation failed|error" "$WORK/second-opinion.log" | head -20
+	echo "Google XMP, second opinion: DIFFERENT"
+	echo "RESULT: FAILURE (the corpus check above passed, the second opinion did not)"; RESULT=1
+fi
+exit $RESULT

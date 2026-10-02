@@ -9,7 +9,8 @@ import Testing
 ///
 /// Runs on a folder of real images, off by default. Seconds: two files per
 /// format (by size, the middle one and one from the upper quarter: real
-/// photos with metadata, not edge cases), 40 rounds each. Before a release, every file with 200 rounds:
+/// photos with metadata, not edge cases) and two JPEGs with Google's
+/// container in their XMP, 40 rounds each. Before a release, every file with 200 rounds:
 ///     JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz
 ///     JUST_SMALLER_FUZZ=../Testkorpus JUST_SMALLER_FUZZ_ALL=1 Tools/test.sh --filter CorpusFuzz
 /// JUST_SMALLER_FUZZ_ROUNDS sets the rounds.
@@ -36,10 +37,18 @@ struct CorpusFuzzTests {
         let found = all.sorted { $0.path < $1.path }.compactMap { url in ImageFormat.detect(at: url).map { (url, $0) } }
         guard !everything else { return found }
         func size(_ url: URL) -> Int { (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0 }
-        return Dictionary(grouping: found, by: \.1).values.flatMap { files -> [(URL, ImageFormat)] in
+        let sample = Dictionary(grouping: found, by: \.1).values.flatMap { files -> [(URL, ImageFormat)] in
             let bySize = files.sorted { size($0.0) < size($1.0) }
             return Set([bySize.count / 2, bySize.count * 3 / 4]).sorted().map { bySize[$0] }
-        }.sorted { $0.0.path < $1.0.path }
+        }
+        // The container sits in the first segments: the first 64 KB tell.
+        let container = Data(GoogleXMP.container[0].utf8)
+        let google = found.filter { url, format in
+            guard format == .jpeg, let handle = try? FileHandle(forReadingFrom: url) else { return false }
+            defer { try? handle.close() }
+            return (try? handle.read(upToCount: 65_536))?.range(of: container) != nil
+        }.prefix(2)
+        return Array(Set((sample + google).map(\.0.path))).sorted().compactMap { path in found.first { $0.0.path == path } }
     }
 
     /// A few bytes changed, inserted, removed or repeated — or, for `header`,
@@ -80,6 +89,7 @@ struct CorpusFuzzTests {
         switch format {
         case .jpeg:
             _ = MultiPictureIndex.read(ByteView(data))
+            if let headers = try? JPEGMarkers.headers(ByteView(data)).segments { _ = GoogleXMP.read(headers) }
             if let layout = JPEGLayout.read(ByteView(data)) { _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, keepingGaps: true) }
             _ = JPEGQuality.estimate(data)
         case .webp:
@@ -111,8 +121,10 @@ struct CorpusFuzzTests {
         }
     }
 
-    /// The EXIF and IPTC blocks of the JPEGs, damaged on their own: deeper
-    /// into those readers than damage to the whole file gets.
+    /// The EXIF, IPTC and XMP blocks of the JPEGs, damaged on their own:
+    /// deeper into those readers than damage to the whole file gets. XMP
+    /// goes through Google's reader (with the file's other segments, so a
+    /// damaged extended part is put together with the rest) and the filter.
     @Test func metadataReadersSurviveDamagedBlocks() throws {
         var random = Random(state: 0xE71F)
         for (url, format) in try files() where format == .jpeg {
@@ -120,6 +132,13 @@ struct CorpusFuzzTests {
             for h in headers {
                 let payload = [UInt8](h.payload.bytes)
                 let part = JPEGMarkers.part(h.marker, payload: payload)
+                // The main XMP and the first extended part (with the others, so it is put together).
+                if part == .xmp || part == .extendedXMP {
+                    if part == .xmp || h.offset == headers.first(where: { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .extendedXMP })?.offset {
+                        xmp(h, in: headers, &random)
+                    }
+                    continue
+                }
                 guard part == .exif || part == .photoshop else { continue }
                 let header = part == .exif ? JPEGMarkers.exifHeader.count : JPEGMarkers.photoshopHeader.count
                 let block = Array(payload.dropFirst(header))
@@ -132,6 +151,29 @@ struct CorpusFuzzTests {
                     _ = try? part == .exif ? PayloadCheck.tiff(ByteView(m)) : PayloadCheck.photoshopResources(ByteView(m))
                 }
             }
+        }
+    }
+
+    /// The XMP segment `segment` of a file with `headers`, damaged, among
+    /// the others unchanged.
+    private func xmp(_ segment: JPEGMarkers.Segment, in headers: [JPEGMarkers.Segment], _ random: inout Random) {
+        let payload = [UInt8](segment.payload.bytes)
+        for _ in 0..<rounds {
+            let m = mutate(payload, &random)
+            guard m.count <= 0xFFFF - 2 else { continue }
+            try? Data(m).write(to: last)
+            autoreleasepool { exerciseXMP(m, segment, headers) }
+        }
+    }
+
+    /// `m` in place of `segment`, through Google's reader and the XMP filter.
+    private func exerciseXMP(_ m: [UInt8], _ segment: JPEGMarkers.Segment, _ headers: [JPEGMarkers.Segment]) {
+        var file = Data([0xFF, 0xD8])
+        for h in headers { file += h.offset == segment.offset ? JPEGMarkers.write(segment.marker, m) : h.whole.bytes }
+        file += Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+        if let damaged = try? JPEGMarkers.headers(ByteView(file)).segments { _ = GoogleXMP.read(damaged) }
+        if m.starts(with: JPEGMarkers.xmpHeader) {
+            _ = XMPFilter.filter(Array(m.dropFirst(JPEGMarkers.xmpHeader.count)), level: .removePrivate)
         }
     }
 

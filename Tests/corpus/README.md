@@ -12,6 +12,7 @@ Tests/corpus/run.sh --quick         # ~80 files, seconds — after every change
 Tests/corpus/run.sh --full          # ~700 files, 1 GB, four minutes — before a release or a tool update
 Tests/corpus/run.sh --private       # your own photos in Testkorpus/private, if you have that folder
 Tests/corpus/run.sh --quick -- --effort maximum   # pass options to just-smaller
+Tests/corpus/bench.sh ../Testkorpus/full/real-photo-jpeg   # time one job; --cli to compare with another build
 ```
 
 `run.sh --update-baseline` records the result sizes; later runs report any file
@@ -28,6 +29,9 @@ everything is still lossless.
 - colour profile and EXIF orientation survive metadata stripping
 - SVGs render the same (Quick Look thumbnail, ≤ 0.1 % antialiasing pixels)
 - `broken-*` files are left byte-for-byte alone
+- Google's XMP in the JPEGs (container directory, motion photo mark) reads the
+  same in the engine and in an independent second reader (`google-xmp.py`,
+  Python and expat)
 
 The run works on a copy, deletes replaced originals instead of using the Trash,
 and never touches any settings.

@@ -10,6 +10,9 @@
 - `Tests/corpus/run.sh --quick|--full` checks every result on the local test
   corpus in `../Testkorpus` (never commit images). Run it before commits that
   touch the engine or a tool; `--update-baseline` after intended size changes.
+  It also compares Google's XMP with a second reader (`google-xmp.py`).
+  `Tests/corpus/bench.sh <folder>` times one job (`--cli` for another build):
+  a change on the hot path must not slow plain files down.
 - The promise: never damage an image, never change the format. Every result
   is verified (pixels / DCT coefficients / SVG rendering) or thrown away.
 - Only MIT/BSD/Apache tools; no GPL.

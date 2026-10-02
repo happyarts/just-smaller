@@ -57,8 +57,12 @@ struct GoogleXMP: Equatable, Sendable {
         }
         var result = GoogleXMP()
         for packet in packets {
-            let reader = Reader()
-            guard XML.parse(document(packet), delegate: reader, namespaces: true), !reader.failed else { return nil }
+            // The parser's strings go with each packet, not when the caller's pool drains.
+            let reader: Reader? = autoreleasepool {
+                let reader = Reader()
+                return XML.parse(document(packet), delegate: reader, namespaces: true) && !reader.failed ? reader : nil
+            }
+            guard let reader else { return nil }
             result.directories += reader.directories
             result.marksMotionPhoto = result.marksMotionPhoto || reader.marksMotionPhoto
         }
