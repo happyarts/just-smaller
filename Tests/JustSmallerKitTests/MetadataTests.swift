@@ -156,6 +156,50 @@ final class MetadataTests {
         #expect(!filtered.contains("uuid:") && filtered.contains("rdf:about=\"\"") && filtered.contains("Rating"))
     }
 
+    /// The packet as readers see it: junk after the trailer and closing zero
+    /// bytes left out. A packet with no trailer is filtered too, not dropped
+    /// as unreadable.
+    @Test func xmpPacketWithoutTrailerIsFiltered() throws {
+        let body = """
+            <x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\
+            <rdf:Description xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:exif="http://ns.adobe.com/exif/1.0/" \
+            exif:GPSLatitude="53,33.0N"><dc:creator><rdf:Seq><rdf:li>Jane Doe</rdf:li></rdf:Seq></dc:creator>\
+            </rdf:Description></rdf:RDF></x:xmpmeta>
+            """
+        let begin = "<?xpacket begin=\"\u{FEFF}\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+        #expect(XML.document(ofPacket: Data((begin + body + "<?xpacket end=\"w\"?>junk\0").utf8)) == Data((begin + body + "<?xpacket end=\"w\"?>").utf8))
+        #expect(XML.document(ofPacket: Data((body + "\0\0").utf8)) == Data(body.utf8))
+        let filtered = String(decoding: try #require(XMPFilter.filter(Array((begin + body + "\0").utf8), level: .removePrivate)), as: UTF8.self)
+        #expect(filtered.contains("Jane Doe") && !filtered.contains("GPS"))
+    }
+
+    /// The directories the JPEG layout relies on stay at every level:
+    /// Google's container and Dynamic Depth's, inside its device — but not
+    /// the device's pose, which may be a location.
+    @Test func googleDirectoriesStay() throws {
+        let depth = """
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
+            xmlns:Item="\(GoogleXMP.item[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/">\
+            <Device:Pose rdf:parseType="Resource"><Pose:Latitude>53.55</Pose:Latitude></Device:Pose>\
+            <Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime></rdf:value></rdf:li>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
+            <Item:Length>42</Item:Length></rdf:value></rdf:li></rdf:Seq></Container:Directory></Device:Container></rdf:Description>
+            """
+        for description in [GoogleXMPSamples.directory(gainMapLength: 1531, videoLength: 99), depth] {
+            let packet = Array(GoogleXMPSamples.packet(description).utf8)
+            let before = try #require(GoogleXMP.read(GoogleXMPSamples.headers(description)))
+            #expect(before.listsMoreThanThePhoto)
+            for level in [MetadataHandling.removePrivate, .copyrightOnly, .removeAll] {
+                let filtered = try #require(XMPFilter.filter(packet, level: level), "\(level)")
+                let segment = JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + filtered)
+                let file = Data([0xFF, 0xD8]) + segment + Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+                #expect(GoogleXMP.read(try JPEGMarkers.headers(ByteView(file)).segments) == before, "\(level)")
+                #expect(!String(decoding: filtered, as: UTF8.self).contains("Latitude"), "\(level)")
+            }
+        }
+    }
+
     @Test func xmpIsFilteredByNamespaceAndWrittenCompactly() throws {
         let packet = Array("""
             <?xpacket begin="\u{FEFF}" id="W5M0MpCehiHzreSzNTczkc9d"?>

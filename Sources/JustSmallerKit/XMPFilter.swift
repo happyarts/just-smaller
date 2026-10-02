@@ -80,10 +80,7 @@ enum XMPFilter {
     }
 
     private static func parse(_ packet: [UInt8]) -> XMLDocument? {
-        // The packet may carry trailing NULs or junk after the trailer.
-        var bytes = packet
-        if let end = bytes.lastRange(of: Array("?>".utf8)) { bytes = Array(bytes[..<end.upperBound]) }
-        return try? XMLDocument(data: Data(bytes), options: [.nodePreserveCDATA, .nodeLoadExternalEntitiesNever])
+        try? XMLDocument(data: XML.document(ofPacket: Data(packet)), options: [.nodePreserveCDATA, .nodeLoadExternalEntitiesNever])
     }
 
     private static func findRDF(_ element: XMLElement?) -> XMLElement? {

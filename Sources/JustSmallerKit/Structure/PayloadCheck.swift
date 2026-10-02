@@ -30,7 +30,9 @@ enum PayloadCheck {
     }
 
     /// Well-formed XML. A closing zero byte (ImageIO writes one after XMP)
-    /// isn't part of the document.
+    /// isn't part of the document. Stricter than the readers
+    /// (`XML.document(ofPacket:)`): junk after the trailer is what others
+    /// leave, never what a step may write.
     static func xml(_ x: ByteView) throws {
         var text = x.bytes
         while text.last == 0 { text.removeLast() }

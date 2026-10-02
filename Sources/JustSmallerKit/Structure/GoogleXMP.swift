@@ -60,23 +60,13 @@ struct GoogleXMP: Equatable, Sendable {
             // The parser's strings go with each packet, not when the caller's pool drains.
             let reader: Reader? = autoreleasepool {
                 let reader = Reader()
-                return XML.parse(document(packet), delegate: reader, namespaces: true) && !reader.failed ? reader : nil
+                return XML.parse(XML.document(ofPacket: packet), delegate: reader, namespaces: true) && !reader.failed ? reader : nil
             }
             guard let reader else { return nil }
             result.directories += reader.directories
             result.marksMotionPhoto = result.marksMotionPhoto || reader.marksMotionPhoto
         }
         return result
-    }
-
-    /// The packet without what may follow its end: junk after the xpacket
-    /// trailer, closing zero bytes.
-    private static func document(_ packet: Data) -> Data {
-        if let end = packet.range(of: Data("<?xpacket end=".utf8), options: .backwards),
-           let close = packet.range(of: Data("?>".utf8), in: end.upperBound..<packet.endIndex) {
-            return packet[..<close.upperBound]
-        }
-        return packet[..<(packet.lastIndex { $0 != 0 }.map { $0 + 1 } ?? packet.startIndex)]
     }
 
     /// Walks one packet. Inside a container's Directory each outermost

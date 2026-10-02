@@ -44,7 +44,8 @@ enum MetadataPolicy {
         static let googleContainer = "http://ns.google.com/photos/1.0/container/"
         static let googleItem = "http://ns.google.com/photos/1.0/container/item/"
         static let googleCamera = "http://ns.google.com/photos/1.0/camera/"
-        /// Dynamic Depth (Pixel portraits).
+        /// Dynamic Depth (Pixel portraits): the device holds the container.
+        static let depthDevice = "http://ns.google.com/photos/dd/1.0/device/"
         static let depthContainer = "http://ns.google.com/photos/dd/1.0/container/"
         static let depthItem = "http://ns.google.com/photos/dd/1.0/item/"
         static let dc = "http://purl.org/dc/elements/1.1/"
@@ -77,6 +78,8 @@ enum MetadataPolicy {
         NS.googleContainer,
         NS.googleItem,
         NS.googleCamera,
+        NS.depthContainer,
+        NS.depthItem,
         "http://ns.google.com/photos/1.0/panorama/",
         "http://ns.google.com/photos/1.0/depthmap/",
         "http://ns.google.com/photos/1.0/image/",
@@ -87,6 +90,9 @@ enum MetadataPolicy {
     static func group(xmpNamespace ns: String, name: String) -> Group? {
         if displayNamespaces.contains(ns) { return .display }
         switch ns {
+        case NS.depthDevice:
+            // Only where the file's images lie; the device's pose may be a location.
+            return name == "Container" ? .display : nil
         case NS.tiff:
             switch name {
             // The orientation, and how the image data is laid out (HEIC

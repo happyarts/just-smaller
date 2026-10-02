@@ -21,6 +21,17 @@ enum XML {
         return lock.withLock { parser.parse() }
     }
 
+    /// An XMP packet as an XML document: up to the end of its trailer
+    /// (<?xpacket end=…?>), junk after it left out; without a trailer,
+    /// without closing zero bytes (ImageIO writes one after XMP).
+    static func document(ofPacket packet: Data) -> Data {
+        if let end = packet.range(of: Data("<?xpacket end=".utf8), options: .backwards),
+           let close = packet.range(of: Data("?>".utf8), in: end.upperBound..<packet.endIndex) {
+            return packet[..<close.upperBound]
+        }
+        return packet[..<(packet.lastIndex { $0 != 0 }.map { $0 + 1 } ?? packet.startIndex)]
+    }
+
     /// The root element's name, nil if the document isn't well-formed.
     static func rootElement(_ data: Data) -> String? {
         let finder = RootFinder()
