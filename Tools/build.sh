@@ -43,6 +43,16 @@ done
 # ECT: only libpng; its mozjpeg is for JPEG, which ect-png leaves out.
 [ -n "$(ls -A "$ROOT/Vendor/ect/src/libpng" 2>/dev/null)" ] ||
 	git -C "$ROOT/Vendor/ect" submodule update --init --depth 1 src/libpng
+# A checkout that isn't at the commit this repository pins (a pull moved the
+# pin) would build the old version or fail on a lockfile. It is left as it
+# is — it may hold local work — so stop and say how to update it.
+stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
+	Vendor/jpegli Vendor/ect | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+if [ -n "$stale" ]; then
+	echo "Not at the pinned commit: $stale" >&2
+	echo "Update with: git submodule update --depth 1 $stale" >&2
+	exit 1
+fi
 
 log() { printf '%s\n' "$*" >&2; }
 run() { # name, command… — output goes to build/work/NAME.log, shown on failure

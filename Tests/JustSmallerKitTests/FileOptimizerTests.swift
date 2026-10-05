@@ -405,6 +405,22 @@ final class FileOptimizerTests {
         #expect(result.contains("id=\"icon-first\"") && result.contains("id=\"icon-second\""))
     }
 
+    /// A uniform scale may move into a stroked path and its stroke width; a
+    /// non-uniform one would distort the stroke, so it stays a transform.
+    @Test func svgStrokedPathsTakeOnlyUniformScales() async throws {
+        let url = dir.appending(path: "stroked.svg")
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200">
+              <g transform="scale(2)"><path d="M10 10h40v40H10z" fill="none" stroke="#000" stroke-width="1"/></g>
+              <g transform="scale(2 1)"><path d="M10 100h40v40H10z" fill="none" stroke="#000" stroke-width="1"/></g>
+            </svg>
+            """.utf8).write(to: url)
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
+        let result = try String(contentsOf: url, encoding: .utf8)
+        #expect(result.contains("stroke-width=\"2\""))
+        #expect(result.contains("scale(2 1)"))
+    }
+
     /// Ids an editor numbered itself go, even when referenced (then shortened);
     /// named ids and the role stay.
     @Test(arguments: [false, true])
