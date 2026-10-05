@@ -42,7 +42,7 @@
       "cleanupNumericValues": {
         "floatPrecision": 5,
         "defaultPx": true,
-        "convertToPx": true
+        "convertToPx": false
       },
       "convertColors": {
         "method": null

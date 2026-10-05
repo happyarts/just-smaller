@@ -405,6 +405,29 @@ final class FileOptimizerTests {
         #expect(result.contains("id=\"icon-first\"") && result.contains("id=\"icon-second\""))
     }
 
+    /// A document's size in mm stays in mm: print, plotter and cutter software
+    /// may read px at another resolution than 96 dpi.
+    @Test(arguments: [false, true])
+    func svgKeepsAbsoluteUnits(lossy: Bool) async throws {
+        var settings = self.settings
+        settings.lossy = lossy
+        settings.outputLossy = .replace
+        let url = dir.appending(path: "a4-\(lossy).svg")
+        try Data("""
+            <?xml version="1.0" encoding="UTF-8"?>
+            <svg xmlns="http://www.w3.org/2000/svg" width="210mm" height="297mm" viewBox="0 0 210 297">
+              <rect x="10" y="10" width="50" height="30" fill="none" stroke="#000" stroke-width="0.5mm"/>
+              <circle cx="105" cy="150" r="40" fill="#09c" stroke="#000" style="stroke-width:0.3mm"/>
+            </svg>
+            """.utf8).write(to: url)
+        guard case .optimized = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) else {
+            Issue.record("not optimized"); return
+        }
+        let result = try String(contentsOf: url, encoding: .utf8)
+        #expect(result.contains("width=\"210mm\"") && result.contains("height=\"297mm\""))
+        #expect(result.contains("stroke-width=\".5mm\"") && result.contains("stroke-width:.3mm"))
+    }
+
     /// A uniform scale may move into a stroked path and its stroke width; a
     /// non-uniform one would distort the stroke, so it stays a transform.
     @Test func svgStrokedPathsTakeOnlyUniformScales() async throws {

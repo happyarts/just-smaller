@@ -2,6 +2,11 @@
   "optimise": {
     "extends": "default",
     "jobs": {
+      "cleanupNumericValues": {
+        "floatPrecision": 3,
+        "defaultPx": true,
+        "convertToPx": false
+      },
       "cleanupIds": {
         "remove": false,
         "minify": false,
