@@ -142,6 +142,12 @@ def photoprism(path=""):
 
 jobs += [("photoprism", n, u) for top in ("Formats/", "Brands/") for n, u in photoprism(top)]
 
+# Immich's test assets (AGPL-3.0; used here only as local test input, never
+# redistributed): motion photos that are Ultra HDR as well (Pixel 6 Pro, 8a)
+# and Samsung's in JPEG and HEIC.
+jobs += [("immich", n, f"{GH}/immich-app/test-assets/main/formats/motionphoto/{n}")
+         for n in ("pixel-6-pro.jpg", "pixel-8a.jpg", "samsung-one-ui-5.jpg", "samsung-one-ui-6.jpg", "samsung-one-ui-6.heic")]
+
 def commons_multi_images(category, limit):
     """Phone photos on Commons that hold more than one image (HDR gain map,
     depth, motion photo): the first 128 KB of each file are read — gently,

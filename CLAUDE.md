@@ -24,7 +24,10 @@
   through the readers in `Sources/JustSmallerKit/Structure/` (ByteView,
   JPEGMarkers, PNGChunks/RIFFChunks, TIFFReader, IPTCRecords, BMFFBoxes,
   GoogleXMP, Zlib with a size limit) — filters, detection and the structure
-  check alike.
+  check alike. Never decide anything by searching a whole file's bytes for a
+  signature: any short sequence turns up by chance in compressed image data
+  and Base64. Look where the format keeps it (a segment, chunk or box); a
+  byte search may only pre-select what a real reader then confirms.
   Writers live next to their readers and follow the specification.
 - A JPEG's parts (several images, leftover bytes, motion photo video) and
   what may change in them: only `JPEGLayout`. The optimizer, the pipeline

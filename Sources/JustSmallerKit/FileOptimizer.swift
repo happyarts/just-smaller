@@ -257,10 +257,30 @@ public struct FileOptimizer: Sendable {
             let text = SVGText.encoding(data) == .utf8 ? data : SVGText.utf8(data) ?? data
             return text.range(of: Data("c2pa:manifest".utf8)) != nil
         }
-        // A JPEG holds it in APP11 segments; elsewhere in the file the two
-        // words turn up by chance (Base64 depth data in Pixel portraits).
-        if format == .jpeg, let headers = try? JPEGMarkers.headers(ByteView(data)).segments {
-            return headers.contains { $0.marker == 0xEB && holdsManifest($0.payload.bytes) }
+        // Looked for where each format keeps it, never in image data: there
+        // (and in Base64 depth data) the two words turn up by chance. A file
+        // its reader can't take apart is searched whole.
+        let b = ByteView(data)
+        switch format {
+        case .jpeg:
+            if let headers = try? JPEGMarkers.headers(b).segments {
+                return headers.contains { $0.marker == 0xEB && holdsManifest($0.payload.bytes) } // APP11
+            }
+        case .png:
+            if let chunks = try? PNGChunks.read(b, strict: false) {
+                return chunks.contains { !["IDAT", "fdAT"].contains($0.type) && holdsManifest($0.data.bytes) } // caBX
+            }
+        case .webp:
+            let riff = RIFFChunks.webp(b)
+            if riff.complete {
+                return riff.chunks.contains { !["VP8 ", "VP8L", "ALPH", "ANMF"].contains($0.type) && holdsManifest($0.data.bytes) } // C2PA
+            }
+        case .heic:
+            if let boxes = try? BMFFBoxes.boxes(b, topLevel: true) {
+                return boxes.contains { $0.type != "mdat" && holdsManifest($0.payload.bytes) } // a uuid box
+            }
+        case .gif, .svg:
+            break
         }
         return holdsManifest(data)
     }

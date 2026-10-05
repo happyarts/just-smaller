@@ -57,7 +57,7 @@ enum MetadataCheck {
     private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {
         if level != .keep, hasMakerNotesToRemove(result, level: level) { throw leftover }
         let merged = fields(original), after = fields(result)
-        var sources: [[Key: Value]]?
+        var sources: [[Key: Value]]?, regions: [Data]?
         for (key, value) in after {
             if level != .keep, removes(key, at: level) {
                 throw leftover
@@ -65,7 +65,9 @@ enum MetadataCheck {
             // The IIM digest is updated together with the IIM block.
             if merged[key] == value || key.name == "LegacyIPTCDigest" { continue }
             if sources == nil { sources = [fields(original, excludingXMP: true), xmpFields(original)] }
-            guard sources?.contains(where: { $0[key] == value }) == true || standsIn(original, value) else {
+            if sources?.contains(where: { $0[key] == value }) == true { continue }
+            if regions == nil { regions = metadataRegions(original) }
+            guard standsIn(regions ?? [], value) else {
                 throw VerificationError(reason: String(localized: "metadata changed", bundle: .module))
             }
         }
@@ -128,19 +130,42 @@ enum MetadataCheck {
         return fields(metadata)
     }
 
-    /// Every piece of text in the value occurs in the original's bytes. Short
-    /// texts ("art", "1") occur by chance in any file, so they must stand
-    /// there as a whole field: an IIM dataset (length first), an XML element
-    /// or an attribute value.
-    private static func standsIn(_ data: Data, _ value: Value) -> Bool {
+    /// Every piece of text in the value occurs in the original's metadata
+    /// (`regions`). Short texts ("art", "1") occur by chance in any data, so
+    /// they must stand there as a whole field: an IIM dataset (length
+    /// first), an XML element or an attribute value.
+    private static func standsIn(_ regions: [Data], _ value: Value) -> Bool {
         guard !value.leaves.isEmpty else { return false }
         return value.leaves.allSatisfy { leaf in
             let bytes = Array(leaf.utf8)
-            if bytes.count >= 8 { return data.range(of: Data(bytes)) != nil }
-            let forms: [[UInt8]] = [[0x00, UInt8(bytes.count)] + bytes, Array(">".utf8) + bytes + Array("<".utf8),
-                                    Array("\"".utf8) + bytes + Array("\"".utf8)]
-            return forms.contains { data.range(of: Data($0)) != nil }
+            let forms: [[UInt8]] = bytes.count >= 8 ? [bytes]
+                : [[0x00, UInt8(bytes.count)] + bytes, Array(">".utf8) + bytes + Array("<".utf8), Array("\"".utf8) + bytes + Array("\"".utf8)]
+            return forms.contains { form in regions.contains { $0.range(of: Data(form)) != nil } }
         }
+    }
+
+    /// Where a file keeps its metadata — never its image data, where any text
+    /// turns up by chance: a JPEG's APPn and COM segments (of every image), a
+    /// PNG's or WebP's chunks but the image data, a HEIF's boxes but mdat and
+    /// its EXIF and XMP items. A file its reader can't take apart counts whole.
+    static func metadataRegions(_ data: Data) -> [Data] {
+        let b = ByteView(data)
+        if b.has([0xFF, 0xD8, 0xFF]) {
+            let images = JPEGLayout.read(b)?.images ?? [0..<data.count]
+            let segments = images.compactMap { try? JPEGMarkers.headers(b.view($0)).segments }
+            if segments.count == images.count {
+                return segments.joined().filter { JPEGCheck.isMetadata($0.marker) }.map(\.payload.bytes)
+            }
+        } else if b.has(PNGChunks.signature), let chunks = try? PNGChunks.read(b, strict: false) {
+            return chunks.filter { !["IDAT", "fdAT"].contains($0.type) }.map(\.data.bytes)
+        } else if b.has("RIFF"), b.has("WEBP", at: 8), case let riff = RIFFChunks.webp(b), riff.complete {
+            return riff.chunks.filter { !["VP8 ", "VP8L", "ALPH", "ANMF"].contains($0.type) }.map(\.data.bytes)
+        } else if b.has("ftyp", at: 4), let file = try? HEIFItems.File(b), let boxes = try? BMFFBoxes.boxes(b, topLevel: true) {
+            // EXIF and XMP items mostly lie in mdat: those, and the boxes but mdat.
+            let items = (file.items("Exif") + file.metadataXMP).compactMap { id in (try? file.range(of: id)).flatMap { try? b.view($0) } }
+            return boxes.filter { $0.type != "mdat" }.map(\.payload.bytes) + items.map(\.bytes)
+        }
+        return [data]
     }
 
     /// The file's XMP packet alone.

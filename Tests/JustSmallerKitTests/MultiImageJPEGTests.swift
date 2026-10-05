@@ -352,6 +352,10 @@ final class MultiImageJPEGTests {
         try parts[0].prefix(parts[0].count - 200).write(to: cut)
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: unlisted)))?.problem == .unlistedImages)
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: cut))) == nil)
+        // The three bytes of an SOI by chance, with no JPEG behind them: leftover bytes.
+        let chance = parts[0].prefix(index.offset) + parts[0].dropFirst(index.end) + Data("camera".utf8)
+            + Data([0xFF, 0xD8, 0xFF, 0x00, 0x00]) + Data("buffer".utf8)
+        #expect(JPEGLayout.read(ByteView(chance))?.problem == nil)
         for url in [unlisted, cut] {
             let before = try Data(contentsOf: url)
             guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
@@ -382,6 +386,9 @@ final class MultiImageJPEGTests {
         #expect(try video(file(GoogleXMPSamples.directory(gainMapLength: parts[1].count, videoLength: 5), trailer: "video")))
         #expect(try video(file(nil, trailer: "...video...MotionPhoto_Data")))
         #expect(try !video(file(nil, trailer: "camera buffer")))
+        // Samsung's trailer ends the file with SEFT; the four bytes elsewhere are chance.
+        #expect(try video(file(nil, trailer: "...SEFH...SEFT")))
+        #expect(try !video(file(nil, trailer: "camera SEFT buffer")))
     }
 
     // MARK: - Google's XMP

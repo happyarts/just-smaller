@@ -346,6 +346,45 @@ final class FileOptimizerTests {
         }
         #expect(FileOptimizer.hasContentCredentials(try file(0xEB, "app11.jpg"), format: .jpeg))
         #expect(!FileOptimizer.hasContentCredentials(try file(0xFE, "comment.jpg"), format: .jpeg))
+
+        // The other containers: in their manifest chunk or box, not in image data.
+        let words = Array("JP".utf8) + [0, 1] + Array("jumbc2pa".utf8)
+        func saved(_ data: Data, _ name: String) throws -> URL { let url = dir.appending(path: name); try data.write(to: url); return url }
+        func png(_ type: String) -> Data {
+            Data(PNGChunks.signature) + PNGChunks.write("IHDR", [UInt8](repeating: 1, count: 13)) + PNGChunks.write(type, words) + PNGChunks.write("IEND", [])
+        }
+        #expect(FileOptimizer.hasContentCredentials(try saved(png("caBX"), "c.png"), format: .png))
+        #expect(!FileOptimizer.hasContentCredentials(try saved(png("IDAT"), "i.png"), format: .png))
+        func webp(_ type: String) -> Data { RIFFChunks.write(form: "WEBP", [("VP8X", Data(count: 10)), (type, Data(words))]) }
+        #expect(FileOptimizer.hasContentCredentials(try saved(webp("C2PA"), "c.webp"), format: .webp))
+        #expect(!FileOptimizer.hasContentCredentials(try saved(webp("VP8L"), "i.webp"), format: .webp))
+        func heif(_ type: String) -> Data {
+            func box(_ type: String, _ payload: [UInt8]) -> Data {
+                Data(withUnsafeBytes(of: UInt32(8 + payload.count).bigEndian, Array.init) + Array(type.utf8) + payload)
+            }
+            return box("ftyp", Array("heic".utf8) + [0, 0, 0, 0]) + box(type, words)
+        }
+        #expect(FileOptimizer.hasContentCredentials(try saved(heif("jumb"), "c.heic"), format: .heic))
+        #expect(!FileOptimizer.hasContentCredentials(try saved(heif("mdat"), "i.heic"), format: .heic))
+    }
+
+    /// The metadata check accepts a value as the original's only where the
+    /// original keeps metadata: text in image data is chance.
+    @Test func metadataRegionsLeaveImageDataOut() throws {
+        let jpeg = Data([0xFF, 0xD8]) + JPEGMarkers.write(0xFE, Array("in a comment".utf8))
+            + Data([0xFF, 0xDA, 0x00, 0x02]) + Data("in the image".utf8) + Data([0xFF, 0xD9])
+        let png = Data(PNGChunks.signature) + PNGChunks.write("IHDR", [UInt8](repeating: 1, count: 13))
+            + PNGChunks.write("tEXt", Array("in a comment".utf8)) + PNGChunks.write("IDAT", Array("in the image".utf8)) + PNGChunks.write("IEND", [])
+        for data in [jpeg, png] {
+            let regions = MetadataCheck.metadataRegions(data)
+            #expect(regions.contains { $0.range(of: Data("in a comment".utf8)) != nil })
+            #expect(!regions.contains { $0.range(of: Data("in the image".utf8)) != nil })
+        }
+        // HEIC keeps EXIF as an item in mdat, next to the image data: the item counts, the image doesn't.
+        let heic = try Data(contentsOf: TestImages.gainMapPhoto(at: dir.appending(path: "regions.heic"), type: .heic))
+        let regions = MetadataCheck.metadataRegions(heic)
+        #expect(regions.contains { $0.range(of: Data("Jane Doe".utf8)) != nil })
+        #expect(regions.reduce(0) { $0 + $1.count } < heic.count / 2)
     }
 
     /// Bytes after the image (cameras leave buffer leftovers there) stay

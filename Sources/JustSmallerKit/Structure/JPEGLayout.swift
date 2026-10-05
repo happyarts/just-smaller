@@ -120,9 +120,8 @@ struct JPEGLayout: Sendable {
            xmp?.marksMotionPhoto == true || xmp?.listsVideo == true || holdsVideo(trailer) { return .video }
         if !indexFits { return .unfittingIndex }
         guard let xmp else { return .unreadableXMP }
-        let beforeVideo = trailer.bytes.dropLast(video ?? 0)
-        if index == .none, somethingAfter,
-           xmp.listsImagesAfterThePhoto || beforeVideo.range(of: Data([0xFF, 0xD8, 0xFF])) != nil { return .unlistedImages }
+        let beforeVideo = ByteView(trailer.bytes.dropLast(video ?? 0))
+        if index == .none, somethingAfter, xmp.listsImagesAfterThePhoto || startsJPEG(beforeVideo) { return .unlistedImages }
         return nil
     }
 
@@ -253,11 +252,23 @@ struct JPEGLayout: Sendable {
         }
     }
 
+    /// Another JPEG starts somewhere in `b`: an SOI whose headers read up to
+    /// a scan. Three bytes alone turn up by chance in any data.
+    private static func startsJPEG(_ b: ByteView) -> Bool {
+        var from = 0
+        while let at = b.index(of: 0xFF, from: from) {
+            if b.has([0xFF, 0xD8, 0xFF], at: at), let rest = try? b.view(from: at), (try? JPEGMarkers.headers(rest)) != nil { return true }
+            from = at + 1
+        }
+        return false
+    }
+
     /// A video after the images: Samsung's trailer with its signatures, or
     /// an MP4 file's ftyp box, recognised by the box size before the type.
     private static func holdsVideo(_ trailer: ByteView) -> Bool {
         let t = trailer.bytes
-        if ["MotionPhoto_Data", "SEFT"].contains(where: { t.range(of: Data($0.utf8)) != nil }) { return true }
+        // Samsung's trailer ends the file with "SEFT"; four bytes elsewhere are chance.
+        if t.range(of: Data("MotionPhoto_Data".utf8)) != nil || t.suffix(4) == Data("SEFT".utf8) { return true }
         var from = t.startIndex
         while let box = t.range(of: Data("ftyp".utf8), in: from..<t.endIndex) {
             if let size = try? trailer.be(box.lowerBound - t.startIndex - 4, 4), (16...256).contains(size), size % 4 == 0 { return true }
