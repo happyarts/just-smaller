@@ -44,18 +44,27 @@ enum JPEGMetadataFilter {
             : IPTCFilter.filter(photoshop.flatMap { payloads[$0].dropFirst(JPEGMarkers.photoshopHeader.count) }, level: level)
 
         // XMP, with the extended part (JPEG's way around the 64 KB limit)
-        // merged in when it fits into one segment afterwards.
+        // merged in when it fits into one segment afterwards; otherwise
+        // filtered on its own and written as extended parts again (Dynamic
+        // Depth keeps its container directory there).
         let xmpIndex = headers.indices.first { isApp($0, 0xE1, JPEGMarkers.xmpHeader) }
-        var xmp: [UInt8]?
+        var xmp: [UInt8]?, extendedSegments: [Data] = []
         if let xmpIndex {
             let packet = Array(payloads[xmpIndex].dropFirst(JPEGMarkers.xmpHeader.count))
             let extended = JPEGMarkers.extendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, JPEGMarkers.extendedXMPHeader) }
                 .map { Data($0.element.dropFirst(JPEGMarkers.extendedXMPHeader.count)) }, for: Data(packet)).map(Array.init)
             xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest)
             if let merged = xmp, merged.count + JPEGMarkers.xmpHeader.count > maxPayload {
-                xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
+                if let rest = extended.flatMap({ XMPFilter.filter($0, level: level, wrapped: false) }) {
+                    let written = JPEGMarkers.extendedXMPSegments(rest)
+                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest, extendedGUID: written.guid)
+                    extendedSegments = written.segments
+                } else {
+                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
+                }
             }
             if let packet = xmp, packet.count + JPEGMarkers.xmpHeader.count > maxPayload { xmp = nil }
+            if xmp == nil { extendedSegments = [] } // nothing would name them
         }
 
         let exifIndex = headers.indices.first { isApp($0, 0xE1, JPEGMarkers.exifHeader) }
@@ -77,6 +86,7 @@ enum JPEGMetadataFilter {
             switch s.marker {
             case 0xE1 where k == xmpIndex:
                 if let xmp { out.append(JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + xmp)) }
+                for segment in extendedSegments { out.append(segment) }
             case 0xED where k == photoshop.first:
                 if let resources = iptc.resources {
                     for chunk in resources.chunked(maxPayload - JPEGMarkers.photoshopHeader.count) {

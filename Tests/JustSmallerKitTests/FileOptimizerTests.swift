@@ -333,6 +333,21 @@ final class FileOptimizerTests {
         }
     }
 
+    /// Content Credentials in a JPEG live in APP11 (JUMBF): those files stay
+    /// as they are. The same two words elsewhere — a comment, Base64 depth
+    /// data in a Pixel portrait — are chance, not a manifest.
+    @Test func contentCredentialsAreFoundInAPP11Only() throws {
+        let plain = try Data(contentsOf: write(image(), "c2pa.jpg", type: .jpeg))
+        func file(_ marker: UInt8, _ name: String) throws -> URL {
+            let segment = JPEGMarkers.write(marker, Array("JP".utf8) + [0, 1, 0, 0, 0, 1] + Array("jumbc2pa".utf8))
+            let url = dir.appending(path: name)
+            try (plain.prefix(2) + segment + plain.dropFirst(2)).write(to: url)
+            return url
+        }
+        #expect(FileOptimizer.hasContentCredentials(try file(0xEB, "app11.jpg"), format: .jpeg))
+        #expect(!FileOptimizer.hasContentCredentials(try file(0xFE, "comment.jpg"), format: .jpeg))
+    }
+
     /// Bytes after the image (cameras leave buffer leftovers there) stay
     /// where they were when everything is kept, and go otherwise — like
     /// unknown metadata. A multi-picture index that lists nothing leaves the

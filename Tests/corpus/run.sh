@@ -7,12 +7,14 @@
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
 # the same, and files named broken-* or unchanged-* must be left byte-for-byte
-# alone; after a motion photo's photo nothing may change. Google's XMP in
-# the JPEGs is read a second time by an independent reader (google-xmp.py)
-# and must read the same. --private runs your own photos in
-# Testkorpus/private (a folder or a link to one; never in a repository) the
-# same way. Result sizes are compared with the last baseline so that a
-# compression regression shows up even when everything is still lossless.
+# alone; after a photo whose Google container lists more (images, a video)
+# nothing may change, and Ultra HDR results must decode in Google's
+# libultrahdr as before (if built: build-ultrahdr.sh). Google's XMP in the
+# JPEGs is read a second time by an independent reader (google-xmp.py) and
+# must read the same. --private runs your own photos in Testkorpus/private (a
+# folder or a link to one; never in a repository) the same way. Result sizes
+# are compared with the last baseline so that a compression regression shows
+# up even when everything is still lossless.
 #
 # Works on a copy; replaced originals are deleted (--no-trash), never moved to
 # the Trash, and no settings are read or written.
@@ -60,8 +62,12 @@ ELAPSED=$(( $(date +%s) - START ))
 
 RESULT=0
 python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" <<'PY' || RESULT=$?
-import json, os, re, subprocess, sys, collections
+import json, os, re, subprocess, sys, collections, importlib.util, hashlib
 work, imgcmp, jpegcmp, base_path, update, elapsed, status, root = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("google_xmp", os.path.join(root, "Tests/corpus/google-xmp.py"))
+google_xmp = importlib.util.module_from_spec(spec); spec.loader.exec_module(google_xmp)
+# Built by Tests/corpus/build-ultrahdr.sh next to the comparator, if at all.
+ultrahdr, uhdr_checked = os.path.join(os.path.dirname(imgcmp), "ultrahdr_app"), 0
 orig, run = os.path.join(work, "orig"), os.path.join(work, "run")
 raster = {".png", ".gif", ".webp", ".heic"}
 baseline = {}
@@ -166,14 +172,29 @@ for n in names:
             open(pa, "wb").write(x); open(pb, "wb").write(y)
             r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
             if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
-        # A motion photo's video (an MP4 after the photo) is found counted
-        # from the end of the file: everything after the photo must stay.
+        # What Google's container lists after the photo (images, a motion
+        # photo's video) is found from the end of the file or of the photo:
+        # everything after the photo must stay. Read with the second reader.
         whole_a, whole_b = open(a, "rb").read(), open(b, "rb").read()
         tail = whole_a[len(ia[0]):] if ia else b""
-        marked = any(m in whole_a[:len(ia[0])] for m in (b"MotionPhoto", b"MicroVideo")) if ia else False
-        if marked and b"ftyp" in tail and not whole_b.endswith(tail): fails.append((n, "VIDEO OR WHAT FOLLOWS THE PHOTO CHANGED"))
+        said = google_xmp.opinion(a)
+        listed = said["listed"] is not None or (said["motion"] and b"ftyp" in tail)
+        if listed and not whole_b.endswith(tail): fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
         r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
         if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
+        # Google's own decoder, a second opinion on HDR gain maps: an Ultra
+        # HDR original and its result decode to the same HDR picture.
+        if os.path.exists(ultrahdr) and subprocess.run([ultrahdr, "-m", "1", "-P", "-j", a], capture_output=True).returncode == 0:
+            uhdr_checked += 1
+            def decoded(path):
+                out = os.path.join(work, "uhdr.raw")
+                ok = subprocess.run([ultrahdr, "-m", "1", "-j", path, "-o", "2", "-z", out], capture_output=True, cwd=work).returncode == 0
+                digest = hashlib.sha256(open(out, "rb").read()).hexdigest() if ok and os.path.exists(out) else None
+                if os.path.exists(out): os.remove(out)
+                return digest
+            # An original it can't decode (Skia's edge cases) gives no opinion.
+            if (da := decoded(a)) is None: uhdr_checked -= 1
+            elif decoded(b) != da: fails.append((n, "ULTRA HDR DECODES DIFFERENTLY (libultrahdr)"))
     elif kind in raster:
         r = subprocess.run([imgcmp, a, b], capture_output=True, text=True)
         if r.returncode != 0: fails.append((n, "PIXELS: " + r.stdout.strip()))
@@ -200,6 +221,8 @@ if update == "yes":
     with open(base_path, "w") as f:
         for n in sorted(result): f.write(f"{n}\t{result[n]}\n")
     print(f"baseline written: {base_path}")
+print(f"libultrahdr: {uhdr_checked} Ultra HDR results decoded as before" if os.path.exists(ultrahdr)
+      else "libultrahdr: not built, no second opinion on gain maps (Tests/corpus/build-ultrahdr.sh)")
 print("RESULT:", "PASS" if not fails else f"{len(fails)} FAILURE(S)")
 sys.exit(1 if fails else 0)
 PY

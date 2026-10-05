@@ -22,22 +22,30 @@ enum XMPFilter {
     /// The filtered packet, or nil when nothing is left. `extended` is the
     /// reassembled extended XMP of a JPEG, merged in before filtering. `digest` replaces
     /// photoshop:LegacyIPTCDigest when the IIM block it describes changed.
+    /// `extendedGUID`: the packet names this extended XMP (written on its
+    /// own) in xmpNote:HasExtendedXMP. `wrapped`: with the packet wrapper
+    /// (an extended packet has none).
     /// Unparseable XMP is dropped: better no data than stray data.
     static func filter(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]? = nil,
-                       digest: (old: String, new: String)? = nil) -> [UInt8]? {
+                       digest: (old: String, new: String)? = nil, extendedGUID: String? = nil,
+                       wrapped: Bool = true) -> [UInt8]? {
         // Under the engine's XML lock (see XML). Removed nodes still point
         // into their document, so the documents must outlive them: they are
         // released only after the autorelease pool that holds the nodes.
         XML.lock.withLock {
             var documents: [XMLDocument] = []
-            let result = autoreleasepool { filterLocked(packet, level: level, merging: extended, digest: digest, documents: &documents) }
+            let result = autoreleasepool {
+                filterLocked(packet, level: level, merging: extended, digest: digest, extendedGUID: extendedGUID,
+                             wrapped: wrapped, documents: &documents)
+            }
             withExtendedLifetime(documents) {}
             return result
         }
     }
 
     private static func filterLocked(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]?,
-                                     digest: (old: String, new: String)?, documents: inout [XMLDocument]) -> [UInt8]? {
+                                     digest: (old: String, new: String)?, extendedGUID: String?, wrapped: Bool,
+                                     documents: inout [XMLDocument]) -> [UInt8]? {
         guard let document = parse(packet), let rdf = findRDF(document.rootElement()) else { return nil }
         documents.append(document)
         if let extended, let extra = parse(extended), let extraRDF = findRDF(extra.rootElement()) {
@@ -70,13 +78,26 @@ enum XMPFilter {
                 description.detach()
             }
         }
+        if let extendedGUID {
+            let description = (rdf.children ?? []).compactMap { $0 as? XMLElement }.first ?? {
+                let new = XMLElement(name: "rdf:Description", uri: MetadataPolicy.NS.rdf)
+                new.addAttribute(XMLNode.attribute(withName: "rdf:about", uri: MetadataPolicy.NS.rdf, stringValue: "") as! XMLNode)
+                rdf.addChild(new)
+                return new
+            }()
+            if description.namespace(forPrefix: "xmpNote")?.stringValue != MetadataPolicy.NS.xmpNote {
+                description.addNamespace(XMLNode.namespace(withName: "xmpNote", stringValue: MetadataPolicy.NS.xmpNote) as! XMLNode)
+            }
+            description.addAttribute(XMLNode.attribute(withName: "xmpNote:HasExtendedXMP", uri: MetadataPolicy.NS.xmpNote,
+                                                       stringValue: extendedGUID) as! XMLNode)
+        }
         guard (rdf.children ?? []).contains(where: { $0.kind == .element }), let root = document.rootElement() else { return nil }
         // The toolkit's name and version: which software wrote the packet.
         root.removeAttribute(forName: "x:xmptk")
         compact(root)
         pruneNamespaces(root)
         let body = root.xmlString(options: [.nodeCompactEmptyElement])
-        return Array((packetHeader + body + packetTrailer).utf8)
+        return Array((wrapped ? packetHeader + body + packetTrailer : body).utf8)
     }
 
     private static func parse(_ packet: [UInt8]) -> XMLDocument? {

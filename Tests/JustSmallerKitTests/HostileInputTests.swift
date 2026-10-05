@@ -94,6 +94,8 @@ struct HostileInputTests {
         }
         for length in ["-1", "12a", "", "0x10", "99999999999999999999999"] {
             #expect(GoogleXMP.read(try GoogleXMPSamples.headers(directory(length))) == nil, "\(length)")
+            let offset = "<rdf:Description xmlns:GCamera=\"\(GoogleXMP.camera)\" GCamera:MicroVideoOffset=\"\(length)\"/>"
+            #expect(GoogleXMP.read(try GoogleXMPSamples.headers(offset)) == nil, "offset \(length)")
         }
         let ns = "xmlns:Container=\"\(GoogleXMP.container[0])\" xmlns:Item=\"\(GoogleXMP.item[0])\""
         let laughs = "<!DOCTYPE x [<!ENTITY a \"aaaaaaaaaa\">" + (1...9).map { n in

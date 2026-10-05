@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// The one way the engine walks a JPEG's markers: the metadata filter, the
@@ -69,6 +70,23 @@ enum JPEGMarkers {
             whole.replaceSubrange(range, with: part.data.bytes)
         }
         return whole
+    }
+
+    /// The writer: an extended XMP packet (a serialization without packet
+    /// wrapper) as APP1 segments, each as long as a segment may be — its
+    /// GUID, the packet's full length, where the part goes, the part. The
+    /// GUID is the MD5 digest of the packet in hex, as Adobe's XMP
+    /// specification (part 3) defines it; the main packet names it in
+    /// xmpNote:HasExtendedXMP.
+    static func extendedXMPSegments(_ packet: [UInt8]) -> (guid: String, segments: [Data]) {
+        let guid = Insecure.MD5.hash(data: packet).map { String(format: "%02X", $0) }.joined()
+        let part = 0xFFFF - 2 - extendedXMPHeader.count - 40
+        func be(_ v: Int) -> [UInt8] { (0..<4).map { UInt8(truncatingIfNeeded: v >> (24 - 8 * $0)) } }
+        let segments = stride(from: 0, to: packet.count, by: part).map { offset in
+            write(0xE1, extendedXMPHeader + Array(guid.utf8) + be(packet.count) + be(offset)
+                + packet[offset..<min(packet.count, offset + part)])
+        }
+        return (guid, segments)
     }
 
     /// The quantization tables of a DQT payload: id and 64 steps (8 or 16

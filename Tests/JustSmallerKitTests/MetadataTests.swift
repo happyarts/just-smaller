@@ -173,6 +173,65 @@ final class MetadataTests {
         #expect(filtered.contains("Jane Doe") && !filtered.contains("GPS"))
     }
 
+    /// Google's camera namespace says how to show the photo (motion photo
+    /// marks stay at every level); its HDR+ maker note and shot log are the
+    /// camera's own records and go like EXIF's MakerNote.
+    @Test func googleCameraRecordsGo() throws {
+        let packet = Array(GoogleXMPSamples.packet("""
+            <rdf:Description xmlns:GCamera="\(GoogleXMP.camera)" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" \
+            GCamera:hdrp_makernote="SERSUALvZDVt" GCamera:HdrPlusMakernote="SERSUALvZDVv" GCamera:shot_log_data="SERSUALvZDVu"/>
+            """).utf8)
+        for level in [MetadataHandling.removePrivate, .removeAll] {
+            let filtered = String(decoding: try #require(XMPFilter.filter(packet, level: level)), as: UTF8.self)
+            #expect(filtered.contains("MotionPhoto=\"1\"") && filtered.contains("MotionPhotoVersion"), "\(level)")
+            #expect(!filtered.contains("akernote") && !filtered.contains("shot_log_data"), "\(level)")
+        }
+    }
+
+    /// Extended XMP too large to merge into the main packet (Dynamic Depth
+    /// in Pixel portraits) is filtered on its own and written as extended
+    /// parts again, named by its new GUID: the directory stays, the device's
+    /// pose goes. Extended XMP with nothing left is dropped, and so is the
+    /// main packet's note of it.
+    @Test func largeExtendedXMPIsFilteredAndWrittenAgain() throws {
+        let filler = String(repeating: "QUJD", count: 30_000) // display data, Base64 like GDepth:Data
+        let depth = """
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
+            xmlns:Item="\(GoogleXMP.item[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/" \
+            xmlns:GDepth="http://ns.google.com/photos/1.0/depthmap/" GDepth:Data="\(filler)">\
+            <Device:Pose rdf:parseType="Resource"><Pose:Latitude>53.55</Pose:Latitude></Device:Pose>\
+            <Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime></rdf:value></rdf:li>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
+            <Item:Length>42</Item:Length></rdf:value></rdf:li></rdf:Seq></Container:Directory></Device:Container></rdf:Description>
+            """
+        func file(_ main: String, _ extended: String) throws -> Data {
+            let headers = try GoogleXMPSamples.headers(main, extended: extended)
+            return Data([0xFF, 0xD8]) + headers.reduce(Data()) { $0 + $1.whole.bytes } + Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+        }
+        let original = try file("<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\" dc:format=\"image/jpeg\"/>", depth)
+        let before = try #require(GoogleXMP.read(JPEGMarkers.headers(ByteView(original)).segments))
+        #expect(before.listsMoreThanThePhoto)
+        for level in [MetadataHandling.removePrivate, .removeAll] {
+            let result = try JPEGMetadataFilter.filter(original, level: level, orientation: 1)
+            let segments = try JPEGMarkers.headers(ByteView(result)).segments
+            #expect(GoogleXMP.read(segments) == before, "\(level)")
+            let parts = segments.filter { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .extendedXMP }
+            #expect(parts.count > 1 && !String(decoding: result, as: UTF8.self).contains("Latitude"), "\(level)")
+            // The GUID is the MD5 digest of the packet the parts make up.
+            let main = try #require(segments.first { JPEGMarkers.part($0.marker, payload: $0.payload.bytes) == .xmp })
+            let whole = try #require(JPEGMarkers.extendedXMP(parts.map { $0.payload.bytes.dropFirst(JPEGMarkers.extendedXMPHeader.count) },
+                                                              for: main.payload.bytes))
+            #expect(JPEGMarkers.extendedXMPSegments(Array(whole)).guid == String(decoding: parts[0].payload.bytes.dropFirst(JPEGMarkers.extendedXMPHeader.count).prefix(32), as: UTF8.self))
+        }
+        // Only private data in the extended part: it goes, with its note.
+        let privateOnly = try file("<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\" dc:format=\"image/jpeg\"/>",
+            "<rdf:Description xmlns:xmpMM=\"http://ns.adobe.com/xap/1.0/mm/\" xmpMM:History=\"\(filler)\"/>")
+        let result = try JPEGMetadataFilter.filter(privateOnly, level: .removePrivate, orientation: 1)
+        let text = String(decoding: result, as: UTF8.self)
+        #expect(!text.contains("HasExtendedXMP") && !text.contains(JPEGMarkers.extendedXMPHeader.map { String(UnicodeScalar($0)) }.joined().dropLast()))
+    }
+
     /// The directories the JPEG layout relies on stay at every level:
     /// Google's container and Dynamic Depth's, inside its device — but not
     /// the device's pose, which may be a location.

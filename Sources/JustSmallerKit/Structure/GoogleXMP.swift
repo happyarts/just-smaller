@@ -5,8 +5,10 @@ import Foundation
 /// portraits) lists every item of the file in order — the primary image
 /// first, then gain maps, depth maps or a video — each with its MIME type,
 /// its role (Semantic), its Length and the Padding after it; the items after
-/// the primary image are counted from the end of the file. A motion photo is
-/// marked with GCamera:MotionPhoto or MicroVideo set to 1.
+/// the primary image are counted from the end of the file (Dynamic Depth:
+/// from the end of the photo). A motion photo is marked with
+/// GCamera:MotionPhoto or MicroVideo set to 1; older ones have no directory,
+/// only GCamera:MicroVideoOffset, the video's distance from the end.
 ///
 /// Properties are found as attributes or as elements, by namespace URI,
 /// never by prefix. Reads the main packets and the extended one (Dynamic
@@ -24,6 +26,9 @@ struct GoogleXMP: Equatable, Sendable {
     /// GCamera:MotionPhoto or MicroVideo is 1. Editors that drop the video
     /// often leave the mark.
     var marksMotionPhoto = false
+    /// GCamera:MicroVideoOffset: where an older motion photo's video starts,
+    /// counted from the end of the file.
+    var microVideoOffset: Int?
 
     /// A directory lists items after the primary image.
     var listsMoreThanThePhoto: Bool { directories.contains { $0.count > 1 } }
@@ -32,15 +37,44 @@ struct GoogleXMP: Equatable, Sendable {
     /// A directory lists images (anything but a video) after the primary one.
     var listsImagesAfterThePhoto: Bool { directories.contains { $0.dropFirst().contains { !Self.isVideo($0) } } }
 
-    /// The length of the one video the directories list, when `trailer`
-    /// (the bytes after the images) ends with it: an MP4 file, its ftyp box
-    /// first, exactly that long — counted from the end of the file, as the
-    /// container counts. nil for none, several, or one that isn't there.
+    /// The length of the one video the directories list (or, without one
+    /// there, the MicroVideoOffset gives), when `trailer` (the bytes after
+    /// the images) ends with it: an MP4 file, its ftyp box first, exactly
+    /// that long — counted from the end of the file, as both count. nil for
+    /// none, several, or one that isn't there.
     func video(endingAt trailer: ByteView) -> Int? {
-        let lengths = videos.map(\.length)
+        let listed = videos.map(\.length)
+        let lengths = listed.isEmpty ? microVideoOffset.map { [$0] } ?? [] : listed
         guard lengths.count == 1, let length = lengths.first, length >= 16, length <= trailer.count,
               trailer.has("ftyp", at: trailer.count - length + 4) else { return nil }
         return length
+    }
+
+    /// Where the items after the primary image may lie in `trailer` (the
+    /// bytes after the photo), each with its range there: counted from its
+    /// end (Ultra HDR, motion photos), or one after another from its start
+    /// (Dynamic Depth, whose camera data may follow them). Both, when both
+    /// fit; the layout checks which one the images are really at. Empty
+    /// unless exactly one directory lists more than the photo.
+    func arrangements(in trailer: Int) -> [[(item: Item, range: Range<Int>)]] {
+        let listing = directories.filter { $0.count > 1 }
+        guard listing.count == 1, let primary = listing[0].first else { return [] }
+        let items = Array(listing[0].dropFirst())
+        // Lengths come from the file: anything longer than the bytes there can't fit.
+        guard (items + [primary]).allSatisfy({ $0.length <= trailer && $0.padding <= trailer }) else { return [] }
+        var fromEnd: [(item: Item, range: Range<Int>)]? = [], end = trailer
+        for item in items.reversed() {
+            end -= item.padding + item.length
+            if end < 0 { fromEnd = nil; break }
+            fromEnd?.insert((item, end..<end + item.length), at: 0)
+        }
+        var fromStart: [(item: Item, range: Range<Int>)]? = [], start = primary.padding
+        for item in items {
+            if start + item.length > trailer { fromStart = nil; break }
+            fromStart?.append((item, start..<start + item.length))
+            start += item.length + item.padding
+        }
+        return [fromEnd, fromStart].compactMap { $0 }
     }
 
     private var videos: [Item] { directories.joined().filter(Self.isVideo) }
@@ -81,6 +115,11 @@ struct GoogleXMP: Equatable, Sendable {
             guard let reader else { return nil }
             result.directories += reader.directories
             result.marksMotionPhoto = result.marksMotionPhoto || reader.marksMotionPhoto
+            if let offset = reader.microVideoOffset {
+                // Two packets that disagree say nothing certain.
+                guard result.microVideoOffset == nil || result.microVideoOffset == offset else { return nil }
+                result.microVideoOffset = offset
+            }
         }
         return result
     }
@@ -93,6 +132,7 @@ struct GoogleXMP: Equatable, Sendable {
     private final class Reader: NSObject, XMLParserDelegate {
         var directories: [[Item]] = []
         var marksMotionPhoto = false
+        var microVideoOffset: Int?
         var failed = false
 
         private var prefixes: [String: [String]] = [:]
@@ -154,15 +194,16 @@ struct GoogleXMP: Equatable, Sendable {
 
         private func found(_ ns: String, _ name: String, _ value: String) {
             let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            if ns == GoogleXMP.camera {
-                if ["MotionPhoto", "MicroVideo"].contains(name), value == "1" { marksMotionPhoto = true }
-                return
-            }
-            guard GoogleXMP.item.contains(ns), itemDepth != nil else { return }
             func bytes() -> Int {
                 guard let n = Int(value), n >= 0 else { failed = true; return 0 }
                 return n
             }
+            if ns == GoogleXMP.camera {
+                if ["MotionPhoto", "MicroVideo"].contains(name), value == "1" { marksMotionPhoto = true }
+                if name == "MicroVideoOffset" { microVideoOffset = bytes() }
+                return
+            }
+            guard GoogleXMP.item.contains(ns), itemDepth != nil else { return }
             switch name {
             case "Semantic": item.semantic = value
             case "Mime": item.mime = value

@@ -110,11 +110,12 @@ jobs += [("multi-jpeg", f"{n}.jpg", f"{GH}/google/libultrahdr/main/tests/data/{n
 jobs += [("multi-jpeg", f"pixel-ultrahdr-{n}.jpg", f"{GH}/MishaalRahmanGH/Ultra_HDR_Samples/main/Originals/Ultra_HDR_Samples_Originals_{n}.jpg")
          for n in ("01", "05")]
 jobs += [("multi-jpeg", f"skia-{n}.jpg", f"{GH}/google/skia/main/resources/images/{n}.jpg")
-         for n in ("gainmap_iso21496_1", "gainmap_iso21496_1_adobe_gcontainer")]
+         for n in ("gainmap_iso21496_1", "gainmap_iso21496_1_adobe_gcontainer", "gainmap_gcontainer_only")]
 jobs += [("multi-jpeg", f"pillow-{n}", f"{GH}/python-pillow/Pillow/main/Tests/images/{n}")
          for n in ("fujifilm.mpo", "frozenpond.mpo", "sugarshack.mpo")]
-jobs += [("unchanged", f"unchanged-skia-{n}.jpg", f"{GH}/google/skia/main/resources/images/{n}.jpg")
-         for n in ("gainmap_gcontainer_only",)]
+# Skia's container-only gain map used to stay unchanged; a copy cached under that name would still be built as one.
+stale = os.path.join(CACHE, "unchanged", "unchanged-skia-gainmap_gcontainer_only.jpg")
+if os.path.exists(stale): os.remove(stale)
 jobs += [("unchanged", f"unchanged-pillow-{n}", f"{GH}/python-pillow/Pillow/main/Tests/images/{n}")
          for n in ("ultrahdr.jpg", "sugarshack_bad_mpo_header.jpg", "sugarshack_ifd_offset.mpo", "sugarshack_no_data.mpo",
                    "frame_size.mpo")]

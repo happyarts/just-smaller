@@ -11,7 +11,7 @@ import Testing
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["JUST_SMALLER_SECOND_OPINION"] != nil))
 struct GoogleXMPSecondOpinionTests {
     private struct Opinion: Decodable {
-        let file: String, unreadable: Bool, motion: Bool
+        let file: String, unreadable: Bool, motion: Bool, microVideoOffset: Int?
         /// Per directory, per item: semantic, mime, length, padding.
         let directories: [[[Value]]]
 
@@ -52,6 +52,7 @@ struct GoogleXMPSecondOpinionTests {
             #expect((read == nil) == opinion.unreadable, "\(name): readable")
             guard let read else { continue }
             #expect(read.marksMotionPhoto == opinion.motion, "\(name): motion photo mark")
+            #expect(read.microVideoOffset == opinion.microVideoOffset, "\(name): MicroVideoOffset")
             let ours = read.directories.map { $0.map { [Opinion.Value.text($0.semantic), .text($0.mime), .number($0.length), .number($0.padding)] } }
             #expect(ours == opinion.directories, "\(name): directories")
         }

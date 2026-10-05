@@ -5,7 +5,8 @@ directory (Semantic, Mime, Length, Padding per item) and the motion photo
 mark. One JSON object per file on stdout:
 
     {"file": ..., "unreadable": bool, "directories": [[[semantic, mime, length, padding], ...]],
-     "motion": bool, "after": bytes after the first image, "listed": sum of the items after the primary}
+     "motion": bool, "microVideoOffset": an older motion photo's video offset or null,
+     "after": bytes after the first image, "listed": sum of the items after the primary}
 
 usage: google-xmp.py <jpeg>...
 """
@@ -53,11 +54,14 @@ def document(p):
 
 def read(packet):
     root = ET.fromstring(document(packet))
-    directories, motion = [], False
+    directories, motion, offset = [], False, None
     for el in root.iter():
         for key, value in list(el.attrib.items()) + [(el.tag, el.text or "")]:
             ns, local = name(key)
             if ns == CAMERA and local in ("MotionPhoto", "MicroVideo") and value.strip() == "1": motion = True
+            if ns == CAMERA and local == "MicroVideoOffset":
+                if not re.fullmatch(r"\+?[0-9]+", value.strip()): raise ValueError("offset")
+                offset = int(value.strip())
         ns, local = name(el.tag)
         if ns in CONTAINER and local == "Directory":
             items = []
@@ -79,19 +83,20 @@ def read(packet):
                     items.append(item)
             if not items: raise ValueError("empty directory")
             directories.append(items)
-    return directories, motion
+    return directories, motion, offset
 
 
 def wanted(p):
     return any(ns.encode() in p for ns in CONTAINER + [CAMERA])
 
 
-for path in sys.argv[1:]:
+def opinion(path):
+    """What this reader says about one file (the JSON object above)."""
     b = open(path, "rb").read()
     segs, end = segments(b)
     main = [p[len(XMP):] for m, p in segs if m == 0xE1 and p.startswith(XMP)]
     chunks = [p[len(EXTENDED):] for m, p in segs if m == 0xE1 and p.startswith(EXTENDED)]
-    result = {"file": path, "unreadable": False, "directories": [], "motion": False,
+    result = {"file": path, "unreadable": False, "directories": [], "motion": False, "microVideoOffset": None,
               "after": len(b) - end if end else None, "listed": None}
     try:
         packets = [p for p in main if wanted(p)]
@@ -105,11 +110,19 @@ for path in sys.argv[1:]:
             if sum(len(c) - 40 for c in mine) != total: raise ValueError("extended")
             packets.append(bytes(whole))
         for p in packets:
-            d, motion = read(p)
+            d, motion, offset = read(p)
             result["directories"] += d
             result["motion"] = result["motion"] or motion
+            if offset is not None:
+                if result["microVideoOffset"] not in (None, offset): raise ValueError("offsets differ")
+                result["microVideoOffset"] = offset
     except (ET.ParseError, ValueError):
-        result = {**result, "unreadable": True, "directories": [], "motion": False}
+        result = {**result, "unreadable": True, "directories": [], "motion": False, "microVideoOffset": None}
     lists = [d for d in result["directories"] if len(d) > 1]
     if lists: result["listed"] = sum(i[2] + i[3] for i in lists[0][1:])
-    print(json.dumps(result))
+    return result
+
+
+if __name__ == "__main__":
+    for path in sys.argv[1:]:
+        print(json.dumps(opinion(path)))

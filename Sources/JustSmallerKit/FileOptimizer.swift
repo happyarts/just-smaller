@@ -252,11 +252,17 @@ public struct FileOptimizer: Sendable {
     /// element.
     static func hasContentCredentials(_ url: URL, format: ImageFormat) -> Bool {
         guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return false }
+        func holdsManifest(_ d: Data) -> Bool { d.range(of: Data("jumb".utf8)) != nil && d.range(of: Data("c2pa".utf8)) != nil }
         if format == .svg {
             let text = SVGText.encoding(data) == .utf8 ? data : SVGText.utf8(data) ?? data
             return text.range(of: Data("c2pa:manifest".utf8)) != nil
         }
-        return data.range(of: Data("jumb".utf8)) != nil && data.range(of: Data("c2pa".utf8)) != nil
+        // A JPEG holds it in APP11 segments; elsewhere in the file the two
+        // words turn up by chance (Base64 depth data in Pixel portraits).
+        if format == .jpeg, let headers = try? JPEGMarkers.headers(ByteView(data)).segments {
+            return headers.contains { $0.marker == 0xEB && holdsManifest($0.payload.bytes) }
+        }
+        return holdsManifest(data)
     }
 
     /// Xcode's "compressed PNG" for iOS apps puts a CgBI chunk before IHDR and

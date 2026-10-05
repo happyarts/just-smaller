@@ -77,7 +77,6 @@ enum MetadataPolicy {
         "http://ns.apple.com/semanticSegmentationMatte/1.0/",
         NS.googleContainer,
         NS.googleItem,
-        NS.googleCamera,
         NS.depthContainer,
         NS.depthItem,
         "http://ns.google.com/photos/1.0/panorama/",
@@ -93,6 +92,12 @@ enum MetadataPolicy {
         case NS.depthDevice:
             // Only where the file's images lie; the device's pose may be a location.
             return name == "Container" ? .display : nil
+        case NS.googleCamera:
+            // How to show the photo (motion photo, portrait and panorama
+            // marks) — but not the HDR+ maker note and shot log, the camera's
+            // own records like EXIF's MakerNote.
+            // (hdrp_makernote, HdrPlusMakernote, shot_log_data).
+            return name.lowercased().contains("makernote") || name == "shot_log_data" ? nil : .display
         case NS.tiff:
             switch name {
             // The orientation, and how the image data is laid out (HEIC

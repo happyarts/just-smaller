@@ -29,7 +29,13 @@ enum MetadataCheck {
         do { pairs = try JPEGLayout.imagePairs(a, b) } catch {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
-        for pair in pairs { try verify(pair.original, pair.result, level: level) }
+        for pair in pairs {
+            do { try verify(pair.original, pair.result, level: level) } catch is VerificationError where pair.original == pair.result {
+                // An image that may not change (Google's container counts on it) can't lose what it holds.
+                throw VerificationError(reason: String(localized: "an image that must stay as it is (depth map, gain map) holds metadata this level removes",
+                                                       bundle: .module))
+            }
+        }
         let bytes = ByteView(b)
         // A HEIF can hold XMP ImageIO doesn't show as the image's (a
         // thumbnail's, or one describing no image): it may hold only what
