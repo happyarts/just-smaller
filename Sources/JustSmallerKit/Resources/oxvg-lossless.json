@@ -79,7 +79,7 @@
       "collapseGroups": true,
       "applyTransforms": {
         "transformPrecision": null,
-        "applyTransformsStroked": false
+        "applyTransformsStroked": true
       },
       "convertPathData": {
         "closeSegments": false,
