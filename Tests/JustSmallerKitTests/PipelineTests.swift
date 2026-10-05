@@ -68,20 +68,19 @@ struct PipelineTests {
         #expect(try ids(#"<path id="path5" d="M0 0h1" fill="url(#linearGradient2)"/><a href="https://example.com/"/>"#) == [])
     }
 
-    @Test func preciseSVGConfigurationKeepsDigitsAndTransforms() throws {
+    @Test func svgConfigurationOmitsJobsAndPreservesIDs() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let jobs = try jobsIn(Pipeline.configuration(lossless: true, omitting: ["removeTitle"], precise: true,
+        let jobs = try jobsIn(Pipeline.configuration(lossless: true, omitting: ["removeTitle"],
                                                    preservingIDs: ["logo"], in: dir))
-        #expect(jobs["applyTransforms"] == nil && jobs["removeTitle"] == nil)
-        #expect((jobs["convertTransform"] as? [String: Any])?["transformPrecision"] as? Int == 9)
-        #expect(((jobs["convertPathData"] as? [String: Any])?["tolerance"] as? [String: Any])?["precision"] as? Int == 7)
+        #expect(jobs["removeTitle"] == nil && jobs["applyTransforms"] != nil)
+        // Matrix factors keep enough digits that large drawings don't move.
+        #expect((jobs["convertTransform"] as? [String: Any])?["transformPrecision"] as? Int == 7)
         let ids = try #require(jobs["cleanupIds"] as? [String: Any])
         #expect(ids["remove"] as? Bool == true && ids["minify"] as? Bool == true && ids["preserve"] as? [String] == ["logo"])
         // Without a list every id stays, as bundled.
-        let plain = try jobsIn(Pipeline.configuration(lossless: true, omitting: [], precise: false, preservingIDs: nil, in: dir))
+        let plain = try jobsIn(Pipeline.configuration(lossless: true, omitting: [], preservingIDs: nil, in: dir))
         #expect((plain["cleanupIds"] as? [String: Any])?["remove"] as? Bool == false)
-        #expect(plain["applyTransforms"] != nil)
     }
 
     private func temporaryDirectory() throws -> URL {

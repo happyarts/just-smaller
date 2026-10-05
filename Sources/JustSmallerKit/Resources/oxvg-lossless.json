@@ -101,7 +101,7 @@
         "convertToShorts": true,
         "degPrecision": null,
         "floatPrecision": 5,
-        "transformPrecision": 5,
+        "transformPrecision": 7,
         "matrixToTransform": true,
         "shortRotate": true,
         "removeUseless": true,

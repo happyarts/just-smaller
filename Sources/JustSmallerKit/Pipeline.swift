@@ -102,15 +102,14 @@ enum Pipeline {
             return stages
 
         case .svg:
-            // Lossless keeps the geometry exact to five digits; lossy allows
-            // oxvg's (svgo's) approximations such as curves turned into arcs.
+            // Lossless keeps coordinates to five decimals and transform factors
+            // to seven; lossy allows oxvg's (svgo's) approximations such as
+            // curves turned into arcs.
             // Each runs with the ids as they are and with generated ids
             // shortened or removed (fewer ids can also mean a bigger file:
-            // collapsed groups repeat their attributes on every child);
-            // lossless also more precisely, for drawings where the standard
-            // rounding shows. The smallest valid result wins.
-            let runs: [SVGRun] = s.lossy ? [.idsKept, .generatedIDsRemoved] : [.idsKept, .generatedIDsRemoved, .precise]
-            let optimize = runs.map { oxvg(lossless: !s.lossy, metadata: s.metadata, run: $0) }
+            // collapsed groups repeat their attributes on every child). The
+            // smallest valid result wins.
+            let optimize = [SVGRun.idsKept, .generatedIDsRemoved].map { oxvg(lossless: !s.lossy, metadata: s.metadata, run: $0) }
             if facts.isUncheckableSVG { return [[svgUTF8()]] }
             return facts.isUTF16 ? [[svgUTF8()], optimize] : [optimize]
 
@@ -347,9 +346,6 @@ enum Pipeline {
         case idsKept
         /// Ids SVGIDs finds safe to touch are shortened or removed.
         case generatedIDsRemoved
-        /// As generatedIDsRemoved, with more digits in transforms and paths
-        /// and transforms left where they are.
-        case precise
     }
 
     /// The OXVG optimiser through Tools/svg-tool, which writes to stdout
@@ -359,8 +355,7 @@ enum Pipeline {
             let preserve = run == .idsKept ? nil : SVGIDs.toPreserve(in: input)
             // No id to touch: the run keeping them all gives the same result.
             if run == .generatedIDsRemoved, preserve == nil { return false }
-            let config = try configuration(lossless: lossless, omitting: jobsKeeping(metadata), precise: run == .precise,
-                                           preservingIDs: preserve, in: work)
+            let config = try configuration(lossless: lossless, omitting: jobsKeeping(metadata), preservingIDs: preserve, in: work)
             try await ToolRunner.run("svg-tool", ["optimise", "--config", config.path, input.path], stdout: output, in: work)
             return true
         }
@@ -378,30 +373,22 @@ enum Pipeline {
         }
     }
 
-    /// A copy of the bundled configuration without the given jobs,
-    /// optionally more precise, and with ids shortened and removed except
-    /// `preservingIDs` (nil: every id stays, as bundled).
-    static func configuration(lossless: Bool, omitting metadataJobs: [String], precise: Bool,
-                              preservingIDs: [String]?, in work: URL) throws -> URL {
+    /// A copy of the bundled configuration without the given jobs, and with
+    /// ids shortened and removed except `preservingIDs` (nil: every id
+    /// stays, as bundled).
+    static func configuration(lossless: Bool, omitting metadataJobs: [String], preservingIDs: [String]?,
+                              in work: URL) throws -> URL {
         guard let bundled = Bundle.module.url(forResource: lossless ? "oxvg-lossless" : "oxvg-lossy", withExtension: "json"),
               var root = try JSONSerialization.jsonObject(with: Data(contentsOf: bundled)) as? [String: Any],
               var optimise = root["optimise"] as? [String: Any], var jobs = optimise["jobs"] as? [String: Any]
         else { throw ToolError(tool: "svg-tool", status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module)) }
-        let omit = metadataJobs + (precise ? ["applyTransforms"] : [])
-        for job in omit { jobs[job] = nil }
-        if precise {
-            jobs["convertTransform"] = merged(jobs["convertTransform"], ["transformPrecision": 9, "floatPrecision": 7])
-            if var pathData = jobs["convertPathData"] as? [String: Any] {
-                pathData["tolerance"] = merged(pathData["tolerance"], ["precision": 7])
-                jobs["convertPathData"] = pathData
-            }
-        }
+        for job in metadataJobs { jobs[job] = nil }
         if let preservingIDs {
             jobs["cleanupIds"] = merged(jobs["cleanupIds"], ["remove": true, "minify": true, "preserve": preservingIDs])
         }
         optimise["jobs"] = jobs
         // Jobs from a preset ("extends") are left out by their snake_case name.
-        let snake = omit.map { $0.replacing(/([a-z])([A-Z])/) { "\($0.1)_\($0.2.lowercased())" }.lowercased() }
+        let snake = metadataJobs.map { $0.replacing(/([a-z])([A-Z])/) { "\($0.1)_\($0.2.lowercased())" }.lowercased() }
         optimise["omit"] = (optimise["omit"] as? [String] ?? []) + snake
         root["optimise"] = optimise
         let url = work.appending(path: "oxvg-config-\(UUID().uuidString).json")

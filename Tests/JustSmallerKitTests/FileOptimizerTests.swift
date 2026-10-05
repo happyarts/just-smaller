@@ -448,9 +448,9 @@ final class FileOptimizerTests {
         #expect(result.contains("role=\"img\"")) // screen readers
     }
 
-    /// Rounding a transform that scales a large drawing down shows; the more
-    /// precise run keeps enough digits and is used instead.
-    @Test func svgWhoseRoundingShowsIsOptimizedPrecisely() async throws {
+    /// Rounding a transform that scales a large drawing down would show; the
+    /// lossless configuration keeps enough digits for it.
+    @Test func svgWithScaledDownDrawingKeepsItsTransformDigits() async throws {
         let url = dir.appending(path: "stripes.svg")
         let d = (0..<12).map { "M\(300 + $0 * 8) 20h3v400h-3z" }.joined()
         try Data("""
@@ -459,7 +459,7 @@ final class FileOptimizerTests {
               <path transform="matrix(0.21329178,0,0,0.21342916,-50,2)" d="\(d)" stroke="#000" stroke-width="0.5"/>
             </svg>
             """.utf8).write(to: url)
-        #expect(try await isRejected(url, run: .idsKept), "the standard run must fail, or this test proves nothing")
+        #expect(try await !isRejected(url, run: .idsKept))
         guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
     }
 
