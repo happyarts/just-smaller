@@ -28,7 +28,23 @@ struct GoogleXMP: Equatable, Sendable {
     /// A directory lists items after the primary image.
     var listsMoreThanThePhoto: Bool { directories.contains { $0.count > 1 } }
     /// A directory lists a video.
-    var listsVideo: Bool { directories.joined().contains { $0.mime?.lowercased().hasPrefix("video/") == true } }
+    var listsVideo: Bool { !videos.isEmpty }
+    /// A directory lists images (anything but a video) after the primary one.
+    var listsImagesAfterThePhoto: Bool { directories.contains { $0.dropFirst().contains { !Self.isVideo($0) } } }
+
+    /// The length of the one video the directories list, when `trailer`
+    /// (the bytes after the images) ends with it: an MP4 file, its ftyp box
+    /// first, exactly that long — counted from the end of the file, as the
+    /// container counts. nil for none, several, or one that isn't there.
+    func video(endingAt trailer: ByteView) -> Int? {
+        let lengths = videos.map(\.length)
+        guard lengths.count == 1, let length = lengths.first, length >= 16, length <= trailer.count,
+              trailer.has("ftyp", at: trailer.count - length + 4) else { return nil }
+        return length
+    }
+
+    private var videos: [Item] { directories.joined().filter(Self.isVideo) }
+    private static func isVideo(_ item: Item) -> Bool { item.mime?.lowercased().hasPrefix("video/") == true }
 
     static let container = [MetadataPolicy.NS.googleContainer, MetadataPolicy.NS.depthContainer]
     static let item = [MetadataPolicy.NS.googleItem, MetadataPolicy.NS.depthItem]

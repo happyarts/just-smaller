@@ -391,12 +391,12 @@
         }
       }
     },
-    "Motion photo (a photo with a video) – left unchanged": {
+    "Motion photo whose video can’t be located safely – left unchanged": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Bewegtfoto (Foto mit Video) – unverändert gelassen"
+            "value": "Bewegtfoto, dessen Video sich nicht sicher finden lässt – unverändert gelassen"
           }
         }
       }

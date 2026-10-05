@@ -21,7 +21,7 @@ import Foundation
 /// To come (the users stay as they are): Google's container as a second
 /// `Index` (Pixel portraits, whose images only the XMP lists); each image's
 /// role from the index (gain map, depth, preview) with how far it may
-/// change; a motion photo's video as a part that stays byte for byte.
+/// change.
 struct JPEGLayout: Sendable {
     /// How the images after the first are found.
     enum Index: Sendable {
@@ -30,7 +30,8 @@ struct JPEGLayout: Sendable {
 
     /// Why a file must stay as it is (besides `read` being nil).
     enum Problem: Sendable {
-        /// A motion photo: its video lies after the images.
+        /// A motion photo whose video the container doesn't place (see
+        /// `problem`): it lies after the images, where nothing may move.
         case video
         /// A multi-picture index that doesn't fit the file.
         case unfittingIndex
@@ -52,9 +53,10 @@ struct JPEGLayout: Sendable {
     let problem: Problem?
     /// One image, and nothing but padding after it.
     let isPlain: Bool
-    /// Google's container directory lists the images after the first by
-    /// their lengths, counted from the end of the file: they, and the bytes
-    /// between them, must stay where they are. Only the rules below read it.
+    /// Google's container directory lists what follows the photo (images, a
+    /// motion photo's video) by length, counted from the end of the file:
+    /// all of it, and the bytes between, must stay where it is. Only the
+    /// rules below read it.
     private let countedFromEnd: Bool
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
@@ -87,22 +89,30 @@ struct JPEGLayout: Sendable {
     }
 
     /// Why the file must stay as it is, asked in this order:
-    /// 1. A video after the images: Google's XMP marks a motion photo or
-    ///    lists a video, or the bytes after the images hold one. A mark with
+    /// 1. A video after the images that the container doesn't place: Google's
+    ///    XMP marks a motion photo or lists a video, or the bytes after the
+    ///    images hold one — but the container's directory doesn't list
+    ///    exactly one video that ends the file at its length. One it does
+    ///    place is counted from the end like the images after the first: it
+    ///    stays byte for byte, and only the photo changes. A mark with
     ///    nothing after the images counts for nothing (editors drop the
     ///    video and leave the mark).
     /// 2. A multi-picture index that doesn't fit the file.
     /// 3. Google's XMP that can't be read.
     /// 4. Without a multi-picture index, images after the photo: the
-    ///    container lists some, or another JPEG starts in the bytes after it.
+    ///    container lists some, or another JPEG starts in the bytes after it
+    ///    (outside a placed video, whose data may hold anything).
     /// Asked only where something follows the photo.
     private static func problem(index: Index, indexFits: Bool, xmp: GoogleXMP?, trailer: ByteView) -> Problem? {
         let somethingAfter = !trailer.isPadding
-        if somethingAfter, xmp?.marksMotionPhoto == true || xmp?.listsVideo == true || holdsVideo(trailer) { return .video }
+        let video = xmp?.video(endingAt: trailer)
+        if somethingAfter, video == nil,
+           xmp?.marksMotionPhoto == true || xmp?.listsVideo == true || holdsVideo(trailer) { return .video }
         if !indexFits { return .unfittingIndex }
         guard let xmp else { return .unreadableXMP }
+        let beforeVideo = trailer.bytes.dropLast(video ?? 0)
         if index == .none, somethingAfter,
-           xmp.listsMoreThanThePhoto || trailer.bytes.range(of: Data([0xFF, 0xD8, 0xFF])) != nil { return .unlistedImages }
+           xmp.listsImagesAfterThePhoto || beforeVideo.range(of: Data([0xFF, 0xD8, 0xFF])) != nil { return .unlistedImages }
         return nil
     }
 

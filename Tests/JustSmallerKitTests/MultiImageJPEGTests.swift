@@ -192,6 +192,71 @@ final class MultiImageJPEGTests {
         #expect(try Data(contentsOf: url) == before)
     }
 
+    /// A motion photo as Pixel and Samsung write it: the photo, camera data,
+    /// then the video, which the container's directory counts from the end.
+    /// `videoLength` is what the directory says (the video's length unless
+    /// a test wants it wrong). The video's data holds what looks like a JPEG.
+    private func motionPhoto(_ name: String, videoLength: ((Int) -> Int)? = nil) throws -> (url: URL, photo: Data, after: Data) {
+        let first = images(try Data(contentsOf: gainMapPhoto(name)))[0]
+        let index = try #require(try JPEGMarkers.headers(ByteView(first)).segments.first(where: MultiPictureIndex.isIndex))
+        var video = Data([0, 0, 0, 0x18]) + Data("ftypisom".utf8) + Data(count: 12)
+        video += Data((0..<5000).map { UInt8(truncatingIfNeeded: $0 &* 7) }) + Data([0xFF, 0xD8, 0xFF, 0xE0]) + Data(count: 100)
+        let description = GoogleXMPSamples.directory(gainMapLength: nil, videoLength: videoLength?(video.count) ?? video.count)
+            .replacingOccurrences(of: "<rdf:Description ", with: "<rdf:Description xmlns:GCamera=\"\(GoogleXMP.camera)\" GCamera:MotionPhoto=\"1\" ")
+        let photo = inserting(GoogleXMPSamples.segment(description), into: first.prefix(index.offset) + first.dropFirst(index.end))
+        let after = Data("aecDebug camera tuning data".utf8) + video
+        let url = dir.appending(path: name)
+        try (photo + after).write(to: url)
+        return (url, photo, after)
+    }
+
+    /// A motion photo whose video the directory places at the end: only the
+    /// photo changes, everything after it stays byte for byte — also below
+    /// "keep everything", since the video is counted from the end.
+    @Test(arguments: [MetadataHandling.keep, .removePrivate])
+    func motionPhotoWithPlacedVideoIsOptimized(level: MetadataHandling) async throws {
+        let file = try motionPhoto("motion-\(level.rawValue).jpg")
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: file.url)))?.problem == nil)
+        settings.metadata = level
+        guard case .optimized = try await optimize(file.url) else { Issue.record("not optimized"); return }
+        let result = try Data(contentsOf: file.url)
+        let layout = try #require(JPEGLayout.read(ByteView(result)))
+        #expect(layout.problem == nil && layout.images.count == 1)
+        #expect(result.suffix(file.after.count) == file.after)
+        #expect(result.count - file.after.count < file.photo.count)
+        let read = try #require(GoogleXMP.read(try JPEGMarkers.headers(ByteView(result)).segments))
+        let trailer = try ByteView(result).view(from: layout.gaps[0].lowerBound)
+        #expect(read.marksMotionPhoto && read.video(endingAt: trailer) != nil)
+    }
+
+    /// A video the directory doesn't place (wrong length), and a result
+    /// whose video changed: left alone, and rejected.
+    @Test func motionPhotoWithMisplacedVideoStays() async throws {
+        let wrong = try motionPhoto("misplaced.jpg") { $0 + 1 }
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: wrong.url)))?.problem == .video)
+        let before = try Data(contentsOf: wrong.url)
+        guard case .skipped = try await optimize(wrong.url) else { Issue.record("not skipped"); return }
+        #expect(try Data(contentsOf: wrong.url) == before)
+
+        // Placed means: exactly one video, an MP4 that ends the file at its length.
+        let mp4 = ByteView(Data("camera data".utf8) + Data([0, 0, 0, 0x18]) + Data("ftypisom".utf8) + Data(count: 20))
+        func xmp(_ videos: [Int]) -> GoogleXMP {
+            GoogleXMP(directories: [[GoogleXMP.Item(mime: "image/jpeg")] + videos.map { GoogleXMP.Item(mime: "video/mp4", length: $0) }])
+        }
+        #expect(xmp([32]).video(endingAt: mp4) == 32)
+        #expect(xmp([32, 32]).video(endingAt: mp4) == nil && xmp([31]).video(endingAt: mp4) == nil)
+        #expect(xmp([]).video(endingAt: mp4) == nil && xmp([500]).video(endingAt: mp4) == nil)
+
+        let placed = try motionPhoto("placed.jpg")
+        var changed = try Data(contentsOf: placed.url)
+        changed[changed.count - 50] ^= 1
+        let result = dir.appending(path: "video-changed.jpg")
+        try changed.write(to: result)
+        #expect(throws: VerificationError.self) {
+            try StructureCheck.verify(result: result, against: StructureCheck.Reference(original: placed.url, format: .jpeg))
+        }
+    }
+
     /// Images that only Google's container lists (Pixel portraits: no
     /// multi-picture index) can't be taken apart: the file stays as it is.
     @Test func imagesOnlyTheContainerListsStay() async throws {

@@ -7,12 +7,12 @@
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
 # the same, and files named broken-* or unchanged-* must be left byte-for-byte
-# alone. Google's XMP in the JPEGs is read a second time by an independent
-# reader (google-xmp.py) and must read the same. --private runs your own
-# photos in Testkorpus/private (a folder or a link to one; never in a
-# repository) the same way. Result sizes are compared with the last baseline
-# so that a compression regression shows up even when everything is still
-# lossless.
+# alone; after a motion photo's photo nothing may change. Google's XMP in
+# the JPEGs is read a second time by an independent reader (google-xmp.py)
+# and must read the same. --private runs your own photos in
+# Testkorpus/private (a folder or a link to one; never in a repository) the
+# same way. Result sizes are compared with the last baseline so that a
+# compression regression shows up even when everything is still lossless.
 #
 # Works on a copy; replaced originals are deleted (--no-trash), never moved to
 # the Trash, and no settings are read or written.
@@ -166,6 +166,12 @@ for n in names:
             open(pa, "wb").write(x); open(pb, "wb").write(y)
             r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
             if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
+        # A motion photo's video (an MP4 after the photo) is found counted
+        # from the end of the file: everything after the photo must stay.
+        whole_a, whole_b = open(a, "rb").read(), open(b, "rb").read()
+        tail = whole_a[len(ia[0]):] if ia else b""
+        marked = any(m in whole_a[:len(ia[0])] for m in (b"MotionPhoto", b"MicroVideo")) if ia else False
+        if marked and b"ftyp" in tail and not whole_b.endswith(tail): fails.append((n, "VIDEO OR WHAT FOLLOWS THE PHOTO CHANGED"))
         r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
         if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
     elif kind in raster:

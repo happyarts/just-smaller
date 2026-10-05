@@ -69,7 +69,7 @@ public struct FileOptimizer: Sendable {
             }
             switch layout.problem {
             case .video:
-                return .skipped(reason: String(localized: "Motion photo (a photo with a video) – left unchanged", bundle: .module), size: size)
+                return .skipped(reason: String(localized: "Motion photo whose video can’t be located safely – left unchanged", bundle: .module), size: size)
             case .unfittingIndex, .unreadableXMP, .unlistedImages:
                 return .skipped(reason: String(localized: "Holds images that can’t be read safely – left unchanged", bundle: .module), size: size)
             case nil:
