@@ -49,6 +49,8 @@ struct FileFacts: Sendable {
     var jpegLayout: JPEGLayout?
     var isAnimated = false
     var bitsPerComponent = 8
+    /// Width × height of the first image; unknown counts as large.
+    var pixelCount = Int.max
     /// SVG in UTF-16.
     var isUTF16 = false
     /// SVG content the rendering comparison can't vouch for.
@@ -156,9 +158,10 @@ enum Pipeline {
         }
     }
 
-    /// Maximum effort also tries every filter strategy, but only on files
-    /// small enough for that to end in practical time.
-    static let allFiltersByteLimit: Int64 = 256_000
+    /// Maximum effort also tries every filter strategy, but only on images
+    /// small enough for that to end in practical time. Its time follows the
+    /// pixels, not the bytes: a small file can hold a large, flat image.
+    static let allFiltersPixelLimit = 256 * 256
 
     /// ECT and OxiPNG each win on different images, so from Balanced on both
     /// run in parallel and the smaller result is kept. ECT breaks animated
@@ -174,7 +177,7 @@ enum Pipeline {
             return [ect(["-7"], lossy: lossy), oxipng(level: "4", lossy: lossy)]
         case .maximum:
             var candidates = [ect(["-8"], lossy: lossy), ect(["-9"], lossy: lossy), oxipng(level: "6", lossy: lossy)]
-            if facts.byteSize <= allFiltersByteLimit { candidates.append(ect(["-9", "--allfilters-b"], lossy: lossy)) }
+            if facts.pixelCount <= allFiltersPixelLimit { candidates.append(ect(["-9", "--allfilters-b"], lossy: lossy)) }
             return candidates
         }
     }

@@ -1,5 +1,7 @@
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import JustSmallerKit
 
 struct PipelineTests {
@@ -81,6 +83,27 @@ struct PipelineTests {
         // Without a list every id stays, as bundled.
         let plain = try jobsIn(Pipeline.configuration(lossless: true, omitting: [], preservingIDs: nil, in: dir))
         #expect((plain["cleanupIds"] as? [String: Any])?["remove"] as? Bool == false)
+    }
+
+    /// Every filter strategy is tried only on small images, by their pixels:
+    /// a few kilobytes can hold a large, flat image that takes half an hour.
+    @Test func maximumTriesAllFiltersOnlyOnSmallImages() throws {
+        var settings = OptimizationSettings()
+        settings.effort = .maximum
+        func ectRuns(_ facts: FileFacts) -> Int {
+            Pipeline.stages(for: .png, facts: facts, settings: settings).last?.filter { $0.name == "ECT" }.count ?? 0
+        }
+        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256)) == 3)
+        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256 + 1)) == 2)
+        #expect(ectRuns(FileFacts(byteSize: 1_000)) == 2)
+
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appending(path: "flat.png")
+        let dest = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, TestImages.pattern(width: 300, height: 200), nil)
+        #expect(CGImageDestinationFinalize(dest))
+        #expect(FileOptimizer.facts(about: url, format: .png, size: 1).pixelCount == 300 * 200)
     }
 
     private func temporaryDirectory() throws -> URL {
