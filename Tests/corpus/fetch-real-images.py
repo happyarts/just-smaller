@@ -174,6 +174,14 @@ def commons_multi_images(category, limit):
         if any(m in head for m in (b"MPF\0", b"MotionPhoto", b"MicroVideo", b"HDRGainMap", b"hdrgm")):
             yield name, ii["url"]
 
+# Older motion photos (Pixel 2 and 3, MVIMG_*.jpg): no container directory,
+# only GCamera:MicroVideoOffset; two of them were edited and lost the video.
+COMMONS = "https://upload.wikimedia.org/wikipedia/commons/"
+jobs += [("multi-jpeg", "commons-" + n.replace("%28", "(").replace("%29", ")"), COMMONS + p + n)
+         for p, n in (("5/55/", "MVIMG_20171022_140431.jpg"), ("d/d6/", "MVIMG_20180908_110346.jpg"),
+                      ("0/0d/", "MVIMG_20220413_175622.jpg"), ("e/e8/", "A_ministry_of_Laos_2.jpg"),
+                      ("7/74/", "ComCam_Arrives_in_La_Serena_%28rubin-mvimg-20200328-123708%29.jpg"))]
+
 for cat in ("Taken with Apple iPhone 15 Pro", "Taken with Apple iPhone 14 Pro", "Taken with Apple iPhone 13 Pro",
             "Taken with Google Pixel 7", "Taken with Google Pixel 8 Pro", "Taken with Samsung Galaxy S23 Ultra"):
     jobs += [("multi-jpeg", n, u) for n, u in commons_multi_images("Category:" + cat, 60)]
