@@ -23,12 +23,18 @@ struct GoogleXMP: Equatable, Sendable {
 
     /// Each directory's items, the primary image first.
     var directories: [[Item]] = []
+    /// Which of them are Dynamic Depth's (its items lie one after another
+    /// right after the photo; Google's container counts from the end).
+    var depthDirectories: Set<Int> = []
     /// GCamera:MotionPhoto or MicroVideo is 1. Editors that drop the video
     /// often leave the mark.
     var marksMotionPhoto = false
     /// GCamera:MicroVideoOffset: where an older motion photo's video starts,
     /// counted from the end of the file.
     var microVideoOffset: Int?
+    /// Images kept in the XMP itself, as Base64 (GImage:Data,
+    /// GCamera:RelitInputImageData): no filter reads them.
+    var embeddedImages: [Data] = []
 
     /// A directory lists items after the primary image.
     var listsMoreThanThePhoto: Bool { directories.contains { $0.count > 1 } }
@@ -50,41 +56,53 @@ struct GoogleXMP: Equatable, Sendable {
         return length
     }
 
-    /// Where the items after the primary image may lie in `trailer` (the
-    /// bytes after the photo), each with its range there: counted from its
-    /// end (Ultra HDR, motion photos), or one after another from its start
-    /// (Dynamic Depth, whose camera data may follow them). Both, when both
-    /// fit; the layout checks which one the images are really at. Empty
-    /// unless exactly one directory lists more than the photo.
-    func arrangements(in trailer: Int) -> [(fromEnd: Bool, items: [(item: Item, range: Range<Int>)])] {
-        let listing = directories.filter { $0.count > 1 }
-        guard listing.count == 1, let primary = listing[0].first else { return [] }
-        let items = Array(listing[0].dropFirst())
+    /// The one directory that lists more than the photo, and whether it is
+    /// Dynamic Depth's. nil for none, or several.
+    var listing: (items: [Item], fromPhoto: Bool)? {
+        let more = directories.indices.filter { directories[$0].count > 1 }
+        guard more.count == 1, let n = more.first else { return nil }
+        return (directories[n], depthDirectories.contains(n))
+    }
+
+    /// Where the listing's items after the photo lie in the `trailerLength`
+    /// bytes after it, each with its range there: Google's container counts
+    /// them from the end of the file (Ultra HDR, motion photos), Dynamic
+    /// Depth lays them one after another right after the photo (its camera
+    /// data may follow). nil when there's no listing, or the items don't fit.
+    func arrangement(in trailerLength: Int) -> [(item: Item, range: Range<Int>)]? {
+        guard let listing, let primary = listing.items.first else { return nil }
+        let items = listing.items.dropFirst()
         // Lengths come from the file: anything longer than the bytes there can't fit.
-        guard (items + [primary]).allSatisfy({ $0.length <= trailer && $0.padding <= trailer }) else { return [] }
-        var fromEnd: [(item: Item, range: Range<Int>)]? = [], end = trailer
-        for item in items.reversed() {
-            end -= item.padding + item.length
-            if end < 0 { fromEnd = nil; break }
-            fromEnd?.insert((item, end..<end + item.length), at: 0)
+        guard (items + [primary]).allSatisfy({ $0.length <= trailerLength && $0.padding <= trailerLength }) else { return nil }
+        var placed: [(item: Item, range: Range<Int>)] = []
+        if listing.fromPhoto {
+            var start = primary.padding
+            for item in items {
+                guard start + item.length <= trailerLength else { return nil }
+                placed.append((item, start..<start + item.length))
+                start += item.length + item.padding
+            }
+        } else {
+            var end = trailerLength
+            for item in items.reversed() {
+                end -= item.padding + item.length
+                guard end >= 0 else { return nil }
+                placed.append((item, end..<end + item.length))
+            }
+            placed.reverse()
         }
-        var fromStart: [(item: Item, range: Range<Int>)]? = [], start = primary.padding
-        for item in items {
-            if start + item.length > trailer { fromStart = nil; break }
-            fromStart?.append((item, start..<start + item.length))
-            start += item.length + item.padding
-        }
-        return [fromEnd.map { (true, $0) }, fromStart.map { (false, $0) }].compactMap { $0 }
+        return placed
     }
 
     private var videos: [Item] { directories.joined().filter(Self.isVideo) }
-    private static func isVideo(_ item: Item) -> Bool { item.mime?.lowercased().hasPrefix("video/") == true }
+    static func isVideo(_ item: Item) -> Bool { item.mime?.lowercased().hasPrefix("video/") == true }
 
-    static let container = [MetadataPolicy.NS.googleContainer, MetadataPolicy.NS.depthContainer]
-    static let item = [MetadataPolicy.NS.googleItem, MetadataPolicy.NS.depthItem]
-    static let camera = MetadataPolicy.NS.googleCamera
+    static let containerNamespaces = [MetadataPolicy.NS.googleContainer, MetadataPolicy.NS.depthContainer]
+    static let itemNamespaces = [MetadataPolicy.NS.googleItem, MetadataPolicy.NS.depthItem]
+    static let cameraNamespace = MetadataPolicy.NS.googleCamera
+    static let imageNamespace = MetadataPolicy.NS.googleImage
     /// Only XMP that names one of these is parsed; items exist only in a container.
-    private static let wanted = (container + [camera]).map { Data($0.utf8) }
+    private static let wanted = (containerNamespaces + [cameraNamespace, imageNamespace]).map { Data($0.utf8) }
 
     /// From the first image's segments (`headers`). Empty when no XMP names
     /// those namespaces; nil when one does but can't be read — not
@@ -113,8 +131,10 @@ struct GoogleXMP: Equatable, Sendable {
                 return XML.parse(XML.document(ofPacket: packet), delegate: reader, namespaces: true) && !reader.failed ? reader : nil
             }
             guard let reader else { return nil }
+            result.depthDirectories.formUnion(reader.depthDirectories.map { $0 + result.directories.count })
             result.directories += reader.directories
             result.marksMotionPhoto = result.marksMotionPhoto || reader.marksMotionPhoto
+            result.embeddedImages += reader.embeddedImages
             if let offset = reader.microVideoOffset {
                 // Two packets that disagree say nothing certain.
                 guard result.microVideoOffset == nil || result.microVideoOffset == offset else { return nil }
@@ -131,8 +151,10 @@ struct GoogleXMP: Equatable, Sendable {
     /// Item:Mime inside). A Directory with no item in it can't be read.
     private final class Reader: NSObject, XMLParserDelegate {
         var directories: [[Item]] = []
+        var depthDirectories: Set<Int> = []
         var marksMotionPhoto = false
         var microVideoOffset: Int?
+        var embeddedImages: [Data] = []
         var failed = false
 
         private var prefixes: [String: [String]] = [:]
@@ -156,11 +178,12 @@ struct GoogleXMP: Equatable, Sendable {
             depth += 1
             property = nil // a property's value is its text alone
             let ns = namespaceURI ?? ""
-            if directory == nil, GoogleXMP.container.contains(ns), name == "Directory" {
+            if directory == nil, GoogleXMP.containerNamespaces.contains(ns), name == "Directory" {
                 directory = depth
+                if ns == GoogleXMP.containerNamespaces[1] { depthDirectories.insert(directories.count) }
                 directories.append([])
             } else if directory != nil, itemDepth == nil,
-                      ns == MetadataPolicy.NS.rdf && name == "li" || GoogleXMP.container.contains(ns) && name == "Item" {
+                      ns == MetadataPolicy.NS.rdf && name == "li" || GoogleXMP.containerNamespaces.contains(ns) && name == "Item" {
                 itemDepth = depth
                 item = Item()
             }
@@ -170,7 +193,7 @@ struct GoogleXMP: Equatable, Sendable {
                       let uri = prefixes[String(qualified[..<colon])]?.last else { continue }
                 found(uri, String(qualified[qualified.index(after: colon)...]), value)
             }
-            if GoogleXMP.item.contains(ns) || ns == GoogleXMP.camera { property = (ns, name, depth) }
+            if GoogleXMP.itemNamespaces.contains(ns) || ns == GoogleXMP.cameraNamespace || ns == GoogleXMP.imageNamespace { property = (ns, name, depth) }
             text = ""
         }
 
@@ -198,12 +221,17 @@ struct GoogleXMP: Equatable, Sendable {
                 guard let n = Int(value), n >= 0 else { failed = true; return 0 }
                 return n
             }
-            if ns == GoogleXMP.camera {
+            if ns == GoogleXMP.cameraNamespace && name == "RelitInputImageData" || ns == GoogleXMP.imageNamespace && name == "Data" {
+                // Unreadable Base64 can't be shown to hold nothing: an empty image fails the check.
+                embeddedImages.append(Data(base64Encoded: value, options: .ignoreUnknownCharacters) ?? Data())
+                return
+            }
+            if ns == GoogleXMP.cameraNamespace {
                 if ["MotionPhoto", "MicroVideo"].contains(name), value == "1" { marksMotionPhoto = true }
                 if name == "MicroVideoOffset" { microVideoOffset = bytes() }
                 return
             }
-            guard GoogleXMP.item.contains(ns), itemDepth != nil else { return }
+            guard GoogleXMP.itemNamespaces.contains(ns), itemDepth != nil else { return }
             switch name {
             case "Semantic": item.semantic = value
             case "Mime": item.mime = value

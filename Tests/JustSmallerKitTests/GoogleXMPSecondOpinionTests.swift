@@ -26,11 +26,13 @@ struct GoogleXMPSecondOpinionTests {
 
     @Test func pythonReadsTheSame() throws {
         let root = URL(fileURLWithPath: try #require(ProcessInfo.processInfo.environment["JUST_SMALLER_SECOND_OPINION"]))
-        let names = [GoogleXMP.container, [GoogleXMP.camera]].joined().map { Data($0.utf8) }
+        let names = [GoogleXMP.containerNamespaces, [GoogleXMP.cameraNamespace]].joined().map { Data($0.utf8) }
         let files = (FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil)?.compactMap { $0 as? URL } ?? [])
             .filter { ImageFormat.detect(at: $0) == .jpeg }
             .filter { url in (try? Data(contentsOf: url, options: .alwaysMapped)).map { d in names.contains { d.range(of: $0) != nil } } ?? false }
             .sorted { $0.path < $1.path }
+        // The corpus runner reads this line: no line, no comparison.
+        print("second opinion: \(files.count) files")
         guard !files.isEmpty else { return }
 
         let python = Process(), out = Pipe()

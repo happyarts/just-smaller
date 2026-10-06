@@ -5,45 +5,55 @@ import Foundation
 ///
 /// The one place that knows which parts of a JPEG may change. The optimizer
 /// decides with it which files stay as they are (`problem`), the pipeline
-/// changes files part by part along it (`mayChange`, `keepsGap`,
-/// `assembled`), and the structure check holds every result to the same
-/// rules (`check`).
+/// changes files part by part along it (`mayChange`, `assembled`), the
+/// structure check holds every result to the same rules (`check`), and the
+/// metadata check looks into what must stay unread (`keptData`).
 ///
 /// Most JPEGs are one image (`isPlain`). Others hold more: HDR gain maps,
 /// depth and mattes of portraits, stereo pairs and previews, listed by a
-/// multi-picture index; motion photos have a video after the images; and
-/// cameras leave leftover bytes between and after them. What Google's XMP
-/// says about them (container directory, motion photo mark) comes from
-/// `GoogleXMP`. Reads through ByteView; `read` is nil when not even the
-/// first image reads to its end — then what follows it can't be told apart,
-/// and the file stays as it is.
+/// multi-picture index or only by Google's container; motion photos have a
+/// video after the images; and cameras leave leftover bytes between and
+/// after them. What Google's XMP says about them (container directory,
+/// motion photo marks) comes from `GoogleXMP`. Reads through ByteView;
+/// `read` is nil when not even the first image reads to its end — then what
+/// follows it can't be told apart, and the file stays as it is.
 ///
-/// To come (the users stay as they are): Google's container as a second
-/// `Index` (Pixel portraits, whose images only the XMP lists); each image's
-/// role from the index (gain map, depth, preview) with how far it may
-/// change.
+/// To come: each image's role from the index (gain map, depth, preview),
+/// with how far it may change (a gain map with loss).
 struct JPEGLayout: Sendable {
     /// How the images after the first are found: a multi-picture index, or
     /// Google's container directory alone (Pixel portraits, Ultra HDR
-    /// without one), where each JPEG it lists lies exactly at its length.
+    /// without an index), where each JPEG it lists lies exactly at its
+    /// length.
     enum Index: Sendable {
         case none, multiPicture, container
     }
 
     /// Why a file must stay as it is (besides `read` being nil).
     enum Problem: Sendable {
-        /// A motion photo whose video the container doesn't place (see
-        /// `problem`): it lies after the images, where nothing may move.
+        /// A video after the images that neither the container's directory
+        /// nor a MicroVideoOffset places at the end of the file.
         case video
         /// A multi-picture index that doesn't fit the file.
         case unfittingIndex
         /// Google's XMP names its photo namespaces but can't be read, and
         /// something follows the photo: what it counts is unknown.
         case unreadableXMP
-        /// Images no index lists, or not where Google's container says —
-        /// this reader doesn't take them apart, and won't drop them as
-        /// leftover bytes.
+        /// Images no index lists, or not where Google's container says, or
+        /// another JPEG in bytes that would go as leftover — this reader
+        /// doesn't take them apart, and won't drop them.
         case unlistedImages
+    }
+
+    /// What stays byte for byte that no filter reads: for the metadata check.
+    enum KeptData: Sendable {
+        /// A motion photo's video, placed at the end of the file. (Samsung's
+        /// trailer with its own metadata follows the MP4 inside that length,
+        /// so the video doesn't read as a clean MP4.)
+        case video
+        /// An entry of the container that is neither one of the images nor
+        /// the video, or bytes the container counts across.
+        case other
     }
 
     /// Each image; the first is the photo itself.
@@ -55,20 +65,20 @@ struct JPEGLayout: Sendable {
     let problem: Problem?
     /// One image, and nothing but padding after it.
     let isPlain: Bool
-    /// Google's container directory lists what follows the photo (images, a
-    /// motion photo's video) by length — counted from the end of the file,
-    /// or (Dynamic Depth) from the end of the photo — or an older motion
-    /// photo's MicroVideoOffset places its video: all of it, and the bytes
-    /// between, must stay where it is. Only the rules below read it.
-    private let listedByContainer: Bool
     /// With `index == .container`: for each image after the first, its
-    /// entry in the container's directory (the photo is entry 0), and the
-    /// directory itself.
+    /// entry in the container's directory (the photo is entry 0).
     let containerEntries: [Int]
-    private let directory: [GoogleXMP.Item]
-    /// The bytes after the last image are no part of what the container
-    /// lists (Dynamic Depth's camera data): leftover bytes like any other.
-    private let leftoverAfter: Bool
+    /// What stays byte for byte that no filter reads, with where it lies.
+    let keptData: [(kind: KeptData, range: Range<Int>)]
+    /// For each gap, the part of it (counted from the gap's start) that must
+    /// stay at every level: what Google's container or a MicroVideoOffset
+    /// counts across. The bytes before and after it are leftover bytes.
+    private let kept: [Range<Int>]
+    /// Google's container lists the images after the first: they change
+    /// only with their lengths in its directory.
+    private let imagesListed: Bool
+    /// Every directory of Google's container, for the structure check.
+    private let directories: [[GoogleXMP.Item]]
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
     static func read(_ b: ByteView, firstEnd: Int? = nil) -> JPEGLayout? {
@@ -89,74 +99,110 @@ struct JPEGLayout: Sendable {
         func gaps(_ images: [Range<Int>]) -> [Range<Int>] {
             images.indices.map { images[$0].upperBound..<(images.indices.contains($0 + 1) ? images[$0 + 1].lowerBound : b.count) }
         }
-        var trailer = (try? b.view(gaps(images)[images.count - 1])) ?? ByteView(Data())
+        let afterPhoto = (try? b.view(from: firstEnd)) ?? ByteView(Data())
         // Nothing follows a plain JPEG's photo: whatever its XMP says counts nothing.
-        if images.count == 1, trailer.isPadding {
+        if images.count == 1, afterPhoto.isPadding {
             return JPEGLayout(images: images, gaps: gaps(images), index: index, problem: indexFits ? nil : .unfittingIndex,
-                              isPlain: true, listedByContainer: false, containerEntries: [], directory: [], leftoverAfter: false)
+                              isPlain: true, containerEntries: [], keptData: [], kept: [0..<0], imagesListed: false, directories: [])
         }
         let xmp = GoogleXMP.read(headers)
-        var entries: [Int] = [], directory: [GoogleXMP.Item] = [], leftoverAfter = false
-        if index == .none, indexFits, let xmp, let rest = listed(by: xmp, after: firstEnd, trailer: trailer.count, in: b) {
-            images += rest.images.map(\.range)
-            entries = rest.images.map(\.entry)
-            directory = xmp.directories.first { $0.count > 1 } ?? []
-            leftoverAfter = rest.endsListing
+        // Google's container lays the parts out after the photo (`placed`,
+        // counted from the photo's end).
+        let placed = xmp?.arrangement(in: afterPhoto.count)
+        var entries: [Int] = []
+        if index == .none, indexFits, let placed, let found = jpegs(in: placed, after: firstEnd, in: b) {
+            images += found.map(\.range)
+            entries = found.map(\.entry)
             index = .container
-            trailer = (try? b.view(gaps(images)[images.count - 1])) ?? ByteView(Data())
         }
-        return JPEGLayout(images: images, gaps: gaps(images), index: index,
-                          problem: problem(index: index, indexFits: indexFits, xmp: xmp, trailer: trailer),
-                          isPlain: false, listedByContainer: xmp?.listsMoreThanThePhoto == true || xmp?.video(endingAt: trailer) != nil,
-                          containerEntries: entries, directory: directory, leftoverAfter: leftoverAfter)
+        let gapRanges = gaps(images)
+        let trailer = (try? b.view(gapRanges[gapRanges.count - 1])) ?? ByteView(Data())
+        let video = xmp?.video(endingAt: trailer)
+        let kept = keptParts(of: gapRanges, xmp: xmp, placed: placed, video: video, photoEnd: firstEnd, fileEnd: b.count)
+        var keptData: [(kind: KeptData, range: Range<Int>)] = []
+        if let video { keptData.append((.video, b.count - video..<b.count)) }
+        for item in placed ?? [] where item.item.mime?.lowercased() != "image/jpeg" && !GoogleXMP.isVideo(item.item) {
+            keptData.append((.other, item.range.lowerBound + firstEnd..<item.range.upperBound + firstEnd))
+        }
+        // Bytes the container counts across that are none of the above.
+        let known = keptData.map(\.range).sorted { $0.lowerBound < $1.lowerBound }
+        for (gap, part) in zip(gapRanges, kept) where !part.isEmpty {
+            var from = gap.lowerBound + part.lowerBound
+            for range in known + [gap.lowerBound + part.upperBound..<Int.max] where range.upperBound > from {
+                let unknown = from..<max(from, min(range.lowerBound, gap.lowerBound + part.upperBound))
+                if let bytes = try? b.view(unknown), !bytes.isPadding { keptData.append((.other, unknown)) }
+                from = max(from, range.upperBound)
+                if from >= gap.lowerBound + part.upperBound { break }
+            }
+        }
+        // Another JPEG in bytes that would go: it isn't leftover.
+        let droppable = zip(gapRanges, kept).flatMap { gap, part in
+            [gap.lowerBound..<gap.lowerBound + part.lowerBound, gap.lowerBound + part.upperBound..<gap.upperBound]
+        }
+        let jpegInLeftover = droppable.contains { range in (try? b.view(range)).map(startsJPEG) ?? false }
+        return JPEGLayout(images: images, gaps: gapRanges, index: index,
+                          problem: problem(index: index, indexFits: indexFits, xmp: xmp, trailer: trailer, video: video,
+                                           jpegInLeftover: jpegInLeftover),
+                          isPlain: false, containerEntries: entries, keptData: keptData, kept: kept,
+                          imagesListed: xmp?.listing != nil, directories: xmp?.directories ?? [])
+    }
+
+    /// Which part of each gap must stay (see `kept`). Without Google's
+    /// container or a MicroVideoOffset: none of it. With one: everything it
+    /// counts across — but not what comes before the first part it places
+    /// when it counts from the end of the file and gives the photo no
+    /// padding, and not what comes after the last one when it counts from
+    /// the photo and places no video: there nothing counts.
+    private static func keptParts(of gaps: [Range<Int>], xmp: GoogleXMP?, placed: [(item: GoogleXMP.Item, range: Range<Int>)]?,
+                                  video: Int?, photoEnd: Int, fileEnd: Int) -> [Range<Int>] {
+        guard xmp?.listing != nil || video != nil else { return gaps.map { _ in 0..<0 } }
+        var kept = gaps.map { 0..<$0.count }
+        let fromPhoto = xmp?.listing?.fromPhoto == true
+        // The parts' extent, counted from the photo's end.
+        let starts = (placed ?? []).map(\.range.lowerBound) + (video.map { [fileEnd - $0 - photoEnd] } ?? [])
+        if !fromPhoto, xmp?.listing?.items.first?.padding ?? 0 == 0, let first = starts.min(), first <= gaps[0].count {
+            kept[0] = first..<gaps[0].count
+        }
+        if fromPhoto, video == nil, let last = placed?.last, let k = gaps.indices.last {
+            let end = last.range.upperBound + last.item.padding + photoEnd - gaps[k].lowerBound
+            if end >= 0, end <= gaps[k].count { kept[k] = kept[k].lowerBound..<max(kept[k].lowerBound, end) }
+        }
+        return kept
     }
 
     /// Why the file must stay as it is, asked in this order:
-    /// 1. A video after the images that the container doesn't place: Google's
-    ///    XMP marks a motion photo or lists a video, or the bytes after the
-    ///    images hold one — but neither the container's directory nor an
-    ///    older MicroVideoOffset places exactly one video that ends the file
-    ///    at its length. One they place is counted from the end like the
-    ///    images after the first: it stays byte for byte, and only the photo
-    ///    changes. A mark with nothing after the images counts for nothing
-    ///    (editors drop the video and leave the mark).
+    /// 1. A video after the images that neither the container's directory
+    ///    nor a MicroVideoOffset places: Google's XMP marks a motion photo or
+    ///    lists a video, or the bytes after the images hold one. A placed
+    ///    video stays byte for byte at the end of the file; a mark with
+    ///    nothing after the images counts for nothing (editors drop the
+    ///    video and leave the mark).
     /// 2. A multi-picture index that doesn't fit the file.
     /// 3. Google's XMP that can't be read.
-    /// 4. Without a multi-picture index, images after the photo: the
-    ///    container lists some, or another JPEG starts in the bytes after it
-    ///    (outside a placed video, whose data may hold anything).
+    /// 4. Images no index finds: the container lists some it doesn't place
+    ///    (without a multi-picture index), or another JPEG starts in bytes
+    ///    that would go as leftover.
     /// Asked only where something follows the photo.
-    private static func problem(index: Index, indexFits: Bool, xmp: GoogleXMP?, trailer: ByteView) -> Problem? {
-        let somethingAfter = !trailer.isPadding
-        let video = xmp?.video(endingAt: trailer)
-        if somethingAfter, video == nil,
+    private static func problem(index: Index, indexFits: Bool, xmp: GoogleXMP?, trailer: ByteView, video: Int?,
+                                jpegInLeftover: Bool) -> Problem? {
+        if !trailer.isPadding, video == nil,
            xmp?.marksMotionPhoto == true || xmp?.listsVideo == true || holdsVideo(trailer) { return .video }
         if !indexFits { return .unfittingIndex }
         guard let xmp else { return .unreadableXMP }
-        let beforeVideo = ByteView(trailer.bytes.dropLast(video ?? 0))
-        if index == .none, somethingAfter, xmp.listsImagesAfterThePhoto || startsJPEG(beforeVideo) { return .unlistedImages }
+        if jpegInLeftover || index == .none && xmp.listsImagesAfterThePhoto { return .unlistedImages }
         return nil
     }
 
-    /// The JPEGs Google's container lists after the photo, where it says
-    /// they are: in one of its arrangements, each exactly from its SOI to
-    /// its EOI, with its entry in the directory. nil when it lists none, or
-    /// they aren't there.
-    /// `endsListing`: the last image is the directory's last entry, with
-    /// nothing after it, and nothing counts from the end of the file — what
-    /// follows it (camera data) is leftover bytes.
-    private static func listed(by xmp: GoogleXMP, after photo: Int, trailer: Int, in b: ByteView)
-        -> (images: [(range: Range<Int>, entry: Int)], endsListing: Bool)? {
-        for arrangement in xmp.arrangements(in: trailer) {
-            let jpegs = arrangement.items.enumerated().filter { $0.element.item.mime?.lowercased() == "image/jpeg" }
-                .map { (range: $0.element.range.lowerBound + photo..<$0.element.range.upperBound + photo, entry: $0.offset + 1) }
-            guard !jpegs.isEmpty else { return nil }
-            if jpegs.allSatisfy({ (try? JPEGMarkers.imageEnd(from: $0.range.lowerBound, in: b)) == $0.range.upperBound }) {
-                let last = arrangement.items.last
-                return (jpegs, !arrangement.fromEnd && jpegs.last?.entry == arrangement.items.count && last?.item.padding == 0)
-            }
-        }
-        return nil
+    /// The JPEGs among the container's placed parts (counted from the photo's
+    /// end at `photo`), each exactly from its SOI to its EOI, with its entry
+    /// in the directory. nil when it lists none, or they aren't there.
+    private static func jpegs(in placed: [(item: GoogleXMP.Item, range: Range<Int>)], after photo: Int, in b: ByteView)
+        -> [(range: Range<Int>, entry: Int)]? {
+        let jpegs = placed.enumerated().filter { $0.element.item.mime?.lowercased() == "image/jpeg" }
+            .map { (range: $0.element.range.lowerBound + photo..<$0.element.range.upperBound + photo, entry: $0.offset + 1) }
+        guard !jpegs.isEmpty, jpegs.allSatisfy({ (try? JPEGMarkers.imageEnd(from: $0.range.lowerBound, in: b)) == $0.range.upperBound })
+        else { return nil }
+        return jpegs
     }
 
     /// The images the index lists after the first, each read to its EOI, in
@@ -174,68 +220,69 @@ struct JPEGLayout: Sendable {
 
     // MARK: - Rules
 
-    /// Whether image n may change. Without loss, every image but those the
-    /// container counts from the end of the file. With loss (encoded anew),
-    /// only a plain JPEG's photo for now: a gain map or a depth image is
-    /// made for its photo, and neither may simply change with it.
-    ///
-    /// `writingLengths`: the step writes the images' new lengths into the
-    /// container's directory (the metadata step, below "keep everything").
-    /// Then the images only the container lists may change as well; those
-    /// a multi-picture index lists too keep their bytes.
+    /// Whether image n may change. Without loss, every image but those
+    /// Google's container lists (it counts their bytes) — those too when the
+    /// step writes their new lengths into its directory (`writingLengths`:
+    /// the metadata step below "keep everything"), unless a multi-picture
+    /// index lists them as well. With loss (encoded anew), only a plain
+    /// JPEG's photo for now: a gain map or a depth image is made for its
+    /// photo, and neither may simply change with it.
     func mayChange(image n: Int, withLoss lossy: Bool = false, writingLengths: Bool = false) -> Bool {
         if lossy { return isPlain && n == 0 }
-        return n == 0 || !listedByContainer || index == .container && writingLengths
+        return n == 0 || !imagesListed || index == .container && writingLengths
     }
+
+    /// Whether a step at `level` writes the new lengths of the images
+    /// Google's container lists into its directory: the metadata step does
+    /// below "keep everything", where it rewrites the XMP anyway.
+    static func writesLengths(at level: MetadataHandling) -> Bool { level != .keep }
 
     /// Whether any image may change with loss: a lossy step is worth trying.
+    /// (Kept general for the rule by role still to come.)
     var mayChangeWithLoss: Bool { images.indices.contains { mayChange(image: $0, withLoss: true) } }
 
-    /// Gap `k` (after image k): leftover bytes could hold anything, so like
-    /// unknown metadata they go unless everything stays — or the container
-    /// lists what follows the photo, and counts across them.
-    func keepsGap(_ k: Int, at level: MetadataHandling) -> Bool {
-        level == .keep || mustKeepGap(k)
-    }
-
-    /// Where the container counts across the gap, it stays as it is.
-    private func mustKeepGap(_ k: Int) -> Bool {
-        listedByContainer && !(leftoverAfter && k == gaps.count - 1)
+    /// What of gap `k` (as bytes of `data`, which this layout was read from)
+    /// stays at `level`: all of it when everything stays; below that, what
+    /// the container counts across. Leftover bytes could hold anything, so
+    /// like unknown metadata they go.
+    private func keptBytes(_ k: Int, of data: Data, at level: MetadataHandling) -> Data {
+        let gap = gaps[k]
+        if level == .keep { return data.subdata(in: gap) }
+        return data.subdata(in: gap.lowerBound + kept[k].lowerBound..<gap.lowerBound + kept[k].upperBound)
     }
 
     /// Holds `result` (laid out as `after`), made from the original `a` this
     /// layout was read from, to the rules: as many images, none that can't
-    /// be read safely; those that may not change unchanged; the index, if
-    /// any, still the original's but for exact sizes and starts; between and
-    /// after the images the original's bytes where they stay at `level`, or
-    /// nothing but padding where they may go.
+    /// be read safely; those that may not change unchanged; between and
+    /// after the images the original's bytes as they stay at `level` (where
+    /// all may go: nothing but padding); Google's directories as they were
+    /// but for the new lengths of the images only it lists; the
+    /// multi-picture index, if any, the original's but for exact sizes and
+    /// starts.
     func check(_ after: JPEGLayout, in result: ByteView, original a: ByteView, level: MetadataHandling) throws {
         guard after.images.count == images.count else { throw FormatError("images lost or added") }
         guard after.problem == nil else { throw FormatError("images can't be read safely") }
-        // Below "keep everything" the metadata step writes the container's lengths.
-        for n in images.indices where !mayChange(image: n, writingLengths: level != .keep) {
+        for n in images.indices where !mayChange(image: n, writingLengths: Self.writesLengths(at: level)) {
             guard try result.view(after.images[n]).bytes == a.view(images[n]).bytes else { throw FormatError("image \(n + 1) changed") }
         }
-        for (k, (gap, original)) in zip(after.gaps, gaps).enumerated() {
-            let bytes = try result.view(gap), before = try a.view(original)
-            let kept = bytes.bytes == before.bytes
-            guard mustKeepGap(k) ? kept : kept && keepsGap(k, at: level) || bytes.isPadding else {
-                throw FormatError("data between or after the images changed")
+        for k in gaps.indices {
+            let bytes = try result.view(after.gaps[k]), original = try a.view(gaps[k])
+            let stays = keptBytes(k, of: a.bytes, at: level)
+            // Leftover padding (after a plain JPEG) may go at any level.
+            let ok = bytes.bytes == stays || (level == .keep ? kept[k].isEmpty && original.isPadding : stays.isEmpty) && bytes.isPadding
+            guard ok else { throw FormatError("data between or after the images changed") }
+        }
+        var expected = directories
+        if index == .container, let listing = directories.indices.first(where: { directories[$0].count > 1 }) {
+            for (entry, image) in zip(containerEntries, after.images.dropFirst()) where expected[listing].indices.contains(entry) {
+                expected[listing][entry].length = image.count
             }
         }
-        if index == .container {
-            // The directory as it was, but for the lengths of the images it
-            // lists — and those are exactly the images' new sizes.
-            var expected = directory
-            for (entry, image) in zip(containerEntries, after.images.dropFirst()) where expected.indices.contains(entry) {
-                expected[entry].length = image.count
-            }
-            guard after.index == .container, after.containerEntries == containerEntries, after.directory == expected
-            else { throw FormatError("container directory") }
-        }
+        guard after.index == index, after.containerEntries == containerEntries, after.directories == expected
+        else { throw FormatError("container directory") }
         guard index == .multiPicture else { return }
         // Only the sizes and starts in the index may change, and they are exact.
-        guard after.index == .multiPicture, MultiPictureIndex.withoutPositions(result) == MultiPictureIndex.withoutPositions(a),
+        guard MultiPictureIndex.withoutPositions(result) == MultiPictureIndex.withoutPositions(a),
               let entries = MultiPictureIndex.read(result),
               entries == after.images.map({ MultiPictureIndex.Entry(start: $0.lowerBound, size: $0.count) })
         else { throw FormatError("multi-picture index") }
@@ -244,18 +291,16 @@ struct JPEGLayout: Sendable {
     // MARK: - Writer
 
     /// The file `data` (which this layout was read from) with its images
-    /// replaced by `new`, and its gaps kept or left out as they may be at
-    /// `level`.
+    /// replaced by `new`, and of its gaps what stays at `level`.
     func assembled(_ new: [Data], from data: Data, level: MetadataHandling) throws -> Data {
-        let kept = gaps.indices.map { keepsGap($0, at: level) ? data.subdata(in: gaps[$0]) : Data() }
-        return try Self.joined(new, gaps: kept, rewritingIndex: index == .multiPicture)
+        try Self.joined(new, gaps: gaps.indices.map { keptBytes($0, of: data, at: level) }, rewritingIndex: index == .multiPicture)
     }
 
     /// `images` one after another, each followed by its gap (none when
     /// `gaps` is empty); with more than one and `rewritingIndex`, the
     /// multi-picture index in the first is rewritten to their sizes and
-    /// starts (Google's container needs nothing: what follows the photo
-    /// stays as it was).
+    /// starts. (The lengths in Google's container are written by the
+    /// metadata step, into the photo's XMP.)
     static func joined(_ images: [Data], gaps: [Data] = [], rewritingIndex: Bool = true) throws -> Data {
         let gaps = gaps.isEmpty ? images.map { _ in Data() } : gaps
         guard var first = images.first, gaps.count == images.count else { throw FormatError("number of images") }
@@ -290,7 +335,7 @@ struct JPEGLayout: Sendable {
     /// names Google's container.
     private static func mayList(_ b: ByteView) -> Bool {
         guard let headers = try? JPEGMarkers.headers(b).segments else { return false }
-        let container = GoogleXMP.container.map { Data($0.utf8) }
+        let container = GoogleXMP.containerNamespaces.map { Data($0.utf8) }
         return headers.contains { s in
             MultiPictureIndex.isIndex(s) || [.xmp, .extendedXMP].contains(JPEGMarkers.part(s.marker, payload: s.payload.bytes))
                 && container.contains { s.payload.bytes.range(of: $0) != nil }

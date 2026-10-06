@@ -181,7 +181,7 @@ for n in names:
         whole_a, whole_b = open(a, "rb").read(), open(b, "rb").read()
         tail = whole_a[len(ia[0]):] if ia else b""
         said = google_xmp.opinion(a)
-        pa = google_xmp.placed(a) if said["listed"] is not None else None
+        pa = google_xmp.placed(a) if said["lists"] else None
         if pa is not None:
             pb = google_xmp.placed(b)
             if pb is None or [m for m, _, _ in pa] != [m for m, _, _ in pb]:
@@ -195,7 +195,7 @@ for n in names:
                     open(xa, "wb").write(whole_a[sa:ea]); open(xb, "wb").write(whole_b[sb:eb])
                     r = subprocess.run([jpegcmp, xa, xb], capture_output=True, text=True)
                     if r.returncode != 0: fails.append((n, "COEFFICIENTS (container item): " + (r.stdout + r.stderr).strip()))
-        elif (said["listed"] is not None or said["motion"] and b"ftyp" in tail) and not whole_b.endswith(tail):
+        elif (said["lists"] or said["motion"] and b"ftyp" in tail) and not whole_b.endswith(tail):
             fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
         r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
         if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
@@ -246,8 +246,9 @@ PY
 
 # Google's XMP in the originals, read a second time by an independent reader
 # (google-xmp.py) and compared with the engine's.
-if JUST_SMALLER_SECOND_OPINION="$WORK/orig" "$ROOT/Tools/test.sh" -q --filter GoogleXMPSecondOpinion > "$WORK/second-opinion.log" 2>&1; then
-	echo "Google XMP, second opinion: same"
+if JUST_SMALLER_SECOND_OPINION="$WORK/orig" "$ROOT/Tools/test.sh" -q --filter GoogleXMPSecondOpinion > "$WORK/second-opinion.log" 2>&1 \
+	&& COMPARED=$(grep -o "second opinion: [0-9]* files" "$WORK/second-opinion.log" | grep -o "[0-9]*"); then
+	echo "Google XMP, second opinion: same ($COMPARED files)"
 else
 	grep -E "Expectation failed|error" "$WORK/second-opinion.log" | head -20
 	echo "Google XMP, second opinion: DIFFERENT"

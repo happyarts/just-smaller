@@ -157,12 +157,12 @@ enum XMPFilter {
     /// as GoogleXMP reads them: each outermost rdf:li, or a Container:Item
     /// outside one.
     private static func setLengths(_ lengths: [Int: Int], in element: XMLElement) {
-        if GoogleXMP.container.contains(element.uri ?? ""), element.localName == "Directory" {
+        if GoogleXMP.containerNamespaces.contains(element.uri ?? ""), element.localName == "Directory" {
             var entries: [XMLElement] = []
             func collect(_ e: XMLElement) {
                 for child in (e.children ?? []).compactMap({ $0 as? XMLElement }) {
                     if child.uri == MetadataPolicy.NS.rdf && child.localName == "li"
-                        || GoogleXMP.container.contains(child.uri ?? "") && child.localName == "Item" {
+                        || GoogleXMP.containerNamespaces.contains(child.uri ?? "") && child.localName == "Item" {
                         entries.append(child)
                     } else {
                         collect(child)
@@ -178,11 +178,11 @@ enum XMPFilter {
 
     private static func setLength(_ length: Int, in element: XMLElement) {
         for attribute in element.attributes ?? []
-        where attribute.localName == "Length" && GoogleXMP.item.contains(namespace(of: attribute, in: element) ?? "") {
+        where attribute.localName == "Length" && GoogleXMP.itemNamespaces.contains(namespace(of: attribute, in: element) ?? "") {
             attribute.stringValue = String(length)
         }
         for child in (element.children ?? []).compactMap({ $0 as? XMLElement }) {
-            if child.localName == "Length", GoogleXMP.item.contains(child.uri ?? "") {
+            if child.localName == "Length", GoogleXMP.itemNamespaces.contains(child.uri ?? "") {
                 child.stringValue = String(length)
             } else {
                 setLength(length, in: child)

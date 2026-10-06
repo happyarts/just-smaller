@@ -81,8 +81,45 @@ enum GoogleXMPSamples {
         var items = item("Item:Semantic=\"Primary\" Item:Mime=\"image/jpeg\"")
         if let gainMapLength { items += item("Item:Semantic=\"GainMap\" Item:Mime=\"image/jpeg\" Item:Length=\"\(gainMapLength)\"") }
         if let videoLength { items += item("Item:Semantic=\"MotionPhoto\" Item:Mime=\"video/mp4\" Item:Length=\"\(videoLength)\"") }
-        return "<rdf:Description xmlns:Container=\"\(GoogleXMP.container[0])\" xmlns:Item=\"\(GoogleXMP.item[0])\">"
+        return "<rdf:Description xmlns:Container=\"\(GoogleXMP.containerNamespaces[0])\" xmlns:Item=\"\(GoogleXMP.itemNamespaces[0])\">"
             + "<Container:Directory><rdf:Seq>\(items)</rdf:Seq></Container:Directory></rdf:Description>"
+    }
+
+    /// Dynamic Depth's directory (elements in rdf:value): the photo, then
+    /// `items` (MIME type and length), laid out right after the photo.
+    static func depthDirectory(_ items: [(mime: String, length: Int)], paddings: [Int] = []) -> String {
+        func item(_ mime: String, _ length: Int, _ padding: Int) -> String {
+            "<rdf:li rdf:parseType=\"Resource\"><rdf:value rdf:parseType=\"Resource\"><Item:Mime>\(mime)</Item:Mime>"
+                + "<Item:Length>\(length)</Item:Length>" + (padding > 0 ? "<Item:Padding>\(padding)</Item:Padding>" : "") + "</rdf:value></rdf:li>"
+        }
+        // `paddings`: the photo's, then each item's.
+        func padding(_ k: Int) -> Int { paddings.indices.contains(k) ? paddings[k] : 0 }
+        let entries = item("image/jpeg", 0, padding(0)) + items.enumerated().map { item($0.element.mime, $0.element.length, padding($0.offset + 1)) }.joined()
+        return "<rdf:Description xmlns:Device=\"\(MetadataPolicy.NS.depthDevice)\" xmlns:Container=\"\(GoogleXMP.containerNamespaces[1])\" "
+            + "xmlns:Item=\"\(GoogleXMP.itemNamespaces[1])\"><Device:Container rdf:parseType=\"Resource\"><Container:Directory><rdf:Seq>"
+            + entries + "</rdf:Seq></Container:Directory></Device:Container></rdf:Description>"
+    }
+
+    /// A small MP4 as a motion photo's video: its ftyp box, and `payload`
+    /// in an mdat box; with `location`, a movie whose user data holds one
+    /// (as Samsung's videos do).
+    static func video(_ payload: Data, location: Bool = false) -> Data {
+        func box(_ type: String, _ body: Data) -> Data { Data(withUnsafeBytes(of: UInt32(8 + body.count).bigEndian, Array.init)) + Data(type.utf8) + body }
+        var video = box("ftyp", Data("isom".utf8) + Data(count: 4) + Data("isommp42".utf8))
+        if location { video += box("moov", box("udta", Data([0, 0, 0, 20, 0xA9, 0x78, 0x79, 0x7A]) + Data("+53.55+009.99/".utf8))) }
+        return video + box("mdat", payload)
+    }
+
+    /// Google's container directory with any items: MIME type, length and
+    /// padding each (attributes), after the photo with `primaryPadding`.
+    static func directory(_ items: [(mime: String, length: Int, padding: Int)], primaryPadding: Int = 0) -> String {
+        func item(_ mime: String, _ length: Int?, _ padding: Int) -> String {
+            "<rdf:li rdf:parseType=\"Resource\"><Container:Item Item:Mime=\"\(mime)\""
+                + (length.map { " Item:Length=\"\($0)\"" } ?? "") + (padding > 0 ? " Item:Padding=\"\(padding)\"" : "") + "/></rdf:li>"
+        }
+        let entries = item("image/jpeg", nil, primaryPadding) + items.map { item($0.mime, $0.length, $0.padding) }.joined()
+        return "<rdf:Description xmlns:Container=\"\(GoogleXMP.containerNamespaces[0])\" xmlns:Item=\"\(GoogleXMP.itemNamespaces[0])\">"
+            + "<Container:Directory><rdf:Seq>\(entries)</rdf:Seq></Container:Directory></rdf:Description>"
     }
 
     /// The segments of a tiny JPEG with `main` in its XMP packet and

@@ -411,6 +411,16 @@
         }
       }
     },
+    "a part that must stay as it is (a video, the camera maker’s data) holds metadata this level removes": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ein Teil, der unverändert bleiben muss (ein Video, Daten des Kameraherstellers), enthält Metadaten, die diese Stufe entfernt"
+          }
+        }
+      }
+    },
     "an image that must stay as it is (depth map, gain map) holds metadata this level removes": {
       "localizations": {
         "de": {

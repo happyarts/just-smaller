@@ -9,7 +9,7 @@ import Testing
 ///
 /// Runs on a folder of real images, off by default. Seconds: two files per
 /// format (by size, the middle one and one from the upper quarter: real
-/// photos with metadata, not edge cases) and two JPEGs with Google's
+/// photos with metadata, not edge cases) and three JPEGs with Google's
 /// container in their XMP, 40 rounds each. Before a release, every file with 200 rounds:
 ///     JUST_SMALLER_FUZZ=../Testkorpus Tools/test.sh --filter CorpusFuzz
 ///     JUST_SMALLER_FUZZ=../Testkorpus JUST_SMALLER_FUZZ_ALL=1 Tools/test.sh --filter CorpusFuzz
@@ -42,12 +42,14 @@ struct CorpusFuzzTests {
             return Set([bySize.count / 2, bySize.count * 3 / 4]).sorted().map { bySize[$0] }
         }
         // The container sits in the first segments: the first 64 KB tell.
-        let container = Data(GoogleXMP.container[0].utf8)
+        // Google's container or Dynamic Depth's (which sits in the extended XMP).
+        let containers = GoogleXMP.containerNamespaces.map { Data($0.utf8) }
         let google = found.filter { url, format in
             guard format == .jpeg, let handle = try? FileHandle(forReadingFrom: url) else { return false }
             defer { try? handle.close() }
-            return (try? handle.read(upToCount: 65_536))?.range(of: container) != nil
-        }.prefix(2)
+            let head = (try? handle.read(upToCount: 4 << 20)) ?? Data()
+            return containers.contains { head.range(of: $0) != nil }
+        }.prefix(3)
         return Array(Set((sample + google).map(\.0.path))).sorted().compactMap { path in found.first { $0.0.path == path } }
     }
 
@@ -90,7 +92,15 @@ struct CorpusFuzzTests {
         case .jpeg:
             _ = MultiPictureIndex.read(ByteView(data))
             if let headers = try? JPEGMarkers.headers(ByteView(data)).segments { _ = GoogleXMP.read(headers) }
-            if let layout = JPEGLayout.read(ByteView(data)) { _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, level: .keep) }
+            if let layout = JPEGLayout.read(ByteView(data)) {
+                for level in [MetadataHandling.keep, .removeAll] {
+                    _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, level: level)
+                }
+                for part in layout.keptData { _ = (try? ByteView(data).view(part.range)).flatMap(MP4Metadata.holdsMetadata) }
+            }
+            _ = try? JPEGMetadataFilter.filter(data, level: .removePrivate, orientation: 1, itemLengths: [1: 5, 2: Int.max])
+            _ = try? JPEGLayout.imagePairs(data, data)
+            _ = MetadataRegions.of(data)
             _ = JPEGQuality.estimate(data)
         case .webp:
             _ = RIFFChunks.webp(ByteView(data))
@@ -173,7 +183,7 @@ struct CorpusFuzzTests {
         file += Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
         if let damaged = try? JPEGMarkers.headers(ByteView(file)).segments { _ = GoogleXMP.read(damaged) }
         if m.starts(with: JPEGMarkers.xmpHeader) {
-            _ = XMPFilter.filter(Array(m.dropFirst(JPEGMarkers.xmpHeader.count)), level: .removePrivate)
+            _ = XMPFilter.filter(Array(m.dropFirst(JPEGMarkers.xmpHeader.count)), level: .removePrivate, itemLengths: [1: 1, 2: Int.max])
         }
     }
 

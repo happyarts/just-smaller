@@ -225,7 +225,7 @@ enum Pipeline {
             // Below "keep everything" the images Google's container lists are
             // filtered too, their new lengths written into its directory.
             _ = try await eachImage(of: input, to: output, layout: layout, work: work, level: level,
-                                    writingLengths: level != .keep) { from, to, n, lengths in
+                                    writingLengths: JPEGLayout.writesLengths(at: level)) { from, to, n, lengths in
                 let image = try Data(contentsOf: from)
                 try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image),
                                               itemLengths: lengths).write(to: to)

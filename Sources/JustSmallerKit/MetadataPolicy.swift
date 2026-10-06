@@ -44,6 +44,8 @@ enum MetadataPolicy {
         static let googleContainer = "http://ns.google.com/photos/1.0/container/"
         static let googleItem = "http://ns.google.com/photos/1.0/container/item/"
         static let googleCamera = "http://ns.google.com/photos/1.0/camera/"
+        /// Images kept as Base64 in XMP (Lens Blur's original photo).
+        static let googleImage = "http://ns.google.com/photos/1.0/image/"
         /// Dynamic Depth (Pixel portraits): the device holds the container.
         static let depthDevice = "http://ns.google.com/photos/dd/1.0/device/"
         static let depthContainer = "http://ns.google.com/photos/dd/1.0/container/"
@@ -90,14 +92,16 @@ enum MetadataPolicy {
         if displayNamespaces.contains(ns) { return .display }
         switch ns {
         case NS.depthDevice:
-            // Only where the file's images lie; the device's pose may be a location.
-            return name == "Container" ? .display : nil
+            // Where the file's images lie and how its cameras saw them; the
+            // device's pose may be a location.
+            return ["Container", "Cameras", "Profiles"].contains(name) ? .display : nil
         case NS.googleCamera:
-            // How to show the photo (motion photo, portrait and panorama
-            // marks) — but not the HDR+ maker note and shot log, the camera's
-            // own records like EXIF's MakerNote.
-            // (hdrp_makernote, HdrPlusMakernote, shot_log_data).
-            return name.lowercased().contains("makernote") || name == "shot_log_data" ? nil : .display
+            // How to show the photo: motion photo, portrait and relighting
+            // marks. Not the HDR+ maker note and shot log (the camera's own
+            // records, like EXIF's MakerNote), nor burst ids that link photos.
+            let shows = ["MotionPhoto", "MicroVideo", "Portrait", "RelitInputImage"].contains { name.hasPrefix($0) }
+                || ["SpecialTypeID", "DisableSuggestedAction", "DisableAutoCreation"].contains(name)
+            return shows ? .display : nil
         case NS.tiff:
             switch name {
             // The orientation, and how the image data is laid out (HEIC

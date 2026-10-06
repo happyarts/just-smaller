@@ -179,20 +179,56 @@ final class MetadataTests {
     @Test func containerLengthsAreWritten() throws {
         let attributes = Array(GoogleXMPSamples.packet(GoogleXMPSamples.directory(gainMapLength: 1531, videoLength: 900)).utf8)
         let elements = Array(GoogleXMPSamples.packet("""
-            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
-            xmlns:Item="\(GoogleXMP.item[1])"><Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.containerNamespaces[1])" \
+            xmlns:Item="\(GoogleXMP.itemNamespaces[1])"><Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
             <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime></rdf:value></rdf:li>\
             <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
             <Item:Length>1531</Item:Length></rdf:value></rdf:li></rdf:Seq></Container:Directory></Device:Container></rdf:Description>
             """).utf8)
-        for packet in [attributes, elements] {
-            let filtered = try #require(XMPFilter.filter(packet, level: .removePrivate, itemLengths: [1: 1200]))
+        // Items straight in the list, without rdf:li.
+        let bare = Array(GoogleXMPSamples.packet(GoogleXMPSamples.directory(gainMapLength: 1531, videoLength: 900)
+            .replacingOccurrences(of: "<rdf:li rdf:parseType=\"Resource\">", with: "").replacingOccurrences(of: "</rdf:li>", with: "")).utf8)
+        func items(_ filtered: [UInt8]) throws -> [GoogleXMP.Item] {
             let segment = JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + filtered)
             let file = Data([0xFF, 0xD8]) + segment + Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
-            let items = try #require(GoogleXMP.read(try JPEGMarkers.headers(ByteView(file)).segments)?.directories.first)
-            #expect(items[1].length == 1200)
-            #expect(items.count < 3 || items[2].length == 900)
+            return try #require(GoogleXMP.read(try JPEGMarkers.headers(ByteView(file)).segments)?.directories.first)
         }
+        for packet in [attributes, elements, bare] {
+            let read = try items(try #require(XMPFilter.filter(packet, level: .removePrivate, itemLengths: [1: 1200])))
+            #expect(read[1].length == 1200)
+            #expect(read.count < 3 || read[2].length == 900)
+        }
+        // Only the entries given change: entry 2 here, entry 1 keeps its length.
+        let three = Array(GoogleXMPSamples.packet(GoogleXMPSamples.depthDirectory([("image/jpeg", 1531), ("image/jpeg", 900)])).utf8)
+        let read = try items(try #require(XMPFilter.filter(three, level: .removePrivate, itemLengths: [2: 77])))
+        #expect(read.map(\.length) == [0, 1531, 77])
+    }
+
+    /// The extended XMP writer at a part's exact size and around it: as many
+    /// parts as needed, each a valid segment, read back to the same packet;
+    /// the reader takes no overlapping parts, no parts of another packet's
+    /// length, and leaves parts of an earlier packet alone.
+    @Test func extendedXMPPartsAtTheirBoundaries() throws {
+        let part = 0xFFFF - 2 - JPEGMarkers.extendedXMPHeader.count - 40
+        for (size, parts) in [(part, 1), (part + 1, 2), (2 * part, 2), (0, 0)] {
+            let packet = (0..<size).map { UInt8(0x41 + $0 % 26) }
+            let written = JPEGMarkers.extendedXMPSegments(packet)
+            #expect(written.segments.count == parts, "\(size)")
+            let payloads = try written.segments.map { try JPEGMarkers.segment(at: 0, in: ByteView($0)).payload }
+            #expect(payloads.allSatisfy { $0.count <= 0xFFFF - 2 }, "\(size)")
+            for p in payloads { try PayloadCheck.extendedXMP(p.view(from: JPEGMarkers.extendedXMPHeader.count)) }
+            let chunks = payloads.map { $0.bytes.dropFirst(JPEGMarkers.extendedXMPHeader.count) }
+            if size > 0 { #expect(JPEGMarkers.extendedXMP(chunks, for: Data(written.guid.utf8)) == Data(packet), "\(size)") }
+        }
+        func chunk(_ guid: String, _ total: Int, _ offset: Int, _ data: String) -> Data {
+            func be(_ v: Int) -> [UInt8] { withUnsafeBytes(of: UInt32(v).bigEndian, Array.init) }
+            return Data(Array(guid.utf8) + be(total) + be(offset) + Array(data.utf8))
+        }
+        let guid = "0123456789ABCDEF0123456789ABCDEF", other = "FEDCBA9876543210FEDCBA9876543210", main = Data(guid.utf8)
+        #expect(JPEGMarkers.extendedXMP([chunk(guid, 4, 0, "abc"), chunk(guid, 4, 2, "cd")], for: main) == nil) // overlap
+        #expect(JPEGMarkers.extendedXMP([chunk(guid, 4, 0, "ab"), chunk(guid, 5, 2, "cd")], for: main) == nil) // lengths differ
+        #expect(JPEGMarkers.extendedXMP([chunk(other, 2, 0, "zz"), chunk(guid, 4, 0, "ab"), chunk(guid, 4, 2, "cd")], for: main)
+                == Data("abcd".utf8))
     }
 
     /// Google's camera namespace says how to show the photo (motion photo
@@ -200,13 +236,18 @@ final class MetadataTests {
     /// camera's own records and go like EXIF's MakerNote.
     @Test func googleCameraRecordsGo() throws {
         let packet = Array(GoogleXMPSamples.packet("""
-            <rdf:Description xmlns:GCamera="\(GoogleXMP.camera)" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" \
-            GCamera:hdrp_makernote="SERSUALvZDVt" GCamera:HdrPlusMakernote="SERSUALvZDVv" GCamera:shot_log_data="SERSUALvZDVu"/>
+            <rdf:Description xmlns:GCamera="\(GoogleXMP.cameraNamespace)" GCamera:MotionPhoto="1" GCamera:MotionPhotoVersion="1" \
+            GCamera:MicroVideoOffset="1234" GCamera:PortraitNote="x" GCamera:SpecialTypeID="t" \
+            GCamera:hdrp_makernote="SERSUALvZDVt" GCamera:HdrPlusMakernote="SERSUALvZDVv" GCamera:shot_log_data="SERSUALvZDVu" \
+            GCamera:BurstID="5e4c8a3e-1111" GCamera:SomethingNew="?"/>
             """).utf8)
         for level in [MetadataHandling.removePrivate, .removeAll] {
             let filtered = String(decoding: try #require(XMPFilter.filter(packet, level: level)), as: UTF8.self)
-            #expect(filtered.contains("MotionPhoto=\"1\"") && filtered.contains("MotionPhotoVersion"), "\(level)")
-            #expect(!filtered.contains("akernote") && !filtered.contains("shot_log_data"), "\(level)")
+            for kept in ["MotionPhoto=\"1\"", "MotionPhotoVersion", "MicroVideoOffset", "PortraitNote", "SpecialTypeID"] {
+                #expect(filtered.contains(kept), "\(level): \(kept)")
+            }
+            // Maker notes, the shot log, burst ids that link photos, and what isn't known go.
+            for gone in ["akernote", "shot_log_data", "BurstID", "SomethingNew"] { #expect(!filtered.contains(gone), "\(level): \(gone)") }
         }
     }
 
@@ -218,8 +259,8 @@ final class MetadataTests {
     @Test func largeExtendedXMPIsFilteredAndWrittenAgain() throws {
         let filler = String(repeating: "QUJD", count: 30_000) // display data, Base64 like GDepth:Data
         let depth = """
-            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
-            xmlns:Item="\(GoogleXMP.item[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/" \
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.containerNamespaces[1])" \
+            xmlns:Item="\(GoogleXMP.itemNamespaces[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/" \
             xmlns:GDepth="http://ns.google.com/photos/1.0/depthmap/" GDepth:Data="\(filler)">\
             <Device:Pose rdf:parseType="Resource"><Pose:Latitude>53.55</Pose:Latitude></Device:Pose>\
             <Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
@@ -234,6 +275,9 @@ final class MetadataTests {
         let original = try file("<rdf:Description xmlns:dc=\"http://purl.org/dc/elements/1.1/\" dc:format=\"image/jpeg\"/>", depth)
         let before = try #require(GoogleXMP.read(JPEGMarkers.headers(ByteView(original)).segments))
         #expect(before.listsMoreThanThePhoto)
+        // New lengths land in the extended part written again.
+        let lengthened = try JPEGMetadataFilter.filter(original, level: .removePrivate, orientation: 1, itemLengths: [1: 4242])
+        #expect(GoogleXMP.read(try JPEGMarkers.headers(ByteView(lengthened)).segments)?.directories.first?.last?.length == 4242)
         for level in [MetadataHandling.removePrivate, .removeAll] {
             let result = try JPEGMetadataFilter.filter(original, level: level, orientation: 1)
             let segments = try JPEGMarkers.headers(ByteView(result)).segments
@@ -259,8 +303,8 @@ final class MetadataTests {
     /// the device's pose, which may be a location.
     @Test func googleDirectoriesStay() throws {
         let depth = """
-            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
-            xmlns:Item="\(GoogleXMP.item[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/">\
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.containerNamespaces[1])" \
+            xmlns:Item="\(GoogleXMP.itemNamespaces[1])" xmlns:Pose="http://ns.google.com/photos/dd/1.0/pose/">\
             <Device:Pose rdf:parseType="Resource"><Pose:Latitude>53.55</Pose:Latitude></Device:Pose>\
             <Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
             <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime></rdf:value></rdf:li>\

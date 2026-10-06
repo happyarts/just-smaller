@@ -376,13 +376,13 @@ final class FileOptimizerTests {
         let png = Data(PNGChunks.signature) + PNGChunks.write("IHDR", [UInt8](repeating: 1, count: 13))
             + PNGChunks.write("tEXt", Array("in a comment".utf8)) + PNGChunks.write("IDAT", Array("in the image".utf8)) + PNGChunks.write("IEND", [])
         for data in [jpeg, png] {
-            let regions = MetadataCheck.metadataRegions(data)
+            let regions = MetadataRegions.of(data)
             #expect(regions.contains { $0.range(of: Data("in a comment".utf8)) != nil })
             #expect(!regions.contains { $0.range(of: Data("in the image".utf8)) != nil })
         }
         // HEIC keeps EXIF as an item in mdat, next to the image data: the item counts, the image doesn't.
         let heic = try Data(contentsOf: TestImages.gainMapPhoto(at: dir.appending(path: "regions.heic"), type: .heic))
-        let regions = MetadataCheck.metadataRegions(heic)
+        let regions = MetadataRegions.of(heic)
         #expect(regions.contains { $0.range(of: Data("Jane Doe".utf8)) != nil })
         #expect(regions.reduce(0) { $0 + $1.count } < heic.count / 2)
     }

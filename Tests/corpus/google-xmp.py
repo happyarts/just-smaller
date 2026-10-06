@@ -5,8 +5,9 @@ directory (Semantic, Mime, Length, Padding per item) and the motion photo
 mark. One JSON object per file on stdout:
 
     {"file": ..., "unreadable": bool, "directories": [[[semantic, mime, length, padding], ...]],
-     "motion": bool, "microVideoOffset": an older motion photo's video offset or null,
-     "after": bytes after the first image, "listed": sum of the items after the primary}
+     "depth": [is the directory Dynamic Depth's], "motion": bool,
+     "microVideoOffset": an older motion photo's video offset or null,
+     "after": bytes after the first image, "lists": one directory lists more than the photo}
 
 usage: google-xmp.py <jpeg>...
 """
@@ -21,6 +22,21 @@ XMP = b"http://ns.adobe.com/xap/1.0/\0"
 EXTENDED = b"http://ns.adobe.com/xmp/extension/\0"
 
 
+def image_end(b, i):
+    """Where the JPEG that starts at i ends (after its EOI), walking its
+    segments and entropy-coded data marker by marker; None without one."""
+    if b[i:i + 2] != b"\xff\xd8": return None
+    i += 2
+    while i + 2 <= len(b):
+        if b[i] != 0xFF: i += 1; continue
+        m = b[i + 1]
+        if m == 0xD9: return i + 2
+        if m == 0xFF: i += 1; continue  # a fill byte
+        if m == 0x00 or 0xD0 <= m <= 0xD7: i += 2; continue  # stuffing, restart marker
+        i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
+    return None
+
+
 def segments(b):
     """The first image's APPn segments up to its first scan, and where that image ends."""
     out, i = [], 2
@@ -31,14 +47,7 @@ def segments(b):
         n = int.from_bytes(b[i + 2:i + 4], "big")
         out.append((m, b[i + 4:i + 2 + n]))
         i += 2 + n
-    # End of the first image: walk the entropy-coded data marker by marker.
-    while i + 2 <= len(b):
-        if b[i] != 0xFF: i += 1; continue
-        m = b[i + 1]
-        if m == 0xD9: return out, i + 2
-        if m == 0x00 or m == 0xFF or 0xD0 <= m <= 0xD7: i += 2 if m != 0xFF else 1; continue
-        i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
-    return out, None
+    return out, image_end(b, 0)
 
 
 def name(tag):
@@ -54,7 +63,7 @@ def document(p):
 
 def read(packet):
     root = ET.fromstring(document(packet))
-    directories, motion, offset = [], False, None
+    directories, depth, motion, offset = [], [], False, None
     for el in root.iter():
         for key, value in list(el.attrib.items()) + [(el.tag, el.text or "")]:
             ns, local = name(key)
@@ -83,7 +92,8 @@ def read(packet):
                     items.append(item)
             if not items: raise ValueError("empty directory")
             directories.append(items)
-    return directories, motion, offset
+            depth.append(ns == CONTAINER[1])
+    return directories, depth, motion, offset
 
 
 def wanted(p):
@@ -96,8 +106,8 @@ def opinion(path):
     segs, end = segments(b)
     main = [p[len(XMP):] for m, p in segs if m == 0xE1 and p.startswith(XMP)]
     chunks = [p[len(EXTENDED):] for m, p in segs if m == 0xE1 and p.startswith(EXTENDED)]
-    result = {"file": path, "unreadable": False, "directories": [], "motion": False, "microVideoOffset": None,
-              "after": len(b) - end if end else None, "listed": None}
+    result = {"file": path, "unreadable": False, "directories": [], "depth": [], "motion": False, "microVideoOffset": None,
+              "after": len(b) - end if end else None}
     try:
         packets = [p for p in main if wanted(p)]
         if any(wanted(c) for c in chunks):
@@ -110,50 +120,42 @@ def opinion(path):
             if sum(len(c) - 40 for c in mine) != total: raise ValueError("extended")
             packets.append(bytes(whole))
         for p in packets:
-            d, motion, offset = read(p)
+            d, depth, motion, offset = read(p)
             result["directories"] += d
+            result["depth"] += depth
             result["motion"] = result["motion"] or motion
             if offset is not None:
                 if result["microVideoOffset"] not in (None, offset): raise ValueError("offsets differ")
                 result["microVideoOffset"] = offset
     except (ET.ParseError, ValueError):
-        result = {**result, "unreadable": True, "directories": [], "motion": False, "microVideoOffset": None}
-    lists = [d for d in result["directories"] if len(d) > 1]
-    if lists: result["listed"] = sum(i[2] + i[3] for i in lists[0][1:])
+        result = {**result, "unreadable": True, "directories": [], "depth": [], "motion": False, "microVideoOffset": None}
+    result["lists"] = sum(len(d) > 1 for d in result["directories"]) == 1
     return result
 
 
 def placed(path):
-    """Where the items after the photo lie, as (mime, start, end): counted
-    from the end of the file, or one after another right after the photo —
-    the first arrangement in which every JPEG item runs exactly from its SOI
-    to its EOI. None when the container lists nothing more, or no
-    arrangement fits."""
-    b = open(path, "rb").read()
-    result = opinion(path)
-    listing = [d for d in result["directories"] if len(d) > 1]
+    """Where the items after the photo lie, as (mime, start, end): Google's
+    container counts them from the end of the file, Dynamic Depth lays them
+    one after another right after the photo. None when the container lists
+    nothing more, or a JPEG item doesn't run exactly from its SOI to its EOI
+    there."""
+    b, result = open(path, "rb").read(), opinion(path)
+    listing = [(d, depth) for d, depth in zip(result["directories"], result["depth"]) if len(d) > 1]
     if result["unreadable"] or len(listing) != 1 or result["after"] is None: return None
-    photo_end, primary, items = len(b) - result["after"], listing[0][0], listing[0][1:]
-    def jpeg_end(i):
-        if b[i:i + 2] != b"\xff\xd8": return None
-        i += 2
-        while i + 2 <= len(b):
-            if b[i] != 0xFF: i += 1; continue
-            m = b[i + 1]
-            if m == 0xD9: return i + 2
-            if m in (0, 0xFF) or 0xD0 <= m <= 0xD7: i += 2 if m else 1; continue
-            i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
-        return None
-    end, from_end = len(b), []
-    for it in reversed(items):
-        end -= it[3] + it[2]; from_end.insert(0, (it[1], end, end + it[2]))
-    start, from_start = photo_end + primary[3], []
-    for it in items:
-        from_start.append((it[1], start, start + it[2])); start += it[2] + it[3]
-    for arrangement in (from_end, from_start):
-        if all(photo_end <= s and e <= len(b) for _, s, e in arrangement) and \
-           all(jpeg_end(s) == e for m, s, e in arrangement if m == "image/jpeg"):
-            return arrangement
+    (directory, from_photo), = listing
+    photo_end, primary, items = len(b) - result["after"], directory[0], directory[1:]
+    arrangement = []
+    if from_photo:
+        start = photo_end + primary[3]
+        for it in items:
+            arrangement.append((it[1], start, start + it[2])); start += it[2] + it[3]
+    else:
+        end = len(b)
+        for it in reversed(items):
+            end -= it[3] + it[2]; arrangement.insert(0, (it[1], end, end + it[2]))
+    if all(photo_end <= s and e <= len(b) for _, s, e in arrangement) and \
+       all(image_end(b, s) == e for m, s, e in arrangement if m == "image/jpeg"):
+        return arrangement
     return None
 
 

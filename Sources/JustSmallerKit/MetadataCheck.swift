@@ -29,6 +29,29 @@ enum MetadataCheck {
         do { pairs = try JPEGLayout.imagePairs(a, b) } catch {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
+        // What stays byte for byte that no filter reads: a motion photo's video
+        // passes only at "private" and only as a clean MP4 without metadata
+        // of its own (below "private" its own dates go); other parts never.
+        // Images kept as Base64 in the XMP (Lens Blur, portrait relighting):
+        // no filter reads them, so they may hold nothing the level removes.
+        if level != .keep, let headers = try? JPEGMarkers.headers(ByteView(b)).segments,
+           let embedded = GoogleXMP.read(headers)?.embeddedImages {
+            for image in embedded where image.isEmpty || hasMakerNotesToRemove(image, level: level)
+                || fields(image).keys.contains(where: { removes($0, at: level) }) {
+                throw VerificationError(reason: String(localized: "an image that must stay as it is (depth map, gain map) holds metadata this level removes",
+                                                       bundle: .module))
+            }
+        }
+        if level != .keep, let layout = JPEGLayout.read(ByteView(b)) {
+            for part in layout.keptData {
+                let clean = part.kind == .video && level == .removePrivate
+                    && (try? ByteView(b).view(part.range)).flatMap(MP4Metadata.holdsMetadata) == false
+                guard clean else {
+                    throw VerificationError(reason: String(localized: "a part that must stay as it is (a video, the camera maker’s data) holds metadata this level removes",
+                                                           bundle: .module))
+                }
+            }
+        }
         for pair in pairs {
             do { try verify(pair.original, pair.result, level: level) } catch is VerificationError where pair.original == pair.result {
                 // An image that may not change (Google's container counts on it) can't lose what it holds.
@@ -65,10 +88,10 @@ enum MetadataCheck {
             // The IIM digest is updated together with the IIM block; the
             // lengths in Google's container directory with the images it
             // lists — the structure check reads the result along them.
-            if merged[key] == value || key.name == "LegacyIPTCDigest" || isContainerDirectory(key) { continue }
+            if merged[key] == value || key.name == "LegacyIPTCDigest" || isJPEG(result) && isContainerDirectory(key) { continue }
             if sources == nil { sources = [fields(original, excludingXMP: true), xmpFields(original)] }
             if sources?.contains(where: { $0[key] == value }) == true { continue }
-            if regions == nil { regions = metadataRegions(original) }
+            if regions == nil { regions = MetadataRegions.of(original) }
             guard standsIn(regions ?? [], value) else {
                 throw VerificationError(reason: String(localized: "metadata changed", bundle: .module))
             }
@@ -80,6 +103,8 @@ enum MetadataCheck {
             }
         }
     }
+
+    private static func isJPEG(_ data: Data) -> Bool { ByteView(data).has([0xFF, 0xD8, 0xFF]) }
 
     private static func isContainerDirectory(_ key: Key) -> Bool {
         key.ns == MetadataPolicy.NS.googleContainer && key.name == "Directory"
@@ -151,37 +176,17 @@ enum MetadataCheck {
         }
     }
 
-    /// Where a file keeps its metadata — never its image data, where any text
-    /// turns up by chance: a JPEG's APPn and COM segments (of every image), a
-    /// PNG's or WebP's chunks but the image data, a HEIF's boxes but mdat and
-    /// its EXIF and XMP items. A file its reader can't take apart counts whole.
-    static func metadataRegions(_ data: Data) -> [Data] {
-        let b = ByteView(data)
-        if b.has([0xFF, 0xD8, 0xFF]) {
-            let images = JPEGLayout.read(b)?.images ?? [0..<data.count]
-            let segments = images.compactMap { try? JPEGMarkers.headers(b.view($0)).segments }
-            if segments.count == images.count {
-                return segments.joined().filter { JPEGCheck.isMetadata($0.marker) }.map(\.payload.bytes)
-            }
-        } else if b.has(PNGChunks.signature), let chunks = try? PNGChunks.read(b, strict: false) {
-            return chunks.filter { !["IDAT", "fdAT"].contains($0.type) }.map(\.data.bytes)
-        } else if b.has("RIFF"), b.has("WEBP", at: 8), case let riff = RIFFChunks.webp(b), riff.complete {
-            return riff.chunks.filter { !["VP8 ", "VP8L", "ALPH", "ANMF"].contains($0.type) }.map(\.data.bytes)
-        } else if b.has("ftyp", at: 4), let file = try? HEIFItems.File(b), let boxes = try? BMFFBoxes.boxes(b, topLevel: true) {
-            // EXIF and XMP items mostly lie in mdat: those, and the boxes but mdat.
-            let items = (file.items("Exif") + file.metadataXMP).compactMap { id in (try? file.range(of: id)).flatMap { try? b.view($0) } }
-            return boxes.filter { $0.type != "mdat" }.map(\.payload.bytes) + items.map(\.bytes)
-        }
-        return [data]
-    }
-
-    /// The file's XMP packet alone.
+    /// The file's XMP packet alone: the first in its metadata (a JPEG's
+    /// photo before the images after it), never one in image or video data.
     private static func xmpFields(_ data: Data) -> [Key: Value] {
-        guard let start = data.range(of: Data("<x:xmpmeta".utf8)),
-              let end = data.range(of: Data("</x:xmpmeta>".utf8), in: start.upperBound..<data.endIndex),
-              let metadata = CGImageMetadataCreateFromXMPData(data[start.lowerBound..<end.upperBound] as CFData)
-        else { return [:] }
-        return fields(metadata)
+        for region in MetadataRegions.of(data) {
+            guard let start = region.range(of: Data("<x:xmpmeta".utf8)) else { continue }
+            guard let end = region.range(of: Data("</x:xmpmeta>".utf8), in: start.upperBound..<region.endIndex),
+                  let metadata = CGImageMetadataCreateFromXMPData(region[start.lowerBound..<end.upperBound] as CFData)
+            else { return [:] }
+            return fields(metadata)
+        }
+        return [:]
     }
 
     private static func fields(_ metadata: CGImageMetadata) -> [Key: Value] {
