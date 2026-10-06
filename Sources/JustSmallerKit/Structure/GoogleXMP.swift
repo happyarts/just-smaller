@@ -56,7 +56,7 @@ struct GoogleXMP: Equatable, Sendable {
     /// (Dynamic Depth, whose camera data may follow them). Both, when both
     /// fit; the layout checks which one the images are really at. Empty
     /// unless exactly one directory lists more than the photo.
-    func arrangements(in trailer: Int) -> [[(item: Item, range: Range<Int>)]] {
+    func arrangements(in trailer: Int) -> [(fromEnd: Bool, items: [(item: Item, range: Range<Int>)])] {
         let listing = directories.filter { $0.count > 1 }
         guard listing.count == 1, let primary = listing[0].first else { return [] }
         let items = Array(listing[0].dropFirst())
@@ -74,7 +74,7 @@ struct GoogleXMP: Equatable, Sendable {
             fromStart?.append((item, start..<start + item.length))
             start += item.length + item.padding
         }
-        return [fromEnd, fromStart].compactMap { $0 }
+        return [fromEnd.map { (true, $0) }, fromStart.map { (false, $0) }].compactMap { $0 }
     }
 
     private var videos: [Item] { directories.joined().filter(Self.isVideo) }

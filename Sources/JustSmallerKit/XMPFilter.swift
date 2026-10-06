@@ -24,11 +24,12 @@ enum XMPFilter {
     /// photoshop:LegacyIPTCDigest when the IIM block it describes changed.
     /// `extendedGUID`: the packet names this extended XMP (written on its
     /// own) in xmpNote:HasExtendedXMP. `wrapped`: with the packet wrapper
-    /// (an extended packet has none).
+    /// (an extended packet has none). `itemLengths`: new lengths for entries
+    /// of Google's container directory (entry → bytes, the photo is 0).
     /// Unparseable XMP is dropped: better no data than stray data.
     static func filter(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]? = nil,
                        digest: (old: String, new: String)? = nil, extendedGUID: String? = nil,
-                       wrapped: Bool = true) -> [UInt8]? {
+                       wrapped: Bool = true, itemLengths: [Int: Int] = [:]) -> [UInt8]? {
         // Under the engine's XML lock (see XML). Removed nodes still point
         // into their document, so the documents must outlive them: they are
         // released only after the autorelease pool that holds the nodes.
@@ -36,7 +37,7 @@ enum XMPFilter {
             var documents: [XMLDocument] = []
             let result = autoreleasepool {
                 filterLocked(packet, level: level, merging: extended, digest: digest, extendedGUID: extendedGUID,
-                             wrapped: wrapped, documents: &documents)
+                             wrapped: wrapped, itemLengths: itemLengths, documents: &documents)
             }
             withExtendedLifetime(documents) {}
             return result
@@ -45,7 +46,7 @@ enum XMPFilter {
 
     private static func filterLocked(_ packet: [UInt8], level: MetadataHandling, merging extended: [UInt8]?,
                                      digest: (old: String, new: String)?, extendedGUID: String?, wrapped: Bool,
-                                     documents: inout [XMLDocument]) -> [UInt8]? {
+                                     itemLengths: [Int: Int], documents: inout [XMLDocument]) -> [UInt8]? {
         guard let document = parse(packet), let rdf = findRDF(document.rootElement()) else { return nil }
         documents.append(document)
         if let extended, let extra = parse(extended), let extraRDF = findRDF(extra.rootElement()) {
@@ -65,6 +66,7 @@ enum XMPFilter {
                 rdf.addChild(description)
             }
         }
+        if !itemLengths.isEmpty { setLengths(itemLengths, in: rdf) }
         for description in (rdf.children ?? []).compactMap({ $0 as? XMLElement }) {
             // rdf:about may name the document ("uuid:…"); readers take it as
             // its instance id. The empty name is what XMP recommends.
@@ -146,6 +148,44 @@ enum XMPFilter {
                 property.detach()
             } else if let digest, isDigest(property, in: description), property.stringValue == digest.old {
                 property.stringValue = digest.new
+            }
+        }
+    }
+
+    /// In each of Google's container directories below `element`, entry k
+    /// gets `lengths[k]` as its Length — an attribute or an element. Entries
+    /// as GoogleXMP reads them: each outermost rdf:li, or a Container:Item
+    /// outside one.
+    private static func setLengths(_ lengths: [Int: Int], in element: XMLElement) {
+        if GoogleXMP.container.contains(element.uri ?? ""), element.localName == "Directory" {
+            var entries: [XMLElement] = []
+            func collect(_ e: XMLElement) {
+                for child in (e.children ?? []).compactMap({ $0 as? XMLElement }) {
+                    if child.uri == MetadataPolicy.NS.rdf && child.localName == "li"
+                        || GoogleXMP.container.contains(child.uri ?? "") && child.localName == "Item" {
+                        entries.append(child)
+                    } else {
+                        collect(child)
+                    }
+                }
+            }
+            collect(element)
+            for (k, entry) in entries.enumerated() { if let length = lengths[k] { setLength(length, in: entry) } }
+            return
+        }
+        for child in (element.children ?? []).compactMap({ $0 as? XMLElement }) { setLengths(lengths, in: child) }
+    }
+
+    private static func setLength(_ length: Int, in element: XMLElement) {
+        for attribute in element.attributes ?? []
+        where attribute.localName == "Length" && GoogleXMP.item.contains(namespace(of: attribute, in: element) ?? "") {
+            attribute.stringValue = String(length)
+        }
+        for child in (element.children ?? []).compactMap({ $0 as? XMLElement }) {
+            if child.localName == "Length", GoogleXMP.item.contains(child.uri ?? "") {
+                child.stringValue = String(length)
+            } else {
+                setLength(length, in: child)
             }
         }
     }

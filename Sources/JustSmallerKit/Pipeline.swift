@@ -222,10 +222,13 @@ enum Pipeline {
     /// Each image keeps its own orientation.
     static func jpegMetadata(_ level: MetadataHandling, orientation: Int, layout: JPEGLayout?) -> Candidate {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: level != .keep) { input, output, work in
-            _ = try await eachImage(of: input, to: output, layout: layout, work: work, level: level) { from, to, n in
+            // Below "keep everything" the images Google's container lists are
+            // filtered too, their new lengths written into its directory.
+            _ = try await eachImage(of: input, to: output, layout: layout, work: work, level: level,
+                                    writingLengths: level != .keep) { from, to, n, lengths in
                 let image = try Data(contentsOf: from)
-                try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image))
-                    .write(to: to)
+                try JPEGMetadataFilter.filter(image, level: level, orientation: n == 0 ? orientation : FileFacts.orientation(of: image),
+                                              itemLengths: lengths).write(to: to)
                 return true
             }
             try MetadataCheck.verify(original: input, result: output, level: level)
@@ -240,7 +243,7 @@ enum Pipeline {
     static func jpegScan(effort: Effort, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpeg-scan") { input, output, work in
             // Gaps the metadata step left stay.
-            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, onlySmaller: true) { from, to, _ in
+            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, onlySmaller: true) { from, to, _, _ in
                 do {
                     try await ToolRunner.run("jpeg-scan", ["--effort", effort.rawValue, from.path, to.path], in: work)
                 } catch let error as ToolError where error.status == 3 {
@@ -254,7 +257,7 @@ enum Pipeline {
     /// jpegli (Google, BSD). It drops metadata, so the original's is put back.
     static func jpegli(quality: Int, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
-            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _ in
+            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
                 let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")
                 try await ToolRunner.run("cjpegli", [from.path, encoded.path, "--quality=\(quality)"], in: work)
                 try JPEGMetadataFilter.transplant(metadataFrom: Data(contentsOf: from), into: Data(contentsOf: encoded)).write(to: to)
@@ -274,31 +277,42 @@ enum Pipeline {
     /// `change` writes image `n` changed and returns true, or returns false
     /// to leave it as it was; `onlySmaller` keeps it only when it got
     /// smaller. Returns what `change` returned for a plain JPEG, else true.
+    /// `writingLengths`: the images Google's container lists may change too;
+    /// they are changed first, and `change` gets their new lengths for the
+    /// photo's directory (entry → bytes; empty for every other image).
     private static func eachImage(of input: URL, to output: URL, layout original: JPEGLayout?, work: URL, level: MetadataHandling,
-                                  withLoss lossy: Bool = false, onlySmaller: Bool = false,
-                                  _ change: @escaping @Sendable (_ from: URL, _ to: URL, _ n: Int) async throws -> Bool) async throws -> Bool {
-        if original?.isPlain ?? true { return try await change(input, output, 0) }
+                                  withLoss lossy: Bool = false, onlySmaller: Bool = false, writingLengths: Bool = false,
+                                  _ change: @escaping @Sendable (_ from: URL, _ to: URL, _ n: Int, _ lengths: [Int: Int]) async throws -> Bool)
+        async throws -> Bool {
+        if original?.isPlain ?? true { return try await change(input, output, 0, [:]) }
         let data = try Data(contentsOf: input, options: .alwaysMapped)
         guard let layout = JPEGLayout.read(ByteView(data)), layout.problem == nil else { throw FormatError("JPEG layout") }
-        let images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
-            for (n, range) in layout.images.enumerated() {
-                let image = data.subdata(in: range)
-                guard layout.mayChange(image: n, withLoss: lossy) else { group.addTask { (n, image) }; continue }
-                group.addTask {
-                    let id = UUID().uuidString
-                    let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-changed.jpg")
-                    defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }
-                    try image.write(to: from)
-                    guard try await change(from, to, n) else { return (n, image) }
-                    let changed = try Data(contentsOf: to)
-                    return (n, !onlySmaller || changed.count < image.count ? changed : image)
-                }
+        func changed(_ n: Int, _ lengths: [Int: Int]) async throws -> Data {
+            let image = data.subdata(in: layout.images[n])
+            guard layout.mayChange(image: n, withLoss: lossy, writingLengths: writingLengths) else { return image }
+            let id = UUID().uuidString
+            let from = work.appending(path: "image\(n)-\(id).jpg"), to = work.appending(path: "image\(n)-\(id)-changed.jpg")
+            defer { try? FileManager.default.removeItem(at: from); try? FileManager.default.removeItem(at: to) }
+            try image.write(to: from)
+            guard try await change(from, to, n, lengths) else { return image }
+            let result = try Data(contentsOf: to)
+            return !onlySmaller || result.count < image.count ? result : image
+        }
+        // The photo last when it has to name the others' lengths.
+        let photoLast = writingLengths && layout.index == .container
+        var images = try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for n in layout.images.indices where !(photoLast && n == 0) {
+                group.addTask { (n, try await changed(n, [:])) }
             }
             var images = [Data](repeating: Data(), count: layout.images.count)
             for try await (n, image) in group { images[n] = image }
             return images
         }
-        try layout.assembled(images, from: data, keepingGaps: layout.keepsGaps(at: level)).write(to: output)
+        if photoLast {
+            let lengths = Dictionary(uniqueKeysWithValues: zip(layout.containerEntries, images.dropFirst().map(\.count)))
+            images[0] = try await changed(0, lengths)
+        }
+        try layout.assembled(images, from: data, level: level).write(to: output)
         return true
     }
 

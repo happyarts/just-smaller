@@ -18,7 +18,9 @@ enum JPEGMetadataFilter {
     /// The largest payload of a segment: its length field counts itself.
     private static let maxPayload = 0xFFFF - 2
 
-    static func filter(_ data: Data, level: MetadataHandling, orientation: Int) throws -> Data {
+    /// `itemLengths`: new lengths for entries of Google's container directory
+    /// (entry → bytes), when the images it lists changed with this filter.
+    static func filter(_ data: Data, level: MetadataHandling, orientation: Int, itemLengths: [Int: Int] = [:]) throws -> Data {
         let (headers, imageData) = try segments(data)
         let payloads = headers.map { Array($0.bytes.dropFirst(4)) }
         func isApp(_ k: Int, _ marker: UInt8, _ header: [UInt8]) -> Bool {
@@ -53,14 +55,14 @@ enum JPEGMetadataFilter {
             let packet = Array(payloads[xmpIndex].dropFirst(JPEGMarkers.xmpHeader.count))
             let extended = JPEGMarkers.extendedXMP(payloads.enumerated().filter { isApp($0.offset, 0xE1, JPEGMarkers.extendedXMPHeader) }
                 .map { Data($0.element.dropFirst(JPEGMarkers.extendedXMPHeader.count)) }, for: Data(packet)).map(Array.init)
-            xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest)
+            xmp = XMPFilter.filter(packet, level: level, merging: extended, digest: iptc.digest, itemLengths: itemLengths)
             if let merged = xmp, merged.count + JPEGMarkers.xmpHeader.count > maxPayload {
-                if let rest = extended.flatMap({ XMPFilter.filter($0, level: level, wrapped: false) }) {
+                if let rest = extended.flatMap({ XMPFilter.filter($0, level: level, wrapped: false, itemLengths: itemLengths) }) {
                     let written = JPEGMarkers.extendedXMPSegments(rest)
-                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest, extendedGUID: written.guid)
+                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest, extendedGUID: written.guid, itemLengths: itemLengths)
                     extendedSegments = written.segments
                 } else {
-                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest)
+                    xmp = XMPFilter.filter(packet, level: level, digest: iptc.digest, itemLengths: itemLengths)
                 }
             }
             if let packet = xmp, packet.count + JPEGMarkers.xmpHeader.count > maxPayload { xmp = nil }

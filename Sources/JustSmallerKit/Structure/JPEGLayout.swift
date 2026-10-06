@@ -5,7 +5,7 @@ import Foundation
 ///
 /// The one place that knows which parts of a JPEG may change. The optimizer
 /// decides with it which files stay as they are (`problem`), the pipeline
-/// changes files part by part along it (`mayChange`, `keepsGaps`,
+/// changes files part by part along it (`mayChange`, `keepsGap`,
 /// `assembled`), and the structure check holds every result to the same
 /// rules (`check`).
 ///
@@ -61,6 +61,14 @@ struct JPEGLayout: Sendable {
     /// photo's MicroVideoOffset places its video: all of it, and the bytes
     /// between, must stay where it is. Only the rules below read it.
     private let listedByContainer: Bool
+    /// With `index == .container`: for each image after the first, its
+    /// entry in the container's directory (the photo is entry 0), and the
+    /// directory itself.
+    let containerEntries: [Int]
+    private let directory: [GoogleXMP.Item]
+    /// The bytes after the last image are no part of what the container
+    /// lists (Dynamic Depth's camera data): leftover bytes like any other.
+    private let leftoverAfter: Bool
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
     static func read(_ b: ByteView, firstEnd: Int? = nil) -> JPEGLayout? {
@@ -85,17 +93,22 @@ struct JPEGLayout: Sendable {
         // Nothing follows a plain JPEG's photo: whatever its XMP says counts nothing.
         if images.count == 1, trailer.isPadding {
             return JPEGLayout(images: images, gaps: gaps(images), index: index, problem: indexFits ? nil : .unfittingIndex,
-                              isPlain: true, listedByContainer: false)
+                              isPlain: true, listedByContainer: false, containerEntries: [], directory: [], leftoverAfter: false)
         }
         let xmp = GoogleXMP.read(headers)
+        var entries: [Int] = [], directory: [GoogleXMP.Item] = [], leftoverAfter = false
         if index == .none, indexFits, let xmp, let rest = listed(by: xmp, after: firstEnd, trailer: trailer.count, in: b) {
-            images += rest
+            images += rest.images.map(\.range)
+            entries = rest.images.map(\.entry)
+            directory = xmp.directories.first { $0.count > 1 } ?? []
+            leftoverAfter = rest.endsListing
             index = .container
             trailer = (try? b.view(gaps(images)[images.count - 1])) ?? ByteView(Data())
         }
         return JPEGLayout(images: images, gaps: gaps(images), index: index,
                           problem: problem(index: index, indexFits: indexFits, xmp: xmp, trailer: trailer),
-                          isPlain: false, listedByContainer: xmp?.listsMoreThanThePhoto == true || xmp?.video(endingAt: trailer) != nil)
+                          isPlain: false, listedByContainer: xmp?.listsMoreThanThePhoto == true || xmp?.video(endingAt: trailer) != nil,
+                          containerEntries: entries, directory: directory, leftoverAfter: leftoverAfter)
     }
 
     /// Why the file must stay as it is, asked in this order:
@@ -127,13 +140,21 @@ struct JPEGLayout: Sendable {
 
     /// The JPEGs Google's container lists after the photo, where it says
     /// they are: in one of its arrangements, each exactly from its SOI to
-    /// its EOI. nil when it lists none, or they aren't there.
-    private static func listed(by xmp: GoogleXMP, after photo: Int, trailer: Int, in b: ByteView) -> [Range<Int>]? {
+    /// its EOI, with its entry in the directory. nil when it lists none, or
+    /// they aren't there.
+    /// `endsListing`: the last image is the directory's last entry, with
+    /// nothing after it, and nothing counts from the end of the file — what
+    /// follows it (camera data) is leftover bytes.
+    private static func listed(by xmp: GoogleXMP, after photo: Int, trailer: Int, in b: ByteView)
+        -> (images: [(range: Range<Int>, entry: Int)], endsListing: Bool)? {
         for arrangement in xmp.arrangements(in: trailer) {
-            let jpegs = arrangement.filter { $0.item.mime?.lowercased() == "image/jpeg" }
-                .map { $0.range.lowerBound + photo..<$0.range.upperBound + photo }
+            let jpegs = arrangement.items.enumerated().filter { $0.element.item.mime?.lowercased() == "image/jpeg" }
+                .map { (range: $0.element.range.lowerBound + photo..<$0.element.range.upperBound + photo, entry: $0.offset + 1) }
             guard !jpegs.isEmpty else { return nil }
-            if jpegs.allSatisfy({ (try? JPEGMarkers.imageEnd(from: $0.lowerBound, in: b)) == $0.upperBound }) { return jpegs }
+            if jpegs.allSatisfy({ (try? JPEGMarkers.imageEnd(from: $0.range.lowerBound, in: b)) == $0.range.upperBound }) {
+                let last = arrangement.items.last
+                return (jpegs, !arrangement.fromEnd && jpegs.last?.entry == arrangement.items.count && last?.item.padding == 0)
+            }
         }
         return nil
     }
@@ -157,18 +178,29 @@ struct JPEGLayout: Sendable {
     /// container counts from the end of the file. With loss (encoded anew),
     /// only a plain JPEG's photo for now: a gain map or a depth image is
     /// made for its photo, and neither may simply change with it.
-    func mayChange(image n: Int, withLoss lossy: Bool = false) -> Bool {
-        lossy ? isPlain && n == 0 : n == 0 || !listedByContainer
+    ///
+    /// `writingLengths`: the step writes the images' new lengths into the
+    /// container's directory (the metadata step, below "keep everything").
+    /// Then the images only the container lists may change as well; those
+    /// a multi-picture index lists too keep their bytes.
+    func mayChange(image n: Int, withLoss lossy: Bool = false, writingLengths: Bool = false) -> Bool {
+        if lossy { return isPlain && n == 0 }
+        return n == 0 || !listedByContainer || index == .container && writingLengths
     }
 
     /// Whether any image may change with loss: a lossy step is worth trying.
     var mayChangeWithLoss: Bool { images.indices.contains { mayChange(image: $0, withLoss: true) } }
 
-    /// Leftover bytes could hold anything: like unknown metadata they go
-    /// unless everything stays — or the container lists what follows the
-    /// photo, and counts across them.
-    func keepsGaps(at level: MetadataHandling) -> Bool {
-        level == .keep || listedByContainer
+    /// Gap `k` (after image k): leftover bytes could hold anything, so like
+    /// unknown metadata they go unless everything stays — or the container
+    /// lists what follows the photo, and counts across them.
+    func keepsGap(_ k: Int, at level: MetadataHandling) -> Bool {
+        level == .keep || mustKeepGap(k)
+    }
+
+    /// Where the container counts across the gap, it stays as it is.
+    private func mustKeepGap(_ k: Int) -> Bool {
+        listedByContainer && !(leftoverAfter && k == gaps.count - 1)
     }
 
     /// Holds `result` (laid out as `after`), made from the original `a` this
@@ -180,15 +212,26 @@ struct JPEGLayout: Sendable {
     func check(_ after: JPEGLayout, in result: ByteView, original a: ByteView, level: MetadataHandling) throws {
         guard after.images.count == images.count else { throw FormatError("images lost or added") }
         guard after.problem == nil else { throw FormatError("images can't be read safely") }
-        for n in images.indices where !mayChange(image: n) {
+        // Below "keep everything" the metadata step writes the container's lengths.
+        for n in images.indices where !mayChange(image: n, writingLengths: level != .keep) {
             guard try result.view(after.images[n]).bytes == a.view(images[n]).bytes else { throw FormatError("image \(n + 1) changed") }
         }
-        for (gap, original) in zip(after.gaps, gaps) {
+        for (k, (gap, original)) in zip(after.gaps, gaps).enumerated() {
             let bytes = try result.view(gap), before = try a.view(original)
             let kept = bytes.bytes == before.bytes
-            guard listedByContainer ? kept : kept && keepsGaps(at: level) || bytes.isPadding else {
+            guard mustKeepGap(k) ? kept : kept && keepsGap(k, at: level) || bytes.isPadding else {
                 throw FormatError("data between or after the images changed")
             }
+        }
+        if index == .container {
+            // The directory as it was, but for the lengths of the images it
+            // lists — and those are exactly the images' new sizes.
+            var expected = directory
+            for (entry, image) in zip(containerEntries, after.images.dropFirst()) where expected.indices.contains(entry) {
+                expected[entry].length = image.count
+            }
+            guard after.index == .container, after.containerEntries == containerEntries, after.directory == expected
+            else { throw FormatError("container directory") }
         }
         guard index == .multiPicture else { return }
         // Only the sizes and starts in the index may change, and they are exact.
@@ -201,9 +244,11 @@ struct JPEGLayout: Sendable {
     // MARK: - Writer
 
     /// The file `data` (which this layout was read from) with its images
-    /// replaced by `new`, and its gaps kept or left out.
-    func assembled(_ new: [Data], from data: Data, keepingGaps: Bool) throws -> Data {
-        try Self.joined(new, gaps: keepingGaps ? gaps.map { data.subdata(in: $0) } : [], rewritingIndex: index == .multiPicture)
+    /// replaced by `new`, and its gaps kept or left out as they may be at
+    /// `level`.
+    func assembled(_ new: [Data], from data: Data, level: MetadataHandling) throws -> Data {
+        let kept = gaps.indices.map { keepsGap($0, at: level) ? data.subdata(in: gaps[$0]) : Data() }
+        return try Self.joined(new, gaps: kept, rewritingIndex: index == .multiPicture)
     }
 
     /// `images` one after another, each followed by its gap (none when

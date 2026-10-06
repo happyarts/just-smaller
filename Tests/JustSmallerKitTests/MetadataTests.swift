@@ -173,6 +173,28 @@ final class MetadataTests {
         #expect(filtered.contains("Jane Doe") && !filtered.contains("GPS"))
     }
 
+    /// New lengths go into the container's directory, as an attribute
+    /// (Ultra HDR) or an element (Dynamic Depth); entries without a new
+    /// length keep theirs.
+    @Test func containerLengthsAreWritten() throws {
+        let attributes = Array(GoogleXMPSamples.packet(GoogleXMPSamples.directory(gainMapLength: 1531, videoLength: 900)).utf8)
+        let elements = Array(GoogleXMPSamples.packet("""
+            <rdf:Description xmlns:Device="\(MetadataPolicy.NS.depthDevice)" xmlns:Container="\(GoogleXMP.container[1])" \
+            xmlns:Item="\(GoogleXMP.item[1])"><Device:Container rdf:parseType="Resource"><Container:Directory><rdf:Seq>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime></rdf:value></rdf:li>\
+            <rdf:li rdf:parseType="Resource"><rdf:value rdf:parseType="Resource"><Item:Mime>image/jpeg</Item:Mime>\
+            <Item:Length>1531</Item:Length></rdf:value></rdf:li></rdf:Seq></Container:Directory></Device:Container></rdf:Description>
+            """).utf8)
+        for packet in [attributes, elements] {
+            let filtered = try #require(XMPFilter.filter(packet, level: .removePrivate, itemLengths: [1: 1200]))
+            let segment = JPEGMarkers.write(0xE1, JPEGMarkers.xmpHeader + filtered)
+            let file = Data([0xFF, 0xD8]) + segment + Data([0xFF, 0xDA, 0x00, 0x02, 0x11, 0x22, 0xFF, 0xD9])
+            let items = try #require(GoogleXMP.read(try JPEGMarkers.headers(ByteView(file)).segments)?.directories.first)
+            #expect(items[1].length == 1200)
+            #expect(items.count < 3 || items[2].length == 900)
+        }
+    }
+
     /// Google's camera namespace says how to show the photo (motion photo
     /// marks stay at every level); its HDR+ maker note and shot log are the
     /// camera's own records and go like EXIF's MakerNote.

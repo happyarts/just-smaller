@@ -62,8 +62,10 @@ enum MetadataCheck {
             if level != .keep, removes(key, at: level) {
                 throw leftover
             }
-            // The IIM digest is updated together with the IIM block.
-            if merged[key] == value || key.name == "LegacyIPTCDigest" { continue }
+            // The IIM digest is updated together with the IIM block; the
+            // lengths in Google's container directory with the images it
+            // lists — the structure check reads the result along them.
+            if merged[key] == value || key.name == "LegacyIPTCDigest" || isContainerDirectory(key) { continue }
             if sources == nil { sources = [fields(original, excludingXMP: true), xmpFields(original)] }
             if sources?.contains(where: { $0[key] == value }) == true { continue }
             if regions == nil { regions = metadataRegions(original) }
@@ -77,6 +79,11 @@ enum MetadataCheck {
                 throw VerificationError(reason: String(localized: "copyright or creator information lost", bundle: .module))
             }
         }
+    }
+
+    private static func isContainerDirectory(_ key: Key) -> Bool {
+        key.ns == MetadataPolicy.NS.googleContainer && key.name == "Directory"
+            || key.ns == MetadataPolicy.NS.depthDevice && key.name == "Container"
     }
 
     private static var leftover: VerificationError {

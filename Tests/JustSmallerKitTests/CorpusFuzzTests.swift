@@ -90,7 +90,7 @@ struct CorpusFuzzTests {
         case .jpeg:
             _ = MultiPictureIndex.read(ByteView(data))
             if let headers = try? JPEGMarkers.headers(ByteView(data)).segments { _ = GoogleXMP.read(headers) }
-            if let layout = JPEGLayout.read(ByteView(data)) { _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, keepingGaps: true) }
+            if let layout = JPEGLayout.read(ByteView(data)) { _ = try? layout.assembled(layout.images.map { data.subdata(in: $0) }, from: data, level: .keep) }
             _ = JPEGQuality.estimate(data)
         case .webp:
             _ = RIFFChunks.webp(ByteView(data))

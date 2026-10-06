@@ -123,6 +123,40 @@ def opinion(path):
     return result
 
 
+def placed(path):
+    """Where the items after the photo lie, as (mime, start, end): counted
+    from the end of the file, or one after another right after the photo —
+    the first arrangement in which every JPEG item runs exactly from its SOI
+    to its EOI. None when the container lists nothing more, or no
+    arrangement fits."""
+    b = open(path, "rb").read()
+    result = opinion(path)
+    listing = [d for d in result["directories"] if len(d) > 1]
+    if result["unreadable"] or len(listing) != 1 or result["after"] is None: return None
+    photo_end, primary, items = len(b) - result["after"], listing[0][0], listing[0][1:]
+    def jpeg_end(i):
+        if b[i:i + 2] != b"\xff\xd8": return None
+        i += 2
+        while i + 2 <= len(b):
+            if b[i] != 0xFF: i += 1; continue
+            m = b[i + 1]
+            if m == 0xD9: return i + 2
+            if m in (0, 0xFF) or 0xD0 <= m <= 0xD7: i += 2 if m else 1; continue
+            i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
+        return None
+    end, from_end = len(b), []
+    for it in reversed(items):
+        end -= it[3] + it[2]; from_end.insert(0, (it[1], end, end + it[2]))
+    start, from_start = photo_end + primary[3], []
+    for it in items:
+        from_start.append((it[1], start, start + it[2])); start += it[2] + it[3]
+    for arrangement in (from_end, from_start):
+        if all(photo_end <= s and e <= len(b) for _, s, e in arrangement) and \
+           all(jpeg_end(s) == e for m, s, e in arrangement if m == "image/jpeg"):
+            return arrangement
+    return None
+
+
 if __name__ == "__main__":
     for path in sys.argv[1:]:
         print(json.dumps(opinion(path)))

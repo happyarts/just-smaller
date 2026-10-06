@@ -7,14 +7,15 @@
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
 # the same, and files named broken-* or unchanged-* must be left byte-for-byte
-# alone; after a photo whose Google container lists more (images, a video)
-# nothing may change, and Ultra HDR results must decode in Google's
-# libultrahdr as before (if built: build-ultrahdr.sh). Google's XMP in the
-# JPEGs is read a second time by an independent reader (google-xmp.py) and
-# must read the same. --private runs your own photos in Testkorpus/private (a
-# folder or a link to one; never in a repository) the same way. Result sizes
-# are compared with the last baseline so that a compression regression shows
-# up even when everything is still lossless.
+# alone; what a photo's Google container lists (images, a video) must lie
+# where its directory says, the same images and bytes, and Ultra HDR results
+# must decode in Google's libultrahdr as before (if built:
+# build-ultrahdr.sh). Google's XMP in the JPEGs is read a second time by an
+# independent reader (google-xmp.py) and must read the same. --private runs
+# your own photos in Testkorpus/private (a folder or a link to one; never in
+# a repository) the same way. Result sizes are compared with the last
+# baseline so that a compression regression shows up even when everything is
+# still lossless.
 #
 # Works on a copy; replaced originals are deleted (--no-trash), never moved to
 # the Trash, and no settings are read or written.
@@ -173,13 +174,29 @@ for n in names:
             r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
             if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
         # What Google's container lists after the photo (images, a motion
-        # photo's video) is found from the end of the file or of the photo:
-        # everything after the photo must stay. Read with the second reader.
+        # photo's video), read with the second reader: in the result each
+        # item lies where its directory says, each JPEG with the same
+        # coefficients, anything else byte for byte. An older motion photo's
+        # video (no directory): everything after the photo stays.
         whole_a, whole_b = open(a, "rb").read(), open(b, "rb").read()
         tail = whole_a[len(ia[0]):] if ia else b""
         said = google_xmp.opinion(a)
-        listed = said["listed"] is not None or (said["motion"] and b"ftyp" in tail)
-        if listed and not whole_b.endswith(tail): fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
+        pa = google_xmp.placed(a) if said["listed"] is not None else None
+        if pa is not None:
+            pb = google_xmp.placed(b)
+            if pb is None or [m for m, _, _ in pa] != [m for m, _, _ in pb]:
+                fails.append((n, "CONTAINER ITEMS NOT WHERE ITS DIRECTORY SAYS"))
+            else:
+                for (m, sa, ea), (_, sb, eb) in zip(pa, pb):
+                    if m != "image/jpeg":
+                        if whole_a[sa:ea] != whole_b[sb:eb]: fails.append((n, f"CONTAINER ITEM CHANGED ({m})"))
+                        continue
+                    xa, xb = os.path.join(work, "item-a.jpg"), os.path.join(work, "item-b.jpg")
+                    open(xa, "wb").write(whole_a[sa:ea]); open(xb, "wb").write(whole_b[sb:eb])
+                    r = subprocess.run([jpegcmp, xa, xb], capture_output=True, text=True)
+                    if r.returncode != 0: fails.append((n, "COEFFICIENTS (container item): " + (r.stdout + r.stderr).strip()))
+        elif (said["listed"] is not None or said["motion"] and b"ftyp" in tail) and not whole_b.endswith(tail):
+            fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
         r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
         if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
         # Google's own decoder, a second opinion on HDR gain maps: an Ultra

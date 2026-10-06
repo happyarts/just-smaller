@@ -222,7 +222,7 @@ final class MultiImageJPEGTests {
         let file = try motionPhoto("motion-\(level.rawValue)-\(old).jpg", old: old)
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: file.url)))?.problem == nil)
         settings.metadata = level
-        guard case .optimized = try await optimize(file.url) else { Issue.record("not optimized"); return }
+        let outcome = try await optimize(file.url); guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
         let result = try Data(contentsOf: file.url)
         let layout = try #require(JPEGLayout.read(ByteView(result)))
         #expect(layout.problem == nil && layout.images.count == 1)
@@ -286,59 +286,101 @@ final class MultiImageJPEGTests {
     /// Images only Google's container lists (Pixel portraits, Ultra HDR
     /// without an index) are found where its directory says — counted from
     /// the end, or right after the photo with camera data behind them
-    /// (Dynamic Depth): only the photo changes, the rest stays byte for byte.
-    @Test(arguments: [(Data(), Data()), (Data(), Data("aecDebug camera data".utf8)), (Data("aecDebug camera data".utf8), Data())])
-    func imagesOnlyTheContainerListsAreFound(between: Data, after: Data) async throws {
-        let file = try containerOnly("container-only-\(between.count)-\(after.count).jpg", between: between, after: after)
+    /// (Dynamic Depth). Everything kept: only the photo changes. Below that
+    /// the images it lists are filtered too, their new lengths written into
+    /// the directory; the bytes between them stay, and so do bytes after
+    /// them that the container counts across. Camera data after a listing
+    /// that ends with the last image goes, like leftover bytes elsewhere.
+    @Test(arguments: [(Data(), Data()), (Data(), Data("aecDebug camera data".utf8)), (Data("aecDebug camera data".utf8), Data())],
+          [MetadataHandling.keep, .removePrivate])
+    func imagesOnlyTheContainerListsAreFound(_ around: (between: Data, after: Data), level: MetadataHandling) async throws {
+        let name = "container-only-\(around.between.count)-\(around.after.count)-\(level.rawValue).jpg"
+        // The gain map carries a location of its own.
+        let file = try containerOnly(name, gainMap: { self.inserting(try self.exifWithLocation(), into: $0) },
+                                     between: around.between, after: around.after)
         let layout = try #require(JPEGLayout.read(ByteView(try Data(contentsOf: file.url))))
-        #expect(layout.problem == nil && layout.index == .container && layout.images.count == 2)
-        #expect(!layout.mayChange(image: 1))
-        settings.metadata = .removePrivate
-        guard case .optimized = try await optimize(file.url) else { Issue.record("not optimized"); return }
+        #expect(layout.problem == nil && layout.index == .container && layout.images.count == 2 && layout.containerEntries == [1])
+        #expect(!layout.mayChange(image: 1) && layout.mayChange(image: 1, writingLengths: true))
+        settings.metadata = level
+        let outcome = try await optimize(file.url)
+        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
         let result = try Data(contentsOf: file.url)
-        #expect(result.suffix(file.rest.count) == file.rest && result.count - file.rest.count < file.photo.count)
-        #expect(JPEGLayout.read(ByteView(result))?.images.count == 2)
+        let after = try #require(JPEGLayout.read(ByteView(result)))
+        #expect(after.problem == nil && after.images.count == 2)
+        let gainMap = result.subdata(in: after.images[1])
+        let leftover = !around.after.isEmpty && level != .keep
+        #expect(leftover ? result.subdata(in: after.gaps[1]).isEmpty : result.subdata(in: after.gaps[1]) == around.after)
+        #expect(result.subdata(in: after.gaps[0]) == around.between)
+        #expect((props(gainMap)[kCGImagePropertyGPSDictionary] != nil) == (level == .keep))
+        if level == .keep { #expect(result.suffix(file.rest.count) == file.rest) }
+        // The directory names the gain map's new length.
+        let read = try #require(GoogleXMP.read(try JPEGMarkers.headers(ByteView(result)).segments))
+        #expect(read.directories.first?.last?.length == gainMap.count)
     }
 
-    /// A length the images aren't at, and a location in the second image
-    /// (it may not change, so the level's promise can't be kept): the file
-    /// stays as it is.
-    @Test func imagesTheContainerListsWronglyOrPrivatelyStay() async throws {
+    /// The structure check holds the container's directory to the
+    /// original's: an entry's role changed (positions all the same) is
+    /// rejected.
+    @Test func changedContainerEntryIsRejected() throws {
+        let file = try containerOnly("container-entry.jpg")
+        var changed = try Data(contentsOf: file.url)
+        let at = try #require(changed.range(of: Data("GainMap".utf8)))
+        changed.replaceSubrange(at, with: Data("GainMaq".utf8))
+        let result = dir.appending(path: "container-entry-changed.jpg")
+        try changed.write(to: result)
+        #expect(JPEGLayout.read(ByteView(changed))?.index == .container)
+        #expect(throws: VerificationError.self) {
+            try StructureCheck.verify(result: result, against: StructureCheck.Reference(original: file.url, format: .jpeg))
+        }
+        try StructureCheck.verify(result: file.url, against: StructureCheck.Reference(original: file.url, format: .jpeg))
+    }
+
+    /// An entry after the last JPEG the container lists (here a PNG) is no
+    /// leftover: it stays with everything behind it, at every level.
+    @Test func entriesAfterTheLastJPEGStay() async throws {
+        let parts = images(try Data(contentsOf: gainMapPhoto("png-entry.jpg")))
+        let index = try #require(try JPEGMarkers.headers(ByteView(parts[0])).segments.first(where: MultiPictureIndex.isIndex))
+        let png = Data(PNGChunks.signature) + Data(count: 40), camera = Data("aecDebug camera data".utf8)
+        let directory = GoogleXMPSamples.directory(gainMapLength: parts[1].count, videoLength: png.count)
+            .replacingOccurrences(of: "video/mp4", with: "image/png").replacingOccurrences(of: "MotionPhoto", with: "Depth")
+        let photo = inserting(GoogleXMPSamples.segment(directory), into: parts[0].prefix(index.offset) + parts[0].dropFirst(index.end))
+        let url = dir.appending(path: "png-entry.jpg")
+        try (photo + parts[1] + png + camera).write(to: url)
+        let layout = try #require(JPEGLayout.read(ByteView(try Data(contentsOf: url))))
+        #expect(layout.index == .container && layout.images.count == 2 && layout.problem == nil)
+        settings.metadata = .removeAll
+        guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(try Data(contentsOf: url).suffix(png.count + camera.count) == png + camera)
+    }
+
+    /// A gain map that a multi-picture index and Google's container both
+    /// list keeps its bytes; a location in it can't go, so below "keep
+    /// everything" the file stays, and says why.
+    @Test func privateDataInAnImageThatMustStay() async throws {
+        let url = gainMapPhoto("must-stay.jpg")
+        var parts = images(try Data(contentsOf: url))
+        parts[1] = inserting(try exifWithLocation(), into: parts[1])
+        parts[0] = inserting(GoogleXMPSamples.segment(GoogleXMPSamples.directory(gainMapLength: parts[1].count)), into: parts[0])
+        try JPEGLayout.joined(parts).write(to: url)
+        settings.metadata = .removePrivate
+        let before = try Data(contentsOf: url)
+        let outcome = try await optimize(url)
+        guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(outcome)"); return }
+        let after = try Data(contentsOf: url)
+        #expect(reason.contains("must stay as it is") && after == before)
+    }
+
+    /// A length the images aren't at: the file stays as it is.
+    @Test func imagesTheContainerListsWronglyStay() async throws {
         let wrong = try containerOnly("container-wrong.jpg", listedLength: { $0 + 1 })
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: wrong.url)))?.problem == .unlistedImages)
         // One byte short: it starts where it should, but doesn't end there.
         let short = try containerOnly("container-short.jpg", listedLength: { $0 - 1 })
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: short.url)))?.problem == .unlistedImages)
-        let located = try containerOnly("container-gps.jpg", gainMap: { self.inserting(try self.exifWithLocation(), into: $0) })
-        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: located.url)))?.problem == nil)
         settings.metadata = .removePrivate
-        for url in [wrong.url, located.url] {
-            let before = try Data(contentsOf: url)
-            let outcome = try await optimize(url)
-            if case .optimized = outcome { Issue.record("\(url.lastPathComponent) changed") }
-            #expect(try Data(contentsOf: url) == before)
-            // The reason says where the data is that can't go.
-            if url == located.url, case .unchanged(let reason, _, _) = outcome { #expect(reason.contains("must stay as it is")) }
-        }
-        // At "keep everything" the located one is optimized: nothing has to go.
-        settings.metadata = .keep
-        guard case .optimized = try await optimize(located.url) else { Issue.record("not optimized at keep"); return }
-    }
-
-    /// A single photo that the container lists alone, with padding after it:
-    /// nothing counts from the end, so it is an ordinary JPEG.
-    @Test func containerWithOnlyThePhotoIsPlain() async throws {
-        let first = images(try Data(contentsOf: gainMapPhoto("alone.jpg")))[0]
-        let segments = try JPEGMarkers.headers(ByteView(first)).segments
-        let index = try #require(segments.first(where: MultiPictureIndex.isIndex))
-        let photo = inserting(GoogleXMPSamples.segment(GoogleXMPSamples.directory(gainMapLength: nil)),
-                              into: first.prefix(index.offset) + first.dropFirst(index.end))
-        let url = dir.appending(path: "alone-padded.jpg")
-        try (photo + Data(count: 300)).write(to: url)
-        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.isPlain == true)
-        settings.metadata = .keep // the container's mark stays
-        guard case .optimized(_, _, let tools, _, _, _) = try await optimize(url) else { Issue.record("not optimized"); return }
-        #expect(tools.contains("jpeg-scan"))
+        let before = try Data(contentsOf: wrong.url)
+        if case .optimized = try await optimize(wrong.url) { Issue.record("changed") }
+        #expect(try Data(contentsOf: wrong.url) == before)
     }
 
     /// Another JPEG after the photo that no index lists, and a photo cut off
