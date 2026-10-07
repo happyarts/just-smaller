@@ -540,6 +540,19 @@ final class FileOptimizerTests {
         guard case .optimized = try await optimize(url) else { Issue.record("not optimized"); return }
     }
 
+    /// oxvg 0.0.9 dropped a translation by (1, 1) and closed an open subpath
+    /// that the next one continued from.
+    @Test func svgKeepsUnitTranslationsAndOpenSubpaths() async throws {
+        let url = dir.appending(path: "unit-translate.svg")
+        try Data("""
+            <svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 20 20">
+              <g transform="matrix(1 0 0 1 1 1)"><circle cx="10" cy="10" r="2"/></g>
+              <path fill="none" stroke="#000" d="M2 2l4 4M6 6L10 2"/>
+            </svg>
+            """.utf8).write(to: url)
+        #expect(try await !isRejected(url, run: .idsKept))
+    }
+
     /// Runs one SVG candidate and checks its result against the original.
     private func isRejected(_ url: URL, run: Pipeline.SVGRun) async throws -> Bool {
         let output = dir.appending(path: "once-\(UUID().uuidString).svg")

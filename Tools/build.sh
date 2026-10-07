@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
 # Vendor/ (git submodules pinned to released versions; ECT to a master
-# commit, since its last release lacks years of fixes) and Tools/.
+# commit, since its last release lacks years of fixes; oxvg to a main commit
+# with path and transform fixes that aren't released yet) and Tools/
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -36,7 +37,7 @@ for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
-for dep in highway skcms libpng zlib lcms; do
+for dep in highway skcms libpng zlib lcms libjpeg-turbo; do
 	[ -n "$(ls -A "$ROOT/Vendor/jpegli/third_party/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT/Vendor/jpegli" submodule update --init --depth 1 "third_party/$dep"
 done
