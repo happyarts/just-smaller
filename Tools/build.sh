@@ -2,7 +2,7 @@
 # Builds the command-line optimizers Just Smaller runs, from the sources in
 # Vendor/ (git submodules pinned to released versions; ECT to a master
 # commit, since its last release lacks years of fixes; oxvg to a main commit
-# with path and transform fixes that aren't released yet) and Tools/
+# with path and transform fixes that aren't released yet) and Tools/.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
