@@ -16,9 +16,11 @@
 // script is written; it can never damage an image (and every result is
 // checked by jpegcmp anyway).
 //
-// Efforts: fast searches a coarse set of band boundaries once; balanced and
-// thorough refine around the chosen boundaries in three rounds (from a
-// coarse and a finer start); maximum allows every boundary.
+// Efforts: fast searches a coarse set of band boundaries once; balanced
+// refines around the chosen boundaries in three rounds from a finer start;
+// thorough allows every boundary, maximum also deeper point transforms.
+// Thorough and maximum also write what each lower effort would and keep the
+// smallest.
 //
 // Exit status: 0 written, 2 unreadable or failed, 3 not supported (12-bit
 // or lossless JPEG, damaged image data): the caller keeps the input.
@@ -36,6 +38,9 @@
 extern void jpeg_gen_optimal_table(j_compress_ptr cinfo, JHUFF_TBL *htbl, long freq[]);
 
 enum { EFFORT_FAST, EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
+
+// The highest point transform of an AC first pass: 3 below maximum, 5 there.
+#define AL_LIMIT 5
 
 // Up to this many blocks (about 0.8 megapixels in colour) an image gets the
 // full search and a real-encode check at every effort: milliseconds there,
@@ -502,7 +507,7 @@ typedef struct {
 } Scan;
 
 typedef struct {
-    Scan scans[4 + 4 * 63 * 4 + 4 * 3];
+    Scan scans[4 + 4 * 63 * (AL_LIMIT + 1) + 4 * 3];
     int n;
     double bytes;   // predicted size of all scans
 } Plan;
@@ -530,8 +535,9 @@ static unsigned long long bits_from_to(int lo, int hi) { // positions lo..hi, in
 // summed up to each end. Only the EOB runs depend on the end: a block adds
 // to the run when the coefficient at the band's last position is zero, and
 // ends the run when it has any coefficient in the band. That walk only needs
-// the blocks with a coefficient at or after the start.
-static void first_pass_costs(const Component *k, int al, const int *cuts, int ncuts, double cost[64][64]) {
+// the blocks with a coefficient at or after the start. Bands between two
+// boundaries `have` marks (if given) were priced before and are left out.
+static void first_pass_costs(const Component *k, int al, const int *cuts, int ncuts, const unsigned char *have, double cost[64][64]) {
     size_t blocks = (size_t)k->wb * k->hb;
     unsigned long long *mask = checked_malloc(blocks * sizeof *mask);
     // The blocks with a coefficient at or after the band start, packed: their
@@ -546,7 +552,9 @@ static void first_pass_costs(const Component *k, int al, const int *cuts, int nc
     }
     Stats *at = checked_malloc(64 * sizeof *at); // symbols of the coefficients at each position
     for (int i = 0; i + 1 < ncuts; i++) {
-        int ss = cuts[i];
+        int ss = cuts[i], needed = 0;
+        for (int j = i + 1; j < ncuts && !needed; j++) needed = !have || !have[i] || !have[j];
+        if (!needed) continue;
         memset(at, 0, 64 * sizeof *at);
         size_t nactive = 0, done = 0;
         for (size_t b = 0; b < blocks; b++) {
@@ -577,6 +585,7 @@ static void first_pass_costs(const Component *k, int al, const int *cuts, int nc
                 for (int sym = 0; sym < 256; sym++) sum.freq[sym] += at[next].freq[sym];
                 sum.extra += at[next].extra;
             }
+            if (have && have[i] && have[j]) continue;
             Stats st = sum;
             unsigned long long band = bits_from_to(ss, se);
             long eobrun = 0, be = 0;
@@ -624,7 +633,7 @@ static void flush_run(Stats *s, long *eobrun, long *be) {
 // nonzero, bringing the correction bits after its last newly nonzero
 // coefficient along, and the run is written early once those pass 937 bits
 // (libjpeg's buffer limit) or the run reaches 32767 blocks.
-static void refine_costs(const Component *k, int al, const int *cuts, int ncuts, double cost[64][64]) {
+static void refine_costs(const Component *k, int al, const int *cuts, int ncuts, const unsigned char *have, double cost[64][64]) {
     size_t blocks = (size_t)k->wb * k->hb;
     unsigned long long *fresh = checked_malloc(blocks * sizeof *fresh), *old = checked_malloc(blocks * sizeof *old);
     unsigned long long *actf = checked_malloc(blocks * sizeof *actf), *acto = checked_malloc(blocks * sizeof *acto);
@@ -641,7 +650,9 @@ static void refine_costs(const Component *k, int al, const int *cuts, int ncuts,
     }
     Stats *at = checked_malloc(64 * sizeof *at);
     for (int i = 0; i + 1 < ncuts; i++) {
-        int ss = cuts[i];
+        int ss = cuts[i], needed = 0;
+        for (int j = i + 1; j < ncuts && !needed; j++) needed = !have || !have[i] || !have[j];
+        if (!needed) continue;
         memset(at, 0, 64 * sizeof *at);
         size_t nactive = 0, done = 0;
         for (size_t b = 0; b < blocks; b++) {
@@ -672,6 +683,7 @@ static void refine_costs(const Component *k, int al, const int *cuts, int ncuts,
                 for (int sym = 0; sym < 256; sym++) sum.freq[sym] += at[next].freq[sym];
                 sum.extra += at[next].extra;
             }
+            if (have && have[i] && have[j]) continue;
             Stats st = sum;
             unsigned long long band = bits_from_to(ss, se);
             long eobrun = 0, be = 0;
@@ -721,40 +733,63 @@ static void prefix_bands(double cost[64][64], int ncuts, double *best, int *from
 }
 
 // One pass of one component at one point transform: a first pass at `al`,
-// or a refinement from al + 1 to al. Keeps its band prices for the search.
+// or a refinement from al + 1 to al. Its band prices by boundary value:
+// cost[a][b] is the band a .. b - 1, known for every pair of the boundaries
+// marked in `known`. A band's price doesn't depend on the other boundaries,
+// so every search reads the same table.
 typedef struct {
     const Component *k;
     int refine, al;
-    const int *cuts;    // the band boundaries this pass may use
-    int ncuts;
+    unsigned char known[65];
+    double (*cost)[65];
+} Prices;
+
+// Prices the bands between every boundary `want` marks for a pass (and
+// those priced before), where the pass doesn't have them yet. Every pass is
+// independent, so they run in parallel.
+static void price_bands(Prices *prices, size_t n, unsigned char (*want)[65]) {
+    dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i) {
+        Prices *p = &prices[i];
+        const unsigned char *w = want[i];
+        int cuts[64], ncuts = 0, missing = 0;
+        unsigned char have[64];
+        for (int x = 1; x <= 64; x++) {
+            missing |= w[x] && !p->known[x];
+            if (w[x] || p->known[x]) { have[ncuts] = p->known[x]; cuts[ncuts++] = x; }
+        }
+        if (!missing) return;
+        // Only the bands with a new boundary.
+        double (*cost)[64] = checked_malloc(64 * sizeof *cost);
+        if (p->refine) refine_costs(p->k, p->al, cuts, ncuts, have, cost);
+        else first_pass_costs(p->k, p->al, cuts, ncuts, have, cost);
+        for (int a = 0; a < ncuts; a++)
+            for (int b = a + 1; b < ncuts; b++)
+                if (!have[a] || !have[b]) p->cost[cuts[a]][cuts[b]] = cost[a][b];
+        for (int a = 0; a < ncuts; a++) p->known[cuts[a]] = 1;
+        free(cost);
+    });
+}
+
+// One pass's prices for one search, by index into its boundary list, and
+// the cheapest bands for each prefix.
+typedef struct {
     double (*cost)[64];
     double best[64];
     int from[64];
 } Pass;
 
-// Every component's passes are independent, so they run in parallel.
-static void solve_passes(Pass *passes, size_t n) {
-    dispatch_apply(n, DISPATCH_APPLY_AUTO, ^(size_t i) {
-        Pass *p = &passes[i];
-        p->cost = checked_malloc(64 * sizeof *p->cost);
-        if (p->refine) refine_costs(p->k, p->al, p->cuts, p->ncuts, p->cost);
-        else first_pass_costs(p->k, p->al, p->cuts, p->ncuts, p->cost);
-        prefix_bands(p->cost, p->ncuts, p->best, p->from);
-    });
-}
-
 // A component's AC plan: first-pass bands, each with its own point
 // transform, then refinement bands per level.
 typedef struct {
     int nbands, start[64], al[64];      // first pass: band starts (start[nbands] = 64) and their Al
-    int nref[4], ref[4][65];            // refinement from a + 1 to a: band starts, ref[a][nref[a]] = end + 1
+    int nref[AL_LIMIT], ref[AL_LIMIT][65]; // refinement from a + 1 to a: band starts, ref[a][nref[a]] = end + 1
     double bytes;
 } ACPlan;
 
 // The same, in indices into the boundary list: band m is cuts[lo] .. cuts[hi] - 1.
 typedef struct {
     int nbands, lo[64], hi[64], al[64];
-    int nref[4], rlo[4][64], rhi[4][64];
+    int nref[AL_LIMIT], rlo[AL_LIMIT][64], rhi[AL_LIMIT][64];
     double bytes;
 } Profile;
 
@@ -766,7 +801,7 @@ typedef struct {
 // there. A single Al for all bands is one of the profiles.
 static Profile falling_profile(double (*const *first)[64], const double (*ref_best)[64], const int (*ref_from)[64],
                                int ncuts, int max_al) {
-    enum { N = 64, L = 4 };
+    enum { N = 64, L = AL_LIMIT + 1 };
     double f[N][L];
     int from_i[N][L], from_al[N][L];
     for (int j = 1; j < ncuts; j++) {
@@ -794,7 +829,8 @@ static Profile falling_profile(double (*const *first)[64], const double (*ref_be
         if (c < p.bytes) { p.bytes = c; last_al = al; }
     }
     // Walk back: the first-pass bands, and where each refinement level ends.
-    int ends[L] = {0, 0, 0, 0};
+    int ends[L];
+    memset(ends, 0, sizeof ends);
     for (int a = 0; a < last_al; a++) ends[a] = last;
     int n = 0, lo[N], hi[N], al_of[N];
     for (int j = last, al = last_al; j > 0;) {
@@ -828,9 +864,9 @@ static Profile falling_profile(double (*const *first)[64], const double (*ref_be
 // rising (found by running the same search on the mirrored boundary list;
 // refinements then cover suffixes). The cheaper one wins.
 static ACPlan plan_ac(const Pass *first, const Pass *refine, const int *cuts, int ncuts, int max_al) {
-    double (*fcost[4])[64], (*rcost[4])[64];
-    double ref_best[4][64];
-    int ref_from[4][64];
+    double (*fcost[AL_LIMIT + 1])[64], (*rcost[AL_LIMIT])[64];
+    double ref_best[AL_LIMIT][64];
+    int ref_from[AL_LIMIT][64];
     for (int al = 0; al <= max_al; al++) fcost[al] = first[al].cost;
     for (int a = 0; a < max_al; a++) {
         memcpy(ref_best[a], refine[a].best, sizeof ref_best[a]);
@@ -937,86 +973,131 @@ static DCPlan plan_dc(const Image *img, int max_al) {
     return best;
 }
 
-static Plan progressive_plan(const Image *img, int effort) {
-    static const int balanced_cuts[] = {1, 2, 3, 6, 9, 14, 21, 64};
-    // Each set contains the smaller ones, so more effort never finds less.
-    static const int thorough_cuts[] = {1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 19, 21, 24, 28, 33, 40, 48, 64};
-    int thorough_n = sizeof thorough_cuts / sizeof *thorough_cuts;
-    int all_cuts[64];
-    for (int i = 0; i < 63; i++) all_cuts[i] = i + 1;
-    all_cuts[63] = 64;
-    const int *cuts = balanced_cuts;
-    int ncuts = sizeof balanced_cuts / sizeof *cuts, max_al = 3;
-    if (effort >= EFFORT_THOROUGH) { cuts = thorough_cuts; ncuts = thorough_n; }
-    // Maximum, and small images at every effort, allow every boundary.
-    if (effort == EFFORT_MAXIMUM || total_blocks(img) <= SMALL_IMAGE_BLOCKS) {
-        cuts = all_cuts;
-        ncuts = 64;
-    }
+// A component's passes in the price table: first passes at 0 .. AL_LIMIT,
+// then refinements from a + 1 to a for a = 0 .. AL_LIMIT - 1.
+enum { PASSES = 2 * AL_LIMIT + 1 };
+static int first_index(int al) { return al; }
+static int refine_index(int a) { return AL_LIMIT + 1 + a; }
 
-    Plan p;
-    memset(&p, 0, sizeof p);
-    DCPlan dc = plan_dc(img, 1);
-    ACPlan ac[4];
-    int ccuts[4][64], nccuts[4];
-    for (int c = 0; c < img->ncomp; c++) {
-        memcpy(ccuts[c], cuts, (size_t)ncuts * sizeof *cuts);
-        nccuts[c] = ncuts;
+// One search's AC plan for one component, from the prices of its passes.
+static ACPlan search_component(const Prices *prices, const int *cuts, int ncuts, int max_al) {
+    Pass passes[PASSES]; // first passes at 0..max_al, then refinements 0..max_al-1
+    int per = 2 * max_al + 1;
+    for (int j = 0; j < per; j++) {
+        Pass *p = &passes[j];
+        const Prices *pr = &prices[j <= max_al ? first_index(j) : refine_index(j - max_al - 1)];
+        p->cost = checked_malloc(64 * sizeof *p->cost);
+        for (int a = 0; a < ncuts; a++)
+            for (int b = a + 1; b < ncuts; b++) p->cost[a][b] = pr->cost[cuts[a]][cuts[b]];
+        prefix_bands(p->cost, ncuts, p->best, p->from);
     }
-    // Three rounds unless every boundary is already allowed: each later one
-    // looks again, more finely, around the boundaries the round before chose
-    // (four either side), each component around its own. Earlier boundaries
-    // stay allowed, so a later round never finds less.
-    int rounds = ncuts == 64 || effort == EFFORT_FAST ? 1 : 3, radius = 4;
-    for (int round = 0; round < rounds; round++) {
-        // Per component: first passes at 0..max_al, then refinements 0..max_al-1.
-        int per = 2 * max_al + 1;
-        Pass passes[4 * 7];
-        for (int c = 0; c < img->ncomp; c++)
-            for (int j = 0; j < per; j++)
-                passes[c * per + j] = (Pass){.k = &img->comp[c], .refine = j > max_al, .al = j > max_al ? j - max_al - 1 : j,
-                                             .cuts = ccuts[c], .ncuts = nccuts[c]};
-        solve_passes(passes, (size_t)(img->ncomp * per));
-        for (int c = 0; c < img->ncomp; c++)
-            ac[c] = plan_ac(&passes[c * per], &passes[c * per + max_al + 1], ccuts[c], nccuts[c], max_al);
-        for (int i = 0; i < img->ncomp * per; i++) free(passes[i].cost);
-        if (round + 1 == rounds) break;
-        for (int c = 0; c < img->ncomp; c++) {
-            unsigned char allowed[65] = {0};
-            for (int i = 0; i < nccuts[c]; i++) allowed[ccuts[c][i]] = 1;
-            int chosen[4 * 65], nchosen = 0; // first pass and three refinement levels
-            for (int b = 0; b <= ac[c].nbands; b++) chosen[nchosen++] = ac[c].start[b];
-            for (int a = 0; a < max_al; a++)
-                for (int b = 0; b <= ac[c].nref[a]; b++) chosen[nchosen++] = ac[c].ref[a][b];
-            for (int i = 0; i < nchosen; i++)
-                for (int d = -radius; d <= radius; d++) {
-                    int x = chosen[i] + d;
-                    if (x >= 1 && x <= 64) allowed[x] = 1;
+    ACPlan ac = plan_ac(passes, &passes[max_al + 1], cuts, ncuts, max_al);
+    for (int j = 0; j < per; j++) free(passes[j].cost);
+    return ac;
+}
+
+// The searched plans of the efforts lowest .. effort, into out[effort].
+// The searches run side by side, round by round, on one table of prices:
+// each band is priced once, for the boundaries any of them asks for.
+// Fast starts from coarse boundaries, balanced from finer ones and refines
+// around its choices in three rounds; thorough allows every boundary, and
+// maximum also deeper point transforms. Small images allow every boundary
+// at every effort.
+static void progressive_plans(const Image *img, int lowest, int effort, Plan *out) {
+    static const int coarse_cuts[] = {1, 2, 3, 6, 9, 14, 21, 64};
+    // Each set contains the smaller ones, so more effort never finds less.
+    static const int fine_cuts[] = {1, 2, 3, 4, 5, 6, 8, 9, 10, 12, 14, 16, 19, 21, 24, 28, 33, 40, 48, 64};
+    int nc = img->ncomp, small = total_blocks(img) <= SMALL_IMAGE_BLOCKS;
+    int ccuts[4][4][64], nccuts[4][4], rounds[4], max_al[4];
+    for (int e = lowest; e <= effort; e++) {
+        const int *cuts = e == EFFORT_FAST ? coarse_cuts : fine_cuts;
+        int ncuts = e == EFFORT_FAST ? (int)(sizeof coarse_cuts / sizeof *cuts) : (int)(sizeof fine_cuts / sizeof *cuts);
+        for (int c = 0; c < nc; c++) {
+            if (e >= EFFORT_THOROUGH || small) {
+                nccuts[e][c] = 64;
+                for (int i = 0; i < 64; i++) ccuts[e][c][i] = i + 1;
+            } else {
+                nccuts[e][c] = ncuts;
+                memcpy(ccuts[e][c], cuts, (size_t)ncuts * sizeof *cuts);
+            }
+        }
+        // Three rounds unless every boundary is already allowed: each later
+        // one looks again, more finely, around the boundaries the round
+        // before chose (four either side), each component around its own.
+        // Earlier boundaries stay allowed, so a later round never finds less.
+        rounds[e] = nccuts[e][0] == 64 || e == EFFORT_FAST ? 1 : 3;
+        max_al[e] = e == EFFORT_MAXIMUM ? AL_LIMIT : 3;
+    }
+    Prices prices[4 * PASSES];
+    for (int c = 0; c < nc; c++)
+        for (int j = 0; j < PASSES; j++)
+            prices[c * PASSES + j] = (Prices){.k = &img->comp[c], .refine = j > AL_LIMIT, .al = j > AL_LIMIT ? j - AL_LIMIT - 1 : j,
+                                              .cost = checked_malloc(65 * sizeof *prices[0].cost)};
+    ACPlan ac[4][4];
+    int radius = 4;
+    for (int round = 0;; round++) {
+        unsigned char want[4 * PASSES][65];
+        memset(want, 0, sizeof want);
+        int any = 0;
+        for (int e = lowest; e <= effort; e++) {
+            if (round >= rounds[e]) continue;
+            any = 1;
+            for (int c = 0; c < nc; c++)
+                for (int i = 0; i < nccuts[e][c]; i++) {
+                    int x = ccuts[e][c][i];
+                    for (int al = 0; al <= max_al[e]; al++) want[c * PASSES + first_index(al)][x] = 1;
+                    for (int a = 0; a < max_al[e]; a++) want[c * PASSES + refine_index(a)][x] = 1;
                 }
-            nccuts[c] = 0;
-            for (int x = 1; x <= 64; x++) if (allowed[x]) ccuts[c][nccuts[c]++] = x;
+        }
+        if (!any) break;
+        price_bands(prices, (size_t)(nc * PASSES), want);
+        for (int e = lowest; e <= effort; e++) {
+            if (round >= rounds[e]) continue;
+            for (int c = 0; c < nc; c++) {
+                ACPlan *a = &ac[e][c];
+                *a = search_component(&prices[c * PASSES], ccuts[e][c], nccuts[e][c], max_al[e]);
+                if (round + 1 == rounds[e]) continue;
+                unsigned char allowed[65] = {0};
+                for (int i = 0; i < nccuts[e][c]; i++) allowed[ccuts[e][c][i]] = 1;
+                int chosen[(AL_LIMIT + 1) * 65], nchosen = 0; // first pass and the refinement levels
+                for (int b = 0; b <= a->nbands; b++) chosen[nchosen++] = a->start[b];
+                for (int l = 0; l < max_al[e]; l++)
+                    for (int b = 0; b <= a->nref[l]; b++) chosen[nchosen++] = a->ref[l][b];
+                for (int i = 0; i < nchosen; i++)
+                    for (int d = -radius; d <= radius; d++) {
+                        int x = chosen[i] + d;
+                        if (x >= 1 && x <= 64) allowed[x] = 1;
+                    }
+                nccuts[e][c] = 0;
+                for (int x = 1; x <= 64; x++) if (allowed[x]) ccuts[e][c][nccuts[e][c]++] = x;
+            }
         }
     }
+    for (int i = 0; i < nc * PASSES; i++) free(prices[i].cost);
 
+    DCPlan dc = plan_dc(img, 1);
     int all[4] = {0, 1, 2, 3};
-    // DC first pass, then every component's first AC pass, then refinements
-    // from the highest level down.
-    if (dc.interleaved) add(&p, img->ncomp, all, 0, 0, 0, dc.al);
-    else for (int c = 0; c < img->ncomp; c++) add(&p, 1, &all[c], 0, 0, 0, dc.al);
-    for (int c = 0; c < img->ncomp; c++)
-        for (int b = 0; b < ac[c].nbands; b++)
-            add(&p, 1, &all[c], ac[c].start[b], ac[c].start[b + 1] - 1, 0, ac[c].al[b]);
-    for (int bit = dc.al - 1; bit >= 0; bit--) {
-        if (dc.interleaved) add(&p, img->ncomp, all, 0, 0, bit + 1, bit);
-        else for (int c = 0; c < img->ncomp; c++) add(&p, 1, &all[c], 0, 0, bit + 1, bit);
+    for (int e = lowest; e <= effort; e++) {
+        Plan *p = &out[e];
+        memset(p, 0, sizeof *p);
+        // DC first pass, then every component's first AC pass, then
+        // refinements from the highest level down.
+        if (dc.interleaved) add(p, nc, all, 0, 0, 0, dc.al);
+        else for (int c = 0; c < nc; c++) add(p, 1, &all[c], 0, 0, 0, dc.al);
+        for (int c = 0; c < nc; c++)
+            for (int b = 0; b < ac[e][c].nbands; b++)
+                add(p, 1, &all[c], ac[e][c].start[b], ac[e][c].start[b + 1] - 1, 0, ac[e][c].al[b]);
+        for (int bit = dc.al - 1; bit >= 0; bit--) {
+            if (dc.interleaved) add(p, nc, all, 0, 0, bit + 1, bit);
+            else for (int c = 0; c < nc; c++) add(p, 1, &all[c], 0, 0, bit + 1, bit);
+        }
+        for (int a = max_al[e] - 1; a >= 0; a--)
+            for (int c = 0; c < nc; c++)
+                for (int b = 0; b < ac[e][c].nref[a]; b++)
+                    add(p, 1, &all[c], ac[e][c].ref[a][b], ac[e][c].ref[a][b + 1] - 1, a + 1, a);
+        p->bytes = dc.bytes;
+        for (int c = 0; c < nc; c++) p->bytes += ac[e][c].bytes;
     }
-    for (int a = max_al - 1; a >= 0; a--)
-        for (int c = 0; c < img->ncomp; c++)
-            for (int b = 0; b < ac[c].nref[a]; b++)
-                add(&p, 1, &all[c], ac[c].ref[a][b], ac[c].ref[a][b + 1] - 1, a + 1, a);
-    p.bytes = dc.bytes;
-    for (int c = 0; c < img->ncomp; c++) p.bytes += ac[c].bytes;
-    return p;
 }
 
 static double baseline_bytes(const Image *img) {
@@ -1787,6 +1868,12 @@ static int same_image(j_decompress_ptr a, jvirt_barray_ptr *ca, const Buffer *bu
     return same;
 }
 
+// The same scans (NULL: sequential). Plans are zeroed before they're filled.
+static int same_plan(const Plan *a, const Plan *b) {
+    if (!a || !b) return a == b;
+    return a->n == b->n && !memcmp(a->scans, b->scans, (size_t)a->n * sizeof *a->scans);
+}
+
 static void print_plan(const char *name, const Plan *p) {
     fprintf(stderr, "%s:", name);
     for (int i = 0; i < p->n; i++) {
@@ -1806,7 +1893,7 @@ static int selftest(const Image *img) {
     static double fast[64][64];
     for (int c = 0; c < img->ncomp; c++) {
         for (int al = 0; al <= 3; al++) {
-            first_pass_costs(&img->comp[c], al, cuts, n, fast);
+            first_pass_costs(&img->comp[c], al, cuts, n, NULL, fast);
             for (int i = 0; i + 1 < n; i++)
                 for (int j = i + 1; j < n; j++) {
                     Stats s;
@@ -1818,7 +1905,7 @@ static int selftest(const Image *img) {
                         bad++;
                     }
                 }
-            refine_costs(&img->comp[c], al, cuts, n, fast);
+            refine_costs(&img->comp[c], al, cuts, n, NULL, fast);
             for (int i = 0; i + 1 < n; i++)
                 for (int j = i + 1; j < n; j++) {
                     Stats s;
@@ -1833,9 +1920,14 @@ static int selftest(const Image *img) {
         }
     }
     // Every plan the search can produce follows T.81's rules.
+    static Plan plans[EFFORT_MAXIMUM + 1];
+    progressive_plans(img, EFFORT_FAST, EFFORT_MAXIMUM, plans);
     for (int effort = EFFORT_FAST; effort <= EFFORT_MAXIMUM; effort++) {
-        Plan plan = progressive_plan(img, effort);
-        if (!valid_plan(img, &plan)) { fprintf(stderr, "invalid plan at effort %d\n", effort); bad++; }
+        if (!valid_plan(img, &plans[effort])) { fprintf(stderr, "invalid plan at effort %d\n", effort); bad++; }
+        // Searched side by side or alone, an effort finds the same plan.
+        static Plan alone[EFFORT_MAXIMUM + 1];
+        progressive_plans(img, effort, effort, alone);
+        if (!same_plan(&alone[effort], &plans[effort])) { fprintf(stderr, "plan differs alone at effort %d\n", effort); bad++; }
     }
     Plan simple = simple_plan(img);
     if (!valid_plan(img, &simple)) { fprintf(stderr, "invalid standard plan\n"); bad++; }
@@ -1909,28 +2001,44 @@ int main(int argc, char **argv) {
         return 3;
     }
 
-    // Candidates, cheapest first by the model: sequential, libjpeg's
-    // standard progression, and the searched plan.
-    Plan simple = simple_plan(&img), searched;
+    // Candidates: sequential (NULL), libjpeg's standard progression, and the
+    // searched plan.
+    Plan simple = simple_plan(&img), searched[EFFORT_MAXIMUM + 1];
     simple.bytes = price_plan(&img, &simple);
     // Sequential coding interleaves every component: at most 10 blocks per MCU.
     int can_baseline = img.ncomp == 1 || img.blocks_in_mcu <= 10;
     double baseline = can_baseline ? baseline_bytes(&img) : 1e300;
-    const Plan *best = baseline <= simple.bytes ? NULL : &simple;
-    double best_bytes = baseline <= simple.bytes ? baseline : simple.bytes;
-    searched = progressive_plan(&img, effort);
-    if (searched.bytes < best_bytes) { best = &searched; best_bytes = searched.bytes; }
+    const Plan *model_best = baseline <= simple.bytes ? NULL : &simple;
+    double model_bytes = baseline <= simple.bytes ? baseline : simple.bytes;
+
+    // An effort writes the model's cheapest candidate; maximum and small
+    // images write all three, the exact sizes decide. The model prices
+    // every scan with a table of its own, so the plan it finds cheapest
+    // needn't be once the tables are shared. From thorough on, an effort
+    // therefore also writes what each lower one would, so it never comes out
+    // larger than them.
+    int small = total_blocks(&img) <= SMALL_IMAGE_BLOCKS;
+    const Plan *cands[2 + EFFORT_MAXIMUM + 1];
+    int ncands = 0;
+    int lowest = effort < EFFORT_THOROUGH ? effort : EFFORT_FAST;
+    progressive_plans(&img, lowest, effort, searched);
+    for (int e = lowest; e <= effort; e++) {
+        const Plan *mine[3] = {&searched[e], &simple, NULL};
+        int nmine = 2 + can_baseline;
+        if (e != EFFORT_MAXIMUM && !small) {
+            mine[0] = searched[e].bytes < model_bytes ? &searched[e] : model_best;
+            nmine = 1;
+        }
+        for (int i = 0; i < nmine; i++) {
+            int seen = 0;
+            for (int j = 0; j < ncands && !seen; j++) seen = same_plan(cands[j], mine[i]);
+            if (!seen) cands[ncands++] = mine[i];
+        }
+    }
+    const Plan *best = cands[0];
 
     // Writing: our own writer (shared tables, exact sizes), read back and
     // compared; libjpeg if it can't or the comparison fails.
-    const Plan *cands[3] = {best, NULL, NULL};
-    int ncands = 1;
-    if (effort == EFFORT_MAXIMUM || total_blocks(&img) <= SMALL_IMAGE_BLOCKS) {
-        // All three for real: the exact sizes decide.
-        cands[0] = &simple;
-        cands[1] = &searched;
-        ncands = 2 + can_baseline;
-    }
     Buffer out = {0};
     const char *writer = "own";
     if (!force_libjpeg) {
@@ -1965,9 +2073,11 @@ int main(int argc, char **argv) {
 
     if (report) {
         fprintf(stderr, "model: baseline %.0f, simple %.0f", baseline, simple.bytes);
-        fprintf(stderr, ", searched %.0f", searched.bytes);
-        fprintf(stderr, "; chose %s; %s writer; file %lu\n", best == NULL ? "baseline" : best == &simple ? "simple" : "searched",
-                writer, out.size);
+        fprintf(stderr, ", searched %.0f", searched[effort].bytes);
+        const char *chose = best == NULL ? "baseline" : best == &simple ? "simple" : "searched";
+        const char *names[] = {"fast", "balanced", "thorough", "maximum"};
+        for (int e = EFFORT_FAST; e <= EFFORT_MAXIMUM; e++) if (best == &searched[e]) chose = names[e];
+        fprintf(stderr, "; %d written, chose %s; %s writer; file %lu\n", ncands, chose, writer, out.size);
         if (best) print_plan("scans", best);
     }
 
