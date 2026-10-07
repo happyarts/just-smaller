@@ -3,6 +3,8 @@
 # Vendor/ (git submodules pinned to released versions; ECT to a master
 # commit, since its last release lacks years of fixes; oxvg to a main commit
 # with path and transform fixes that aren't released yet) and Tools/.
+# ECT, OxiPNG and libdeflate (through the libdeflater crate) are built from
+# copies with our patches (Tools/*/patches) applied.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -33,7 +35,7 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect; do
+for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect libdeflater; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
@@ -44,11 +46,13 @@ done
 # ECT: only libpng; its mozjpeg is for JPEG, which ect-png leaves out.
 [ -n "$(ls -A "$ROOT/Vendor/ect/src/libpng" 2>/dev/null)" ] ||
 	git -C "$ROOT/Vendor/ect" submodule update --init --depth 1 src/libpng
+[ -n "$(ls -A "$ROOT/Vendor/libdeflater/libdeflate-sys/libdeflate" 2>/dev/null)" ] ||
+	git -C "$ROOT/Vendor/libdeflater" submodule update --init --depth 1 libdeflate-sys/libdeflate
 # A checkout that isn't at the commit this repository pins (a pull moved the
 # pin) would build the old version or fail on a lockfile. It is left as it
 # is — it may hold local work — so stop and say how to update it.
 stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/ect | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+	Vendor/jpegli Vendor/ect Vendor/libdeflater | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
 if [ -n "$stale" ]; then
 	echo "Not at the pinned commit: $stale" >&2
 	echo "Update with: git submodule update --depth 1 $stale" >&2
@@ -59,6 +63,24 @@ log() { printf '%s\n' "$*" >&2; }
 run() { # name, command… — output goes to build/work/NAME.log, shown on failure
 	name=$1; shift
 	"$@" >"$WORK/$name.log" 2>&1 || { tail -40 "$WORK/$name.log" >&2; log "error: building $name failed"; exit 1; }
+}
+
+# A copy of a pinned checkout (or a folder in it) with our patches applied, so
+# the checkout stays at its pin. Renewed, in a fresh folder swapped in whole,
+# only when the pin, a local change or a patch changes: builds stay incremental.
+patched_copy() { # checkout dest patches-dir [folder]
+	pc_stamp=$( { git -C "$1" rev-parse HEAD; git -C "$1" status --porcelain; git -C "$1" diff HEAD;
+		git -C "$1" submodule status --recursive; git -C "$1" submodule --quiet foreach --recursive git diff HEAD;
+		cat "$3"/*.patch; } | shasum | cut -c1-40)
+	[ "$(cat "$2.stamp" 2>/dev/null)" = "$pc_stamp" ] && return
+	pc_fresh=$(mktemp -d "$2.XXXXXX")
+	rsync -a --exclude .git --exclude target --exclude tests/files "$1/${4:-.}/" "$pc_fresh"
+	for pc_patch in "$3"/*.patch; do
+		run "$(basename "$2")-patch" patch -p1 --forward -d "$pc_fresh" -i "$pc_patch"
+	done
+	rm -rf "$2" "$2.stamp"
+	mv "$pc_fresh" "$2"
+	echo "$pc_stamp" > "$2.stamp"
 }
 
 # System libraries from Homebrew must not leak into the tools.
@@ -103,25 +125,9 @@ run libwebp cmake --build "$WEBP" -j "$JOBS" --target cwebp
 cp "$WEBP/cwebp" "$OUT/cwebp"
 
 # ECT's PNG optimizer only (Tools/ect-png): no mozjpeg, gzip or zip code.
-# Built from a copy of ECT's sources with Tools/ect-png/patches applied, so
-# the checkout stays at its pinned commit. The copy is only renewed when the
-# pin or a patch changes, so builds stay incremental.
 log "ect-png"
 ECT_SRC=$WORK/ect-src
-stamp=$( { git -C "$ROOT/Vendor/ect" rev-parse HEAD; git -C "$ROOT/Vendor/ect" status --porcelain;
-	git -C "$ROOT/Vendor/ect" diff HEAD; git -C "$ROOT/Vendor/ect" submodule status;
-	cat "$ROOT"/Tools/ect-png/patches/*.patch; } | shasum | cut -c1-40)
-if [ "$(cat "$ECT_SRC.stamp" 2>/dev/null)" != "$stamp" ]; then
-	# Patched in a fresh folder, then swapped in whole.
-	fresh=$(mktemp -d "$WORK/ect-src.XXXXXX")
-	cp -R "$ROOT/Vendor/ect/src/." "$fresh"
-	for patch in "$ROOT"/Tools/ect-png/patches/*.patch; do
-		run "ect-patch" patch -p1 --forward -d "$fresh" -i "$patch"
-	done
-	rm -rf "$ECT_SRC" "$ECT_SRC.stamp"
-	mv "$fresh" "$ECT_SRC"
-	echo "$stamp" > "$ECT_SRC.stamp"
-fi
+patched_copy "$ROOT/Vendor/ect" "$ECT_SRC" "$ROOT/Tools/ect-png/patches" src
 run ect-configure cmake -S "$ROOT/Tools/ect-png" -B "$WORK/ect-png" $CMAKE_COMMON -DECT_SRC="$ECT_SRC"
 run ect-png cmake --build "$WORK/ect-png" -j "$JOBS" --target ect-png
 cp "$WORK/ect-png/ect-png" "$OUT/ect-png"
@@ -138,21 +144,13 @@ cargo_tool() { # name manifest [cargo args…]
 		--target-dir "$WORK/cargo-$name" "$@"
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
-# OxiPNG, like ECT, from a copy with Tools/oxipng/patches applied.
-OXIPNG_SRC=$WORK/oxipng-src
-stamp=$( { git -C "$ROOT/Vendor/oxipng" rev-parse HEAD; git -C "$ROOT/Vendor/oxipng" status --porcelain;
-	git -C "$ROOT/Vendor/oxipng" diff HEAD; cat "$ROOT"/Tools/oxipng/patches/*.patch; } | shasum | cut -c1-40)
-if [ "$(cat "$OXIPNG_SRC.stamp" 2>/dev/null)" != "$stamp" ]; then
-	fresh=$(mktemp -d "$WORK/oxipng-src.XXXXXX")
-	rsync -a --exclude .git --exclude target --exclude tests/files "$ROOT/Vendor/oxipng/" "$fresh"
-	for patch in "$ROOT"/Tools/oxipng/patches/*.patch; do
-		run "oxipng-patch" patch -p1 --forward -d "$fresh" -i "$patch"
-	done
-	rm -rf "$OXIPNG_SRC" "$OXIPNG_SRC.stamp"
-	mv "$fresh" "$OXIPNG_SRC"
-	echo "$stamp" > "$OXIPNG_SRC.stamp"
-fi
-cargo_tool oxipng "$OXIPNG_SRC/Cargo.toml" --locked --bin oxipng
+# OxiPNG with libdeflate levels 13-14: libdeflater (which brings libdeflate)
+# from our patched copy instead of crates.io.
+patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
+patched_copy "$ROOT/Vendor/oxipng" "$WORK/oxipng-src" "$ROOT/Tools/oxipng/patches"
+cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
+	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
+	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\""
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked

@@ -22,3 +22,7 @@
 	path = Vendor/ect
 	url = https://github.com/fhanau/Efficient-Compression-Tool.git
 	shallow = true
+[submodule "Vendor/libdeflater"]
+	path = Vendor/libdeflater
+	url = https://github.com/libdeflater/libdeflater.git
+	shallow = true
