@@ -100,7 +100,7 @@ enum Pipeline {
             // different tool.
             var stages: [[Candidate]] = []
             if facts.hasWebPMetadata { stages.append([webpMetadata(s.metadata)]) }
-            if facts.isLosslessWebP, !facts.isAnimated { stages.append([cwebp(effort: s.effort)]) }
+            if facts.isLosslessWebP, !facts.isAnimated { stages.append(cwebpCompressors(effort: s.effort)) }
             return stages
 
         case .svg:
@@ -339,12 +339,19 @@ enum Pipeline {
         metadata(level) { try WebPMetadataFilter.filter($0, level: level) }
     }
 
+    /// Fast runs -z 7, the other efforts -z 9. -z 9 chooses some settings by
+    /// estimate and is not always smaller than -z 7, so from Balanced on
+    /// -z 7 runs next to it and the smaller result is kept: a higher effort
+    /// never comes out larger.
+    static func cwebpCompressors(effort: Effort) -> [Candidate] {
+        effort == .fast ? [cwebp(level: "7")] : [cwebp(level: "9"), cwebp(level: "7")]
+    }
+
     /// Metadata was filtered before; cwebp copies what is left.
-    static func cwebp(effort: Effort) -> Candidate {
+    static func cwebp(level: String) -> Candidate {
         Candidate(name: "cwebp") { input, output, work in
             // -exact keeps the colour of fully transparent pixels; without it
             // cwebp changes them, which is not lossless.
-            let level = effort == .fast ? "7" : "9"
             try await ToolRunner.run("cwebp", ["-quiet", "-lossless", "-exact", "-z", level,
                                                "-metadata", "all",
                                                "-o", output.path, "--", input.path], in: work)
