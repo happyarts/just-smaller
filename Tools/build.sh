@@ -138,7 +138,21 @@ cargo_tool() { # name manifest [cargo args…]
 		--target-dir "$WORK/cargo-$name" "$@"
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
-cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng
+# OxiPNG, like ECT, from a copy with Tools/oxipng/patches applied.
+OXIPNG_SRC=$WORK/oxipng-src
+stamp=$( { git -C "$ROOT/Vendor/oxipng" rev-parse HEAD; git -C "$ROOT/Vendor/oxipng" status --porcelain;
+	git -C "$ROOT/Vendor/oxipng" diff HEAD; cat "$ROOT"/Tools/oxipng/patches/*.patch; } | shasum | cut -c1-40)
+if [ "$(cat "$OXIPNG_SRC.stamp" 2>/dev/null)" != "$stamp" ]; then
+	fresh=$(mktemp -d "$WORK/oxipng-src.XXXXXX")
+	rsync -a --exclude .git --exclude target --exclude tests/files "$ROOT/Vendor/oxipng/" "$fresh"
+	for patch in "$ROOT"/Tools/oxipng/patches/*.patch; do
+		run "oxipng-patch" patch -p1 --forward -d "$fresh" -i "$patch"
+	done
+	rm -rf "$OXIPNG_SRC" "$OXIPNG_SRC.stamp"
+	mv "$fresh" "$OXIPNG_SRC"
+	echo "$stamp" > "$OXIPNG_SRC.stamp"
+fi
+cargo_tool oxipng "$OXIPNG_SRC/Cargo.toml" --locked --bin oxipng
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked

@@ -4,9 +4,10 @@
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
   tags (ECT, oxvg: a master/main commit); build.sh only fetches missing ones and never moves
   a checkout — it stops when one isn't at its pinned commit (after a pull).
-  ECT is built from a copy with `Tools/ect-png/patches/*.patch` applied
-  (the checkout stays pinned). A patch that went upstream is deleted when
-  the pin moves past it; `1-simd-…` is fhanau/Efficient-Compression-Tool#161.
+  ECT and OxiPNG are built from copies with `Tools/ect-png/patches/*.patch`
+  and `Tools/oxipng/patches/*.patch` applied (the checkouts stay pinned). A
+  patch that went upstream is deleted when the pin moves past it; ECT's
+  `1-simd-…` is fhanau/Efficient-Compression-Tool#161.
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
   when `xcode-select` points at the Command Line Tools.
