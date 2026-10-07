@@ -3,6 +3,7 @@ import Foundation
 import ImageIO
 import Testing
 import UniformTypeIdentifiers
+import zlib
 @testable import JustSmallerKit
 
 /// Runs the real optimizers (built by Tools/build.sh into build/tools) on
@@ -844,6 +845,98 @@ final class FileOptimizerTests {
         #expect(throws: PNGMetadataFilter.Malformed.self) {
             try PNGMetadataFilter.filter(png.prefix(40), level: .removePrivate, orientation: 1)
         }
+    }
+
+    /// An iCCP chunk holding `profile`: name, NUL, method 0, zlib data.
+    private func iccpChunk(_ profile: Data, level: Int32 = 9) -> Data {
+        var size = uLongf(compressBound(uLong(profile.count)))
+        var packed = [UInt8](repeating: 0, count: Int(size))
+        let status = profile.withUnsafeBytes { compress2(&packed, &size, $0.bindMemory(to: UInt8.self).baseAddress, uLong(profile.count), level) }
+        precondition(status == Z_OK)
+        return PNGChunks.write("iCCP", Array("ICC profile".utf8) + [0, 0] + packed.prefix(Int(size)))
+    }
+
+    /// A profile whose header carries the ID of a standard sRGB profile, but
+    /// whose data doesn't match it.
+    private var forgedSRGBProfile: Data {
+        var p = [UInt8](repeating: 0, count: 200)
+        p[67] = 1
+        p.replaceSubrange(84..<100, with: [0x29, 0xf8, 0x3d, 0xde, 0xaf, 0xf2, 0x55, 0xae, 0x78, 0x42, 0xfa, 0xe4, 0xca, 0x83, 0x39, 0x0d])
+        return Data(p)
+    }
+
+    /// A standard sRGB profile says nothing the sRGB chunk doesn't: it becomes
+    /// one, at every level. Any other profile stays as it is.
+    @Test func pngStandardSRGBProfileBecomesTheSRGBChunk() throws {
+        func png(_ colour: [Data]) -> Data {
+            Data(PNGChunks.signature) + PNGChunks.write("IHDR", Array(repeating: 1, count: 13)) + colour.reduce(Data(), +)
+                + PNGChunks.write("IDAT", [9]) + PNGChunks.write("IEND", [])
+        }
+        func chunks(_ data: Data) throws -> [(String, Data)] {
+            try PNGChunks.read(ByteView(data), strict: true).map { ($0.type, $0.data.bytes) }
+        }
+        let standard = png([iccpChunk(TestImages.standardSRGBProfile)])
+        for level in MetadataHandling.allCases {
+            let result = try chunks(PNGMetadataFilter.filter(standard, level: level, orientation: 1))
+            #expect(result.map(\.0) == ["IHDR", "sRGB", "IDAT", "IEND"], "\(level)")
+            #expect(result.first { $0.0 == "sRGB" }?.1 == Data([1]), "\(level)")
+        }
+        // An sRGB chunk is there already: the profile just goes.
+        let both = png([PNGChunks.write("sRGB", [0]), iccpChunk(TestImages.standardSRGBProfile)])
+        #expect(try chunks(PNGMetadataFilter.filter(both, level: .keep, orientation: 1)).map(\.0) == ["IHDR", "sRGB", "IDAT", "IEND"])
+        // An ID that doesn't belong to the data isn't trusted.
+        let forged = png([iccpChunk(forgedSRGBProfile)])
+        #expect(try chunks(PNGMetadataFilter.filter(forged, level: .removeAll, orientation: 1)).map(\.0) == ["IHDR", "iCCP", "IDAT", "IEND"])
+        // Display P3 stays byte for byte.
+        let p3Profile = CGColorSpace(name: CGColorSpace.displayP3)!.copyICCData()! as Data
+        let p3 = png([iccpChunk(p3Profile)])
+        #expect(try PNGMetadataFilter.filter(p3, level: .keep, orientation: 1) == p3)
+        #expect(try chunks(PNGMetadataFilter.filter(p3, level: .removeAll, orientation: 1)).map(\.0) == ["IHDR", "iCCP", "IDAT", "IEND"])
+        // Packed loosely, it is recompressed: smaller, the same profile.
+        let loose = png([iccpChunk(p3Profile, level: 0)])
+        let repacked = try PNGMetadataFilter.filter(loose, level: .keep, orientation: 1)
+        #expect(repacked.count < loose.count)
+        let profile = try PNGChunks.read(ByteView(repacked), strict: true).first { $0.type == "iCCP" }.map { try PNGChunks.text($0) }
+        #expect(profile?.content == p3Profile && profile?.keyword == "ICC profile")
+    }
+
+    /// End to end, with every check: a PNG with the standard sRGB profile comes
+    /// out with the sRGB chunk instead, its pixels identical.
+    @Test func pngWithStandardSRGBProfileIsOptimizedWithTheSRGBChunk() async throws {
+        let written = try Data(contentsOf: write(image(), "profile-source.png", type: .png))
+        let all = try PNGChunks.read(ByteView(written), strict: true)
+        var png = Data(PNGChunks.signature) + all[0].whole.bytes + iccpChunk(TestImages.standardSRGBProfile)
+        for c in all.dropFirst() where PNGChunks.isCritical(c) { png += c.whole.bytes }
+        let url = dir.appending(path: "hp-srgb.png")
+        try png.write(to: url)
+        guard case .optimized(_, _, _, _, _, let identical) = try await optimize(url) else {
+            Issue.record("not optimized"); return
+        }
+        #expect(identical)
+        let types = try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true).map(\.type)
+        #expect(types.contains("sRGB") && !types.contains("iCCP"))
+    }
+
+    /// The structure check lets an sRGB chunk replace only a standard sRGB
+    /// profile, with the same rendering intent.
+    @Test func structureCheckAllowsSRGBOnlyForAStandardProfile() throws {
+        let image = try Data(contentsOf: write(image(), "colour.png", type: .png))
+        let all = try PNGChunks.read(ByteView(image), strict: true)
+        func png(_ colour: Data) -> Data {
+            var out = Data(PNGChunks.signature) + all[0].whole.bytes + colour
+            for c in all.dropFirst() where PNGChunks.isCritical(c) { out += c.whole.bytes }
+            return out
+        }
+        func passes(_ original: Data, _ result: Data) -> Bool {
+            (try? PNGCheck.check(ByteView(result), against: PNGCheck.Reference(ByteView(original)))) != nil
+        }
+        let standard = png(iccpChunk(TestImages.standardSRGBProfile))
+        #expect(passes(standard, png(PNGChunks.write("sRGB", [1]))))
+        #expect(!passes(standard, png(PNGChunks.write("sRGB", [0]))))
+        let p3 = png(iccpChunk(CGColorSpace(name: CGColorSpace.displayP3)!.copyICCData()! as Data))
+        #expect(passes(p3, p3))
+        #expect(!passes(p3, png(PNGChunks.write("sRGB", [0]))))
+        #expect(!passes(png(iccpChunk(forgedSRGBProfile)), png(PNGChunks.write("sRGB", [1]))))
     }
 
     @Test func keepsPermissionsTagsAndCreationDate() async throws {

@@ -51,8 +51,9 @@ enum Verifier {
             throw VerificationError(reason: String(localized: "animation or second image lost", bundle: .module))
         }
         // jpeg-scan copies the profile byte for byte. Other formats may store an
-        // equivalent profile differently (oxipng writes an sRGB chunk instead of
-        // an sRGB ICC profile), which the pixel comparison below catches.
+        // equivalent profile differently (our PNG metadata filter writes an sRGB
+        // chunk instead of a standard sRGB ICC profile), which the pixel
+        // comparison below catches.
         if format == .jpeg || format == .heic, pa.iccProfile != pb.iccProfile {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }

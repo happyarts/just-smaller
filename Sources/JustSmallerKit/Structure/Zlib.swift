@@ -3,8 +3,19 @@ import zlib
 
 /// The one way the engine inflates zlib data (PNG image data, text and
 /// profiles): the stream checked by zlib (header, Adler-32), and never more
-/// output than asked for.
+/// output than asked for. Deflating is for the small chunks the metadata
+/// filter writes again.
 enum Zlib {
+    /// `data` as one zlib stream at the highest level.
+    static func deflate(_ data: Data) -> Data? {
+        var size = uLongf(compressBound(uLong(data.count)))
+        var out = [UInt8](repeating: 0, count: Int(size))
+        let status = data.withUnsafeBytes {
+            compress2(&out, &size, $0.bindMemory(to: UInt8.self).baseAddress, uLong(data.count), Z_BEST_COMPRESSION)
+        }
+        return status == Z_OK ? Data(out.prefix(Int(size))) : nil
+    }
+
     /// One complete stream over `pieces`, inflated; at most `limit` bytes.
     static func inflate(_ pieces: [Data], limit: Int = 64 << 20) throws -> Data {
         var out = Data()

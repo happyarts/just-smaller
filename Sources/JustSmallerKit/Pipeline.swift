@@ -199,7 +199,10 @@ enum Pipeline {
 
     static func oxipng(level: String, lossy: Bool) -> Candidate {
         Candidate(name: "OxiPNG", changesHiddenColour: lossy) { input, output, work in
-            var args = ["-o", level, "-i", "0", "--strip", "none"]
+            // No --strip: OxiPNG keeps every chunk that stays valid. (It reads
+            // "--strip none" as a list of chunk names and then also swaps an sRGB
+            // profile; that is our metadata filter's job.)
+            var args = ["-o", level, "-i", "0"]
             // -a rewrites the colour of fully transparent pixels. Invisible,
             // but not identical, so only in lossy mode.
             if lossy { args += ["-a"] }

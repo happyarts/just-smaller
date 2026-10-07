@@ -87,8 +87,15 @@ enum PNGCheck {
                 idat = true
                 image.append(d.bytes)
             case "sRGB":
-                guard d.count == 1, try d.u8(0) <= 3 else { throw Invalid("sRGB") }
-                if !reference.chunks.contains(type: "sRGB"), !reference.chunks.contains(type: "iCCP") { throw Invalid("sRGB added") }
+                guard d.count == 1 else { throw Invalid("sRGB") }
+                let intent = try d.u8(0)
+                guard intent <= 3 else { throw Invalid("sRGB") }
+                // The original's, or one standing for its standard sRGB profile, with the same rendering intent.
+                if !reference.chunks.contains(chunk) {
+                    guard !reference.chunks.contains(type: "sRGB"), let profile = reference.profile,
+                          SRGBProfile.renderingIntent(profile).map(Int.init) == intent
+                    else { throw Invalid("sRGB added") }
+                }
             case "iCCP":
                 guard try PNGChunks.text(chunk).content == reference.profile else { throw Invalid("colour profile changed") }
             case "acTL":
