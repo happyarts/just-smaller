@@ -166,6 +166,8 @@ enum Pipeline {
     /// ECT and OxiPNG each win on different images, so from Balanced on both
     /// run in parallel and the smaller result is kept. ECT breaks animated
     /// PNGs (it palette-reduces the first frame only); those get OxiPNG alone.
+    /// Maximum lets ECT choose the PNG filters section by section from all of
+    /// its heuristics (`--segmented`, our patch to ECT).
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
         if facts.isAnimated { return [oxipng(level: effort == .fast ? "2" : "4", lossy: lossy)] }
         switch effort {
@@ -176,7 +178,7 @@ enum Pipeline {
         case .thorough:
             return [ect(["-7"], lossy: lossy), oxipng(level: "4", lossy: lossy)]
         case .maximum:
-            var candidates = [ect(["-8"], lossy: lossy), ect(["-9"], lossy: lossy), oxipng(level: "6", lossy: lossy)]
+            var candidates = [ect(["-9", "--segmented"], lossy: lossy), oxipng(level: "6", lossy: lossy)]
             if facts.pixelCount <= allFiltersPixelLimit { candidates.append(ect(["-9", "--allfilters-b"], lossy: lossy)) }
             return candidates
         }

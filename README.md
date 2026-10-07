@@ -70,7 +70,7 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Sources/just-smaller` | The command-line tool |
 | `Tools/build.sh` | Builds all optimizers from `Vendor/` (git submodules at release tags or a pinned commit) |
 | `Tools/test.sh`, `Tools/xcode-env.sh` | Runs the tests; finds a full Xcode for SwiftPM |
-| `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++) |
+| `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++), built with the patches in `Tools/ect-png/patches`: a vectorized length loop in Zopfli (NEON/SSE2, identical output) and `--segmented`, which chooses the PNG filters section by section (Maximum effort) |
 | `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |
 | `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
 | `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients (C, libjpeg-turbo) |

@@ -93,9 +93,9 @@ struct PipelineTests {
         func ectRuns(_ facts: FileFacts) -> Int {
             Pipeline.stages(for: .png, facts: facts, settings: settings).last?.filter { $0.name == "ECT" }.count ?? 0
         }
-        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256)) == 3)
-        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256 + 1)) == 2)
-        #expect(ectRuns(FileFacts(byteSize: 1_000)) == 2)
+        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256)) == 2)
+        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256 + 1)) == 1)
+        #expect(ectRuns(FileFacts(byteSize: 1_000)) == 1)
 
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

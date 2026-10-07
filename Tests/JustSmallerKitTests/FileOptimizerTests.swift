@@ -85,6 +85,42 @@ final class FileOptimizerTests {
         try await Verifier.verify(original: copy, result: url, format: .png, pixelsMustMatch: true)
     }
 
+    /// ECT's filters chosen section by section (our patch, Maximum effort):
+    /// an image of several sections with different content and transparent
+    /// areas keeps every pixel, also where invisible colours may change, in
+    /// 16 bits and from an interlaced file.
+    @Test(arguments: [(false, false, false), (true, false, false), (false, true, false), (false, false, true)])
+    func segmentedFiltersKeepEveryPixel(lossy: Bool, sixteenBits: Bool, interlaced: Bool) async throws {
+        let width = 300, height = 600, bytes = sixteenBits ? 2 : 1
+        var pixels = [UInt8](repeating: 0, count: width * height * 4 * bytes)
+        for y in 0..<height {
+            for x in 0..<width {
+                let transparent = y >= 400 && (x / 16 + y / 16) % 3 == 0
+                let value: (Int, Int, Int) = y < 200 ? (x * 255 / width, y, 128)
+                    : y < 400 ? ((x / 8 + y / 8) % 2 == 0 ? (240, 240, 240) : (20, 30, 40))
+                    : ((x * 7919 ^ y * 104_729) & 255, (x * y) & 255, (x + 3 * y) & 255)
+                if transparent { continue }
+                for (c, v) in [value.0, value.1, value.2, 255].enumerated() {
+                    let i = ((y * width + x) * 4 + c) * bytes
+                    pixels[i] = UInt8(v)
+                    // Big-endian 16 bits; the low byte varies too, so it isn't 8 bits in disguise.
+                    if sixteenBits { pixels[i + 1] = c == 3 ? 255 : UInt8((x + y + c) & 255) }
+                }
+            }
+        }
+        let info = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue | (sixteenBits ? CGBitmapInfo.byteOrder16Big.rawValue : 0))
+        let image = CGImage(width: width, height: height, bitsPerComponent: 8 * bytes, bitsPerPixel: 32 * bytes, bytesPerRow: width * 4 * bytes,
+                            space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: info,
+                            provider: CGDataProvider(data: Data(pixels) as CFData)!, decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+        let name = "sections-\(lossy)-\(sixteenBits)-\(interlaced)"
+        let url = write(image, "\(name).png", type: .png,
+                        properties: interlaced ? [kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGInterlaceType: 1]] : [:])
+        let result = dir.appending(path: "\(name)-result.png")
+        try FileManager.default.copyItem(at: url, to: result)
+        _ = try await ToolRunner.run("ect-png", ["-5", "--segmented"] + (lossy ? [] : ["--strict"]) + [result.path], in: dir)
+        try await Verifier.verify(original: url, result: result, format: .png, pixelsMustMatch: true, exactUnderAlpha: !lossy)
+    }
+
     @Test func jpegKeepsDisplayP3Profile() async throws {
         let url = write(image(space: CGColorSpace.displayP3), "p3.jpg", type: .jpeg,
                         properties: [kCGImageDestinationLossyCompressionQuality: 0.95])

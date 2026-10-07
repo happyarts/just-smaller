@@ -103,8 +103,26 @@ run libwebp cmake --build "$WEBP" -j "$JOBS" --target cwebp
 cp "$WEBP/cwebp" "$OUT/cwebp"
 
 # ECT's PNG optimizer only (Tools/ect-png): no mozjpeg, gzip or zip code.
+# Built from a copy of ECT's sources with Tools/ect-png/patches applied, so
+# the checkout stays at its pinned commit. The copy is only renewed when the
+# pin or a patch changes, so builds stay incremental.
 log "ect-png"
-run ect-configure cmake -S "$ROOT/Tools/ect-png" -B "$WORK/ect-png" $CMAKE_COMMON -DECT_SRC="$ROOT/Vendor/ect/src"
+ECT_SRC=$WORK/ect-src
+stamp=$( { git -C "$ROOT/Vendor/ect" rev-parse HEAD; git -C "$ROOT/Vendor/ect" status --porcelain;
+	git -C "$ROOT/Vendor/ect" diff HEAD; git -C "$ROOT/Vendor/ect" submodule status;
+	cat "$ROOT"/Tools/ect-png/patches/*.patch; } | shasum | cut -c1-40)
+if [ "$(cat "$ECT_SRC.stamp" 2>/dev/null)" != "$stamp" ]; then
+	# Patched in a fresh folder, then swapped in whole.
+	fresh=$(mktemp -d "$WORK/ect-src.XXXXXX")
+	cp -R "$ROOT/Vendor/ect/src/." "$fresh"
+	for patch in "$ROOT"/Tools/ect-png/patches/*.patch; do
+		run "ect-patch" patch -p1 --forward -d "$fresh" -i "$patch"
+	done
+	rm -rf "$ECT_SRC" "$ECT_SRC.stamp"
+	mv "$fresh" "$ECT_SRC"
+	echo "$stamp" > "$ECT_SRC.stamp"
+fi
+run ect-configure cmake -S "$ROOT/Tools/ect-png" -B "$WORK/ect-png" $CMAKE_COMMON -DECT_SRC="$ECT_SRC"
 run ect-png cmake --build "$WORK/ect-png" -j "$JOBS" --target ect-png
 cp "$WORK/ect-png/ect-png" "$OUT/ect-png"
 
