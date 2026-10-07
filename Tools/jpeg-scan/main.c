@@ -27,6 +27,7 @@
 // or lossless JPEG, damaged image data): the caller keeps the input.
 
 #include <dispatch/dispatch.h>
+#include <os/lock.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -447,13 +448,26 @@ static void stats_baseline(const Image *img, Stats *dc, Stats *ac) {
 
 // MARK: - Prices
 
+static int has_symbols(const Stats *s) {
+    for (int i = 0; i < 256; i++) if (s->freq[i]) return 1;
+    return 0;
+}
+
+// The bits a table codes a histogram's symbols in (symbols in huffval order
+// get the code lengths bits[] lists).
+static double coded_bits(const Stats *s, const JHUFF_TBL *t) {
+    double bits = 0;
+    for (int len = 1, p = 0; len <= 16; len++)
+        for (int j = 0; j < t->bits[len]; j++, p++) bits += (double)s->freq[t->huffval[p]] * len;
+    return bits;
+}
+
 // Bits for the symbols and the extra bits, and the bytes of the table.
 static void price(const Stats *s, double *bits, long *table_bytes) {
+    if (!has_symbols(s)) { *bits = (double)s->extra; *table_bytes = 0; return; }
     long freq[257];
-    int any = 0;
-    for (int i = 0; i < 256; i++) { freq[i] = s->freq[i]; any |= freq[i] != 0; }
+    for (int i = 0; i < 256; i++) freq[i] = s->freq[i];
     freq[256] = 0;
-    if (!any) { *bits = (double)s->extra; *table_bytes = 0; return; }
     JHUFF_TBL tbl;
     memset(&tbl, 0, sizeof tbl);
     // libjpeg reports an impossible table by jumping out; this runs on
@@ -470,14 +484,9 @@ static void price(const Stats *s, double *bits, long *table_bytes) {
         return;
     }
     jpeg_gen_optimal_table(&cinfo, &tbl, freq);
-    // Symbols in huffval order get the code lengths bits[] lists.
-    double total = (double)s->extra;
-    int p = 0, count = 0;
-    for (int len = 1; len <= 16; len++) {
-        for (int j = 0; j < tbl.bits[len]; j++, p++) total += (double)s->freq[tbl.huffval[p]] * len;
-        count += tbl.bits[len];
-    }
-    *bits = total;
+    int count = 0;
+    for (int len = 1; len <= 16; len++) count += tbl.bits[len];
+    *bits = (double)s->extra + coded_bits(s, &tbl);
     *table_bytes = 2 + 2 + 1 + 16 + count; // DHT marker, length, class/id, counts, symbols
 }
 
@@ -1425,18 +1434,12 @@ static void package_merge_table(const Stats *s, JHUFF_TBL *t) {
             }
 }
 
-// Which builder makes the tables: libjpeg's, or package-merge.
-static int package_merge = 0;
-
-// The table for a histogram; 0 if it can't be built.
-static int build_table(const Stats *s, JHUFF_TBL *t) {
-    if (package_merge) {
-        int any = 0;
-        for (int i = 0; i < 256 && !any; i++) any = s->freq[i] != 0;
-        if (any) {
-            package_merge_table(s, t);
-            return 1;
-        }
+// The table for a histogram, built by libjpeg or (`package_merge`) by
+// package-merge; 0 if it can't be built.
+static int build_table(const Stats *s, int package_merge, JHUFF_TBL *t) {
+    if (package_merge && has_symbols(s)) {
+        package_merge_table(s, t);
+        return 1;
     }
     long freq[257];
     for (int i = 0; i < 256; i++) freq[i] = s->freq[i];
@@ -1505,6 +1508,7 @@ typedef struct {
     const Image *img;
     const Plan *p;
     int sequential;
+    int package_merge;      // which builder makes the tables
     Need *needs;
     const int *first_need;
 } Layout;
@@ -1513,9 +1517,9 @@ typedef struct {
 // symbol order), to test the writer against it.
 static int like_libjpeg = 0;
 
-static int ensure_table(Group *g) {
+static int ensure_table(Group *g, int package_merge) {
     if (g->built) return 1;
-    if (!build_table(&g->hist, &g->table)) return 0;
+    if (!build_table(&g->hist, package_merge, &g->table)) return 0;
     if (!like_libjpeg) order_by_frequency(&g->table, &g->hist);
     make_code(&g->table, &g->code);
     g->built = 1;
@@ -1619,7 +1623,8 @@ static void share_tables(Group *g, int ngroups, const Layout *L) {
         // Exact: the scans of both groups, coded apart and together.
         *trial = (Group){.class_ = a->class_, .hist = a->hist};
         for (int i = 0; i < 256; i++) trial->hist.freq[i] += b->hist.freq[i];
-        if (!ensure_table(a) || !ensure_table(b) || !ensure_table(trial)) continue;
+        int pm = L->package_merge;
+        if (!ensure_table(a, pm) || !ensure_table(b, pm) || !ensure_table(trial, pm)) continue;
         long apart = table_bytes(a) + table_bytes(b), together = table_bytes(trial);
         for (int n = 0; n < nneeds; n++) {
             int k = L->needs[n].group;
@@ -1707,7 +1712,7 @@ static int valid_plan(const Image *img, const Plan *p) {
 
 // Writes the file with the given scans (NULL: one sequential scan). `share`
 // lets scans share tables. Returns 0 if it can't (a table can't be built).
-static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, int share, Buffer *out) {
+static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, int share, int package_merge, Buffer *out) {
     Plan seq;
     int all[4] = {0, 1, 2, 3};
     if (!plan) {
@@ -1771,7 +1776,8 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
                                .alive = 1, .slot = -1, .hist = needs[n].hist};
     }
     for (int i = 0; i < ngroups; i++) g[i].bytes = group_bytes(&g[i].hist);
-    Layout layout = {.img = img, .p = p, .sequential = sequential, .needs = needs, .first_need = first_need};
+    Layout layout = {.img = img, .p = p, .sequential = sequential, .package_merge = package_merge,
+                     .needs = needs, .first_need = first_need};
     if (share && ngroups <= 160) share_tables(g, ngroups, &layout);
     for (int n = 0; n < nneeds; n++) { // follow merges to the surviving group
         int k = needs[n].group;
@@ -1781,7 +1787,7 @@ static int write_own(j_decompress_ptr src, const Image *img, const Plan *plan, i
     for (int i = 0; i < ngroups; i++) {
         if (!g[i].alive) continue;
         g[i].slot = -1;
-        if (!ensure_table(&g[i])) { free(first_need); free(needs); free(g); return 0; }
+        if (!ensure_table(&g[i], package_merge)) { free(first_need); free(needs); free(g); return 0; }
     }
 
     Group **group_of = checked_malloc((size_t)(nneeds ? nneeds : 1) * sizeof *group_of);
@@ -1957,25 +1963,12 @@ static void print_plan(const char *name, const Plan *p) {
     fprintf(stderr, "\n");
 }
 
-// The bits a table codes a histogram's symbols in.
-static double coded_bits(const Stats *s, const JHUFF_TBL *t) {
-    double bits = 0;
-    for (int len = 1, p = 0; len <= 16; len++)
-        for (int j = 0; j < t->bits[len]; j++, p++) bits += (double)s->freq[t->huffval[p]] * len;
-    return bits;
-}
-
 // Package-merge's table codes every symbol, leaves the all-ones code word
 // free and costs no more bits than libjpeg's.
 static int package_merge_ok(const Stats *s) {
-    int any = 0;
-    for (int i = 0; i < 256 && !any; i++) any = s->freq[i] != 0;
-    if (!any) return 1;
+    if (!has_symbols(s)) return 1;
     JHUFF_TBL pm, lj;
-    package_merge = 1;
-    int built = build_table(s, &pm);
-    package_merge = 0;
-    if (!built || !build_table(s, &lj)) return 0;
+    if (!build_table(s, 1, &pm) || !build_table(s, 0, &lj)) return 0;
     int seen[256] = {0}, count = 0;
     double room = 1;
     for (int len = 1; len <= 16; len++)
@@ -1986,10 +1979,17 @@ static int package_merge_ok(const Stats *s) {
 
 // Development check: the all-ends costing must match counting each band
 // on its own, for every band and point transform, and package-merge must
-// build a valid table no worse than libjpeg's for each band.
+// build a valid table no worse than libjpeg's for each band and for the
+// image-wide (sequential) DC and AC histograms, which hold the most symbols.
 static int selftest(const Image *img) {
     static const int cuts[] = {1, 2, 3, 5, 6, 9, 14, 21, 40, 63, 64};
     int n = sizeof cuts / sizeof *cuts, bad = 0;
+    Stats dc[2], ac[2];
+    memset(dc, 0, sizeof dc);
+    memset(ac, 0, sizeof ac);
+    stats_baseline(img, dc, ac);
+    for (int t = 0; t < 2; t++)
+        if (!package_merge_ok(&dc[t]) || !package_merge_ok(&ac[t])) { fprintf(stderr, "package-merge sequential table %d\n", t); bad++; }
     static double fast[64][64];
     for (int c = 0; c < img->ncomp; c++) {
         for (int al = 0; al <= AL_LIMIT; al++) {
@@ -2006,6 +2006,7 @@ static int selftest(const Image *img) {
                         bad++;
                     }
                 }
+            if (al == AL_LIMIT) continue; // refinements go down from AL_LIMIT
             refine_costs(&img->comp[c], al, cuts, n, NULL, fast);
             for (int i = 0; i + 1 < n; i++)
                 for (int j = i + 1; j < n; j++) {
@@ -2141,22 +2142,35 @@ int main(int argc, char **argv) {
 
     // Writing: our own writer (shared tables, exact sizes), read back and
     // compared; libjpeg if it can't or the comparison fails.
-    Buffer out = {0};
-    const char *writer = "own";
+    __block Buffer out = {0};
+    const char *writer = "own", *tables = "libjpeg";
     if (!force_libjpeg) {
         // Maximum writes each candidate with both table builders: package-merge
         // codes better, but its codes can stuff more zero bytes or share
-        // tables less well, so the exact size decides.
+        // tables less well, so the exact size decides. The writes run in
+        // parallel; of equal sizes the earlier one (candidate, then libjpeg's
+        // tables) is kept, as if they ran in order.
         int builders = effort == EFFORT_MAXIMUM && !like_libjpeg ? 2 : 1;
-        for (int i = 0; i < ncands; i++)
-            for (int m = 0; m < builders; m++) {
-                package_merge = m;
-                Buffer b;
-                if (!write_own(&src, &img, cands[i], share, &b)) continue;
-                if (!out.data || b.size < out.size) { free(out.data); out = b; best = cands[i]; }
-                else free(b.data);
-            }
-        package_merge = 0;
+        __block size_t kept = 0;
+        __block os_unfair_lock lock = OS_UNFAIR_LOCK_INIT;
+        const Plan *const *list = cands;
+        j_decompress_ptr from = &src;
+        const Image *image = &img;
+        dispatch_apply((size_t)(ncands * builders), DISPATCH_APPLY_AUTO, ^(size_t job) {
+            Buffer b;
+            if (!write_own(from, image, list[job / builders], share, (int)(job % builders), &b)) return;
+            os_unfair_lock_lock(&lock);
+            if (!out.data || b.size < out.size || (b.size == out.size && job < kept)) {
+                free(out.data);
+                out = b;
+                kept = job;
+            } else free(b.data);
+            os_unfair_lock_unlock(&lock);
+        });
+        if (out.data) {
+            best = cands[kept / builders];
+            if (kept % builders) tables = "package-merge";
+        }
         // The caller proves every result with jpegcmp anyway; reading it back
         // here only buys the fallback to libjpeg, worth its time at the
         // higher efforts.
@@ -2186,7 +2200,8 @@ int main(int argc, char **argv) {
         const char *chose = best == NULL ? "baseline" : best == &simple ? "simple" : "searched";
         const char *names[] = {"fast", "balanced", "thorough", "maximum"};
         for (int e = EFFORT_FAST; e <= EFFORT_MAXIMUM; e++) if (best == &searched[e]) chose = names[e];
-        fprintf(stderr, "; %d written, chose %s; %s writer; file %lu\n", ncands, chose, writer, out.size);
+        fprintf(stderr, "; %d written, chose %s; %s writer, %s tables; file %lu\n", ncands, chose, writer,
+                strcmp(writer, "own") ? "libjpeg" : tables, out.size);
         if (best) print_plan("scans", best);
     }
 
