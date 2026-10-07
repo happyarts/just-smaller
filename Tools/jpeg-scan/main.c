@@ -44,10 +44,10 @@ enum { EFFORT_FAST, EFFORT_BALANCED, EFFORT_THOROUGH, EFFORT_MAXIMUM };
 // The highest point transform of an AC first pass: 3 below maximum, 6 there.
 #define AL_LIMIT 6
 
-// Up to this many blocks (about 0.8 megapixels in colour) an image gets the
+// Up to this many blocks (about 1.7 megapixels in colour) an image gets the
 // full search and a real-encode check at every effort: milliseconds there,
 // and a few bytes matter more on a small file.
-#define SMALL_IMAGE_BLOCKS 20000
+#define SMALL_IMAGE_BLOCKS 40000
 
 // Zigzag position -> natural (row-major) position.
 static const int natural[64] = {
