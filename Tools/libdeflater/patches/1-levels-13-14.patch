@@ -1,5 +1,5 @@
 diff --git a/libdeflate-sys/libdeflate/lib/deflate_compress.c b/libdeflate-sys/libdeflate/lib/deflate_compress.c
-index b24087c..0e31474 100644
+index b24087c..b7c7a60 100644
 --- a/libdeflate-sys/libdeflate/lib/deflate_compress.c
 +++ b/libdeflate-sys/libdeflate/lib/deflate_compress.c
 @@ -80,6 +80,13 @@
@@ -7,9 +7,9 @@ index b24087c..0e31474 100644
  #define SOFT_MAX_BLOCK_LENGTH	300000
  
 +/*
-+ * Levels 13 and 14 use longer blocks: they split them afterwards by the real
-+ * cost of the chosen literals and matches (see deflate_split_and_flush()), so
-+ * the soft maximum only bounds memory.
++ * Level 14 uses longer blocks: it splits them afterwards by the real cost of
++ * the chosen literals and matches (see deflate_split_and_flush()), so the soft
++ * maximum only bounds memory.
 + */
 +#define LONG_SOFT_MAX_BLOCK_LENGTH	1000000
 +
@@ -53,7 +53,7 @@ index b24087c..0e31474 100644
  	STATIC_ASSERT(FAST_SOFT_MAX_BLOCK_LENGTH >= MIN_BLOCK_LENGTH);
  	STATIC_ASSERT(SEQ_STORE_LENGTH * DEFLATE_MIN_MATCH_LEN >=
  		      MIN_BLOCK_LENGTH);
-@@ -655,6 +674,25 @@ struct libdeflate_compressor {
+@@ -655,6 +674,28 @@ struct libdeflate_compressor {
  			 */
  			u32 max_len_to_optimize_static_block;
  
@@ -67,6 +67,9 @@ index b24087c..0e31474 100644
 +			 */
 +			unsigned split_passes;
 +
++			/* SOFT_MAX_BLOCK_LENGTH, or longer at level 14. */
++			u32 soft_max_block_length;
++
 +			/* Split search: counts at the candidate split points. */
 +			struct deflate_freqs split_freqs[MAX_SPLIT_POINTS];
 +			u32 split_pos[MAX_SPLIT_POINTS];
@@ -79,7 +82,7 @@ index b24087c..0e31474 100644
  		} n; /* (n)ear-optimal */
  	#endif /* SUPPORT_NEAR_OPTIMAL_PARSING */
  
-@@ -2840,6 +2878,25 @@ deflate_compress_lazy2(struct libdeflate_compressor * restrict c,
+@@ -2840,6 +2881,25 @@ deflate_compress_lazy2(struct libdeflate_compressor * restrict c,
   * for the current block and compute the frequencies of the Huffman symbols that
   * would be needed to output those matches and literals.
   */
@@ -105,7 +108,7 @@ index b24087c..0e31474 100644
  static void
  deflate_tally_item_list(struct libdeflate_compressor *c, u32 block_length)
  {
-@@ -2848,19 +2905,7 @@ deflate_tally_item_list(struct libdeflate_compressor *c, u32 block_length)
+@@ -2848,19 +2908,7 @@ deflate_tally_item_list(struct libdeflate_compressor *c, u32 block_length)
  		&c->p.n.optimum_nodes[block_length];
  
  	do {
@@ -126,7 +129,7 @@ index b24087c..0e31474 100644
  	} while (cur_node != end_node);
  
  	/* Tally the end-of-block symbol. */
-@@ -3398,36 +3443,101 @@ deflate_find_min_cost_path(struct libdeflate_compressor *c,
+@@ -3398,36 +3446,101 @@ deflate_find_min_cost_path(struct libdeflate_compressor *c,
  	deflate_make_huffman_codes(&c->freqs, &c->codes);
  }
  
@@ -244,7 +247,7 @@ index b24087c..0e31474 100644
  	u32 i;
  
  	/*
-@@ -3465,9 +3575,6 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
+@@ -3465,9 +3578,6 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
  		c->p.n.costs = c->p.n.costs_saved;
  	}
  
@@ -254,7 +257,7 @@ index b24087c..0e31474 100644
  	do {
  		/*
  		 * Find the minimum-cost path for this pass.
-@@ -3497,24 +3604,23 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
+@@ -3497,24 +3607,23 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
  		c->p.n.costs_saved = c->p.n.costs;
  
  		/* Update the cost model from the Huffman codes. */
@@ -287,7 +290,7 @@ index b24087c..0e31474 100644
  	} else if (true_cost >=
  		   best_true_cost + c->p.n.min_bits_to_use_nonfinal_path) {
  		/*
-@@ -3525,10 +3631,315 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
+@@ -3525,10 +3634,303 @@ deflate_optimize_and_flush_block(struct libdeflate_compressor *c,
  		deflate_find_min_cost_path(c, block_length, cache_ptr);
  		deflate_set_costs_from_codes(c, &c->codes.lens);
  	}
@@ -519,12 +522,8 @@ index b24087c..0e31474 100644
 +	deflate_freqs_between(c, 0, n, &c->freqs);
 +	deflate_choose_splits(c, 0, n, deflate_dynamic_block_cost(c));
 +
-+	/*
-+	 * Without a split, the whole-block result can be output as it is,
-+	 * unless the piece would get more passes.
-+	 */
-+	if (c->p.n.num_splits == 0 &&
-+	    c->p.n.split_passes >= c->p.n.max_optim_passes) {
++	/* Without a split, the whole-block result is output as it is. */
++	if (c->p.n.num_splits == 0) {
 +		c->freqs = block_freqs;
 +		c->codes = block_codes;
 +		deflate_flush_optimized_block(c, os, block_begin, block_length,
@@ -592,28 +591,20 @@ index b24087c..0e31474 100644
 +				      *used_only_literals, is_final_block);
 +}
 +
-+/* Levels 13-14 use longer blocks: they split them by cost afterwards. */
-+static forceinline u32
-+deflate_soft_max_block_length(const struct libdeflate_compressor *c)
-+{
-+	return c->p.n.split_passes ? LONG_SOFT_MAX_BLOCK_LENGTH :
-+				     SOFT_MAX_BLOCK_LENGTH;
-+}
-+
  static void
  deflate_near_optimal_init_stats(struct libdeflate_compressor *c)
  {
-@@ -3612,7 +4023,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
+@@ -3612,7 +4014,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
  	do {
  		/* Starting a new DEFLATE block */
  		const u8 * const in_max_block_end = choose_max_block_end(
 -				in_block_begin, in_end, SOFT_MAX_BLOCK_LENGTH);
 +				in_block_begin, in_end,
-+				deflate_soft_max_block_length(c));
++				c->p.n.soft_max_block_length);
  		const u8 *prev_end_block_check = NULL;
  		bool change_detected = false;
  		const u8 *next_observation = in_next;
-@@ -3722,8 +4134,20 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
+@@ -3722,8 +4125,20 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
  			 */
  			if (best_len >= DEFLATE_MIN_MATCH_LEN &&
  			    best_len >= nice_len) {
@@ -634,7 +625,7 @@ index b24087c..0e31474 100644
  					remaining = in_end - in_next;
  					if (in_next == in_next_slide) {
  						bt_matchfinder_slide_window(
-@@ -3736,6 +4160,27 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
+@@ -3736,6 +4151,27 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
  					adjust_max_and_nice_len(&max_len,
  								&nice_len,
  								remaining);
@@ -662,17 +653,17 @@ index b24087c..0e31474 100644
  					if (max_len >=
  					    BT_MATCHFINDER_REQUIRED_NBYTES) {
  						bt_matchfinder_skip_byte(
-@@ -3757,7 +4202,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
+@@ -3757,7 +4193,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
  				break;
  			/* Match cache overflowed? */
  			if (cache_ptr >=
 -			    &c->p.n.match_cache[MATCH_CACHE_LENGTH])
 +			    &c->p.n.match_cache[
-+				deflate_soft_max_block_length(c) * 5])
++				c->p.n.soft_max_block_length * 5])
  				break;
  			/* Not ready to try to end the block (again)? */
  			if (!ready_to_check_block(&c->split_stats,
-@@ -3765,7 +4211,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
+@@ -3765,7 +4202,8 @@ deflate_compress_near_optimal(struct libdeflate_compressor * restrict c,
  						  in_end))
  				continue;
  			/* Check if it would be worthwhile to end the block. */
@@ -682,7 +673,7 @@ index b24087c..0e31474 100644
  					       in_next - in_block_begin)) {
  				change_detected = true;
  				break;
-@@ -3892,7 +4339,7 @@ libdeflate_alloc_compressor_ex(int compression_level,
+@@ -3892,7 +4330,7 @@ libdeflate_alloc_compressor_ex(int compression_level,
  	if (compression_level == -1)
  		compression_level = 6;
  
@@ -691,7 +682,7 @@ index b24087c..0e31474 100644
  		return NULL;
  
  #if SUPPORT_NEAR_OPTIMAL_PARSING
-@@ -3922,7 +4369,8 @@ libdeflate_alloc_compressor_ex(int compression_level,
+@@ -3922,7 +4360,8 @@ libdeflate_alloc_compressor_ex(int compression_level,
  	 * The higher the compression level, the more we should bother trying to
  	 * compress very small inputs.
  	 */
@@ -701,21 +692,28 @@ index b24087c..0e31474 100644
  
  	switch (compression_level) {
  	case 0:
-@@ -4012,6 +4460,19 @@ libdeflate_alloc_compressor_ex(int compression_level,
+@@ -4012,6 +4451,26 @@ libdeflate_alloc_compressor_ex(int compression_level,
  #endif /* SUPPORT_NEAR_OPTIMAL_PARSING */
  	}
  
 +#if SUPPORT_NEAR_OPTIMAL_PARSING
 +	/*
 +	 * Levels 13-14 are level 12 plus cost-based block splitting (see
-+	 * deflate_split_and_flush()); 13 optimizes a whole block only roughly
-+	 * before splitting it, and its pieces with fewer passes.
++	 * deflate_split_and_flush()).  13 optimizes a block and its pieces with
++	 * fewer passes; 14 uses all of them and longer blocks.
 +	 */
-+	if (compression_level >= 10)
-+		c->p.n.split_passes = compression_level == 13 ? 2 :
-+				      compression_level == 14 ? 10 : 0;
-+	if (compression_level == 13)
-+		c->p.n.max_optim_passes = 3;
++	if (compression_level >= 10) {
++		c->p.n.split_passes = 0;
++		c->p.n.soft_max_block_length = SOFT_MAX_BLOCK_LENGTH;
++	}
++	if (compression_level == 13) {
++		c->p.n.split_passes = 3;
++		c->p.n.max_optim_passes = 4;
++	}
++	if (compression_level == 14) {
++		c->p.n.split_passes = 10;
++		c->p.n.soft_max_block_length = LONG_SOFT_MAX_BLOCK_LENGTH;
++	}
 +#endif
 +
  	deflate_init_static_codes(c);
