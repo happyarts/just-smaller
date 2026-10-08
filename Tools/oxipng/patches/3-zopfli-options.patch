@@ -13,13 +13,14 @@ diff --git a/Cargo.lock b/Cargo.lock
 diff --git a/src/main.rs b/src/main.rs
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -453,6 +453,9 @@
+@@ -453,6 +453,10 @@
          opts.deflater = Deflater::Zopfli(ZopfliOptions {
              iteration_count,
              iterations_without_improvement,
 +            final_block_trials: true,
 +            code_length_passes: true,
 +            tree_match_finder: true,
++            parallel_chunks: true,
              ..Default::default()
          });
      }
