@@ -35,7 +35,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 
 | Format | Lossless | Lossy |
 |---|---|---|
-| PNG | own metadata filter + [OxiPNG](https://github.com/oxipng/oxipng) (with our patches); at Maximum effort also the PNG part of [ECT](https://github.com/fhanau/Efficient-Compression-Tool) (`Tools/ect-png`), not for animated PNGs | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
+| PNG | own metadata filter + [OxiPNG](https://github.com/oxipng/oxipng) (with our patches); at Maximum effort also OxiPNG with [Zopfli](https://github.com/zopfli-rs/zopfli) (our fork), not for animated PNGs | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
 | JPEG | own metadata filter + own scan optimizer (`Tools/jpeg-scan`: finds the progressive scan split that codes each image smallest, written with [libjpeg-turbo](https://libjpeg-turbo.org)), proven by comparing DCT coefficients (`Tools/jpegcmp`) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
 | WebP | cwebp ([libwebp](https://chromium.googlesource.com/webm/libwebp)), lossless files only | — |
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
@@ -70,7 +70,6 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Sources/just-smaller` | The command-line tool |
 | `Tools/build.sh` | Builds all optimizers from `Vendor/` (git submodules at release tags or a pinned commit) |
 | `Tools/test.sh`, `Tools/xcode-env.sh` | Runs the tests; finds a full Xcode for SwiftPM |
-| `Tools/ect-png` | ECT's PNG optimizer on its own, without its JPEG, gzip and zip code (C++), built with the patches in `Tools/ect-png/patches`: a vectorized length loop in Zopfli (NEON/SSE2, identical output), `--segmented`, which chooses the PNG filters section by section (Maximum effort), and unaligned reads in the match finder done with `memcpy` (no undefined behaviour, identical output) |
 | `Tools/oxipng/patches` | Patches to OxiPNG, applied to a copy when it is built: on larger images the evaluation chooses the PNG filters section by section among the strategies it tries (oxipng/oxipng#883); libdeflate levels 13 and 14 (`--zc`); with `--zopfli`, the zopfli options below |
 | `Vendor/zopfli` | The zopfli crate OxiPNG uses with `--zopfli`, from our fork `happyarts/zopfli` (its `main`): the matches of the first pass are kept for later iterations (identical output); optional binary tree match finder, more Huffman code length choices for each dynamic block, parse passes with the real code lengths, the 1 MB chunks compressed on several threads (identical output), and blocks joined across those chunks where one block is smaller than two; buffers are allocated once and reused (identical output); minimum Rust version 1.88, as OxiPNG's |
 | `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |

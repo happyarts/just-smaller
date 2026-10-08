@@ -140,8 +140,7 @@ enum Pipeline {
 
     // MARK: - PNG
 
-    /// Metadata is filtered by our own filter before compressing: ECT's
-    /// --strip would drop the colour profile too.
+    /// Metadata is filtered by our own filter before compressing.
     static func pngMetadata(_ level: MetadataHandling, orientation: Int) -> Candidate {
         metadata(level) { try PNGMetadataFilter.filter($0, level: level, orientation: orientation) }
     }
@@ -160,14 +159,13 @@ enum Pipeline {
     /// on larger images, chooses among them section by section (our patch,
     /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
     /// (`--zc`, our patch); with both fixed, its -o presets give the same
-    /// result. Maximum runs ECT next to it, with ECT's filters chosen section
-    /// by section (`--segmented`, our patch), and keeps the smaller result.
-    /// ECT breaks animated PNGs (it palette-reduces the first frame only);
-    /// those get OxiPNG alone.
+    /// result. Maximum also runs OxiPNG with Zopfli next to Thorough's
+    /// OxiPNG and keeps the smaller result, so it is never larger than
+    /// Thorough. Animated PNGs get one OxiPNG run.
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
         if facts.isAnimated { return [oxipng(["-o", effort == .fast ? "2" : "4"], lossy: lossy)] }
-        let oxipng = oxipng(oxipngOptions(effort), lossy: lossy)
-        return effort == .maximum ? [ect(["-9", "--segmented"], lossy: lossy), oxipng] : [oxipng]
+        let libdeflate = oxipng(oxipngOptions(effort), lossy: lossy)
+        return effort == .maximum ? [oxipng(oxipngZopfliOptions, lossy: lossy), libdeflate] : [libdeflate]
     }
 
     /// OxiPNG's options for still PNGs at each effort.
@@ -179,18 +177,10 @@ enum Pipeline {
         }
     }
 
-    /// ECT rewrites the file in place, so it works on a copy.
-    static func ect(_ options: [String], lossy: Bool) -> Candidate {
-        Candidate(name: "ECT", changesHiddenColour: lossy) { input, output, work in
-            try FileManager.default.copyItem(at: input, to: output)
-            var args = options
-            // Without --strict ECT rewrites the colour of fully transparent
-            // pixels. Invisible, but not identical, so only in lossy mode.
-            if !lossy { args += ["--strict"] }
-            try await ToolRunner.run("ect-png", args + [output.path], in: work)
-            return true
-        }
-    }
+    /// OxiPNG with Zopfli at Maximum: every filter strategy is judged quickly
+    /// (`--fast`), then the best one is compressed once with Zopfli (our
+    /// faster fork), up to 60 iterations, stopping after 10 without gain.
+    static let oxipngZopfliOptions = ["-o", "max", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"]
 
     static func oxipng(_ options: [String], lossy: Bool) -> Candidate {
         Candidate(name: "OxiPNG", changesHiddenColour: lossy) { input, output, work in

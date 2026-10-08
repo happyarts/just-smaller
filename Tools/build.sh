@@ -1,9 +1,8 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
-# Vendor/ (git submodules pinned to released versions; ECT to a master
-# commit, since its last release lacks years of fixes; oxvg to a main commit
+# Vendor/ (git submodules pinned to released versions; oxvg to a main commit
 # with path and transform fixes that aren't released yet; zopfli to our fork,
-# happyarts/zopfli) and Tools/. ECT, OxiPNG and libdeflate (through the
+# happyarts/zopfli) and Tools/. OxiPNG and libdeflate (through the
 # libdeflater crate) are built from copies with our patches (Tools/*/patches)
 # applied.
 #
@@ -36,7 +35,7 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect libdeflater zopfli; do
+for dep in oxipng oxvg libwebp libjpeg-turbo jpegli libdeflater zopfli; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
@@ -44,16 +43,13 @@ for dep in highway skcms libpng zlib lcms libjpeg-turbo; do
 	[ -n "$(ls -A "$ROOT/Vendor/jpegli/third_party/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT/Vendor/jpegli" submodule update --init --depth 1 "third_party/$dep"
 done
-# ECT: only libpng; its mozjpeg is for JPEG, which ect-png leaves out.
-[ -n "$(ls -A "$ROOT/Vendor/ect/src/libpng" 2>/dev/null)" ] ||
-	git -C "$ROOT/Vendor/ect" submodule update --init --depth 1 src/libpng
 [ -n "$(ls -A "$ROOT/Vendor/libdeflater/libdeflate-sys/libdeflate" 2>/dev/null)" ] ||
 	git -C "$ROOT/Vendor/libdeflater" submodule update --init --depth 1 libdeflate-sys/libdeflate
 # A checkout that isn't at the commit this repository pins (a pull moved the
 # pin) would build the old version or fail on a lockfile. It is left as it
 # is — it may hold local work — so stop and say how to update it.
 stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/ect Vendor/libdeflater Vendor/zopfli | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+	Vendor/jpegli Vendor/libdeflater Vendor/zopfli | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
 if [ -n "$stale" ]; then
 	echo "Not at the pinned commit: $stale" >&2
 	echo "Update with: git submodule update --depth 1 $stale" >&2
@@ -66,16 +62,16 @@ run() { # name, command… — output goes to build/work/NAME.log, shown on fail
 	"$@" >"$WORK/$name.log" 2>&1 || { tail -40 "$WORK/$name.log" >&2; log "error: building $name failed"; exit 1; }
 }
 
-# A copy of a pinned checkout (or a folder in it) with our patches applied, so
-# the checkout stays at its pin. Renewed, in a fresh folder swapped in whole,
-# only when the pin, a local change or a patch changes: builds stay incremental.
-patched_copy() { # checkout dest patches-dir [folder]
+# A copy of a pinned checkout with our patches applied, so the checkout stays
+# at its pin. Renewed, in a fresh folder swapped in whole, only when the pin, a
+# local change or a patch changes: builds stay incremental.
+patched_copy() { # checkout dest patches-dir
 	pc_stamp=$( { git -C "$1" rev-parse HEAD; git -C "$1" status --porcelain; git -C "$1" diff HEAD;
 		git -C "$1" submodule status --recursive; git -C "$1" submodule --quiet foreach --recursive git diff HEAD;
 		cat "$3"/*.patch; } | shasum | cut -c1-40)
 	[ "$(cat "$2.stamp" 2>/dev/null)" = "$pc_stamp" ] && return
 	pc_fresh=$(mktemp -d "$2.XXXXXX")
-	rsync -a --exclude .git --exclude target --exclude tests/files "$1/${4:-.}/" "$pc_fresh"
+	rsync -a --exclude .git --exclude target --exclude tests/files "$1/" "$pc_fresh"
 	for pc_patch in "$3"/*.patch; do
 		run "$(basename "$2")-patch" patch -p1 --forward -d "$pc_fresh" -i "$pc_patch"
 	done
@@ -125,14 +121,6 @@ run libwebp-configure cmake -S "$ROOT/Vendor/libwebp" -B "$WEBP" $CMAKE_COMMON \
 run libwebp cmake --build "$WEBP" -j "$JOBS" --target cwebp
 cp "$WEBP/cwebp" "$OUT/cwebp"
 
-# ECT's PNG optimizer only (Tools/ect-png): no mozjpeg, gzip or zip code.
-log "ect-png"
-ECT_SRC=$WORK/ect-src
-patched_copy "$ROOT/Vendor/ect" "$ECT_SRC" "$ROOT/Tools/ect-png/patches" src
-run ect-configure cmake -S "$ROOT/Tools/ect-png" -B "$WORK/ect-png" $CMAKE_COMMON -DECT_SRC="$ECT_SRC"
-run ect-png cmake --build "$WORK/ect-png" -j "$JOBS" --target ect-png
-cp "$WORK/ect-png/ect-png" "$OUT/ect-png"
-
 # Rust tools: an explicit target and Apple's ld as linker keep build scripts
 # and proc-macros apart from target-only flags (oxvg's .cargo/config adds
 # linker flags for its Node.js build that break proc-macros otherwise). Each
@@ -159,7 +147,7 @@ cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml" --locked
 
-for tool in jpeg-scan jpegcmp cjpegli cwebp ect-png oxipng svg-tool png-quantize; do
+for tool in jpeg-scan jpegcmp cjpegli cwebp oxipng svg-tool png-quantize; do
 	if [ -n "$ENTITLEMENTS" ]; then
 		codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
 	else

@@ -85,7 +85,8 @@ struct PipelineTests {
         #expect((plain["cleanupIds"] as? [String: Any])?["remove"] as? Bool == false)
     }
 
-    /// ECT runs only at Maximum, next to OxiPNG, and never on animated PNGs.
+    /// Maximum runs OxiPNG twice, with Zopfli and as Thorough; animated PNGs
+    /// get one run.
     @Test func pngCompressorsPerEffort() {
         func names(_ effort: Effort, animated: Bool = false) -> [String] {
             var settings = OptimizationSettings()
@@ -97,8 +98,9 @@ struct PipelineTests {
         #expect(names(.fast) == ["OxiPNG"])
         #expect(names(.balanced) == ["OxiPNG"])
         #expect(names(.thorough) == ["OxiPNG"])
-        #expect(names(.maximum) == ["ECT", "OxiPNG"])
+        #expect(names(.maximum) == ["OxiPNG", "OxiPNG"])
         #expect(names(.maximum, animated: true) == ["OxiPNG"])
+        #expect(Pipeline.oxipngZopfliOptions == ["-o", "max", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"])
         // Section-wise filters from Balanced on; libdeflate 13, then 14.
         #expect(Pipeline.oxipngOptions(.fast) == ["-o", "2"])
         #expect(Pipeline.oxipngOptions(.balanced) == ["-o", "2", "-f", "0-9", "--zc", "13"])

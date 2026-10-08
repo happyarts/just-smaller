@@ -81,17 +81,17 @@ final class FileOptimizerTests {
             Issue.record("not optimized"); return
         }
         #expect(after < before)
-        #expect(tools.contains("ECT") || tools.contains("OxiPNG"))
+        #expect(tools.contains("OxiPNG"))
         #expect(identical)
         try await Verifier.verify(original: copy, result: url, format: .png, pixelsMustMatch: true)
     }
 
-    /// ECT's filters chosen section by section (our patch, Maximum effort):
-    /// an image of several sections with different content and transparent
-    /// areas keeps every pixel, also where invisible colours may change, in
-    /// 16 bits and from an interlaced file.
+    /// OxiPNG's filters chosen section by section (our patch, from Balanced
+    /// on) and its Zopfli run at Maximum: an image of several sections with
+    /// different content and transparent areas keeps every pixel, also where
+    /// invisible colours may change, in 16 bits and from an interlaced file.
     @Test(arguments: [(false, false, false), (true, false, false), (false, true, false), (false, false, true)])
-    func segmentedFiltersKeepEveryPixel(lossy: Bool, sixteenBits: Bool, interlaced: Bool) async throws {
+    func sectionFiltersAndZopfliKeepEveryPixel(lossy: Bool, sixteenBits: Bool, interlaced: Bool) async throws {
         let width = 300, height = 600, bytes = sixteenBits ? 2 : 1
         var pixels = [UInt8](repeating: 0, count: width * height * 4 * bytes)
         for y in 0..<height {
@@ -116,10 +116,11 @@ final class FileOptimizerTests {
         let name = "sections-\(lossy)-\(sixteenBits)-\(interlaced)"
         let url = write(image, "\(name).png", type: .png,
                         properties: interlaced ? [kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGInterlaceType: 1]] : [:])
-        let result = dir.appending(path: "\(name)-result.png")
-        try FileManager.default.copyItem(at: url, to: result)
-        _ = try await ToolRunner.run("ect-png", ["-5", "--segmented"] + (lossy ? [] : ["--strict"]) + [result.path], in: dir)
-        try await Verifier.verify(original: url, result: result, format: .png, pixelsMustMatch: true, exactUnderAlpha: !lossy)
+        for (i, options) in [Pipeline.oxipngOptions(.balanced), Pipeline.oxipngZopfliOptions].enumerated() {
+            let result = dir.appending(path: "\(name)-result\(i).png")
+            #expect(try await Pipeline.oxipng(options, lossy: lossy).run(url, result, dir))
+            try await Verifier.verify(original: url, result: result, format: .png, pixelsMustMatch: true, exactUnderAlpha: !lossy)
+        }
     }
 
     @Test func jpegKeepsDisplayP3Profile() async throws {

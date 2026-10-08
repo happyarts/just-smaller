@@ -2,28 +2,27 @@
 
 - `Tools/build.sh` builds all optimizers into `build/tools` (Rust via rustup,
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
-  tags (ECT, oxvg: a master/main commit); build.sh only fetches missing ones and never moves
+  tags (oxvg: a main commit); build.sh only fetches missing ones and never moves
   a checkout — it stops when one isn't at its pinned commit (after a pull).
-  ECT, OxiPNG and libdeflate are built from copies with
-  `Tools/{ect-png,oxipng,libdeflater}/patches/*.patch` applied (the
+  OxiPNG and libdeflate are built from copies with
+  `Tools/{oxipng,libdeflater}/patches/*.patch` applied (the
   checkouts stay pinned). libdeflate comes with the libdeflater crate
   (`Vendor/libdeflater`), pinned to the version OxiPNG's Cargo.lock names.
   zopfli is `Vendor/zopfli`, our fork `happyarts/zopfli`: its `main` is
   upstream plus our changes as commits (no patches); changes go there and
   the submodule moves with them; branches for upstream PRs start from
   upstream's `main`. build.sh points OxiPNG at both (libdeflate levels 13
-  and 14, `--zc`; a faster zopfli for `--zopfli`). A patch that
-  went upstream is deleted when the pin moves past it; ECT's `1-simd-…` is
-  fhanau/Efficient-Compression-Tool#161.
+  and 14, `--zc`; a faster zopfli for `--zopfli`, used at Maximum). A patch
+  that went upstream is deleted when the pin moves past it.
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
   when `xcode-select` points at the Command Line Tools.
 - `Tests/corpus/run.sh --quick|--full` checks every result on the local test
   corpus in `../Testkorpus` (never commit images). Before a commit: always
   build and `swift test`; `--quick` when a change can alter what a level
-  produces (pipeline, OxiPNG, ECT, a tool); `--full` before a new baseline or
-  for larger level changes. A change to zopfli alone (while no level uses
-  `--zopfli`) needs byte comparisons of its output instead.
+  produces (pipeline, OxiPNG, zopfli, a tool); `--full` before a new baseline
+  or for larger level changes. The runner uses Balanced; zopfli only runs at
+  Maximum (`run.sh --quick -- --effort maximum`).
   `--update-baseline` after intended size changes.
   It also compares Google's XMP with a second reader (`google-xmp.py`).
   `Tests/corpus/bench.sh <folder>` times one job (`--cli` for another build):
