@@ -19,8 +19,12 @@
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
   when `xcode-select` points at the Command Line Tools.
 - `Tests/corpus/run.sh --quick|--full` checks every result on the local test
-  corpus in `../Testkorpus` (never commit images). Run it before commits that
-  touch the engine or a tool; `--update-baseline` after intended size changes.
+  corpus in `../Testkorpus` (never commit images). Before a commit: always
+  build and `swift test`; `--quick` when a change can alter what a level
+  produces (pipeline, OxiPNG, ECT, a tool); `--full` before a new baseline or
+  for larger level changes. A change to zopfli alone (while no level uses
+  `--zopfli`) needs byte comparisons of its output instead.
+  `--update-baseline` after intended size changes.
   It also compares Google's XMP with a second reader (`google-xmp.py`).
   `Tests/corpus/bench.sh <folder>` times one job (`--cli` for another build):
   a change on the hot path must not slow plain files down.
