@@ -177,7 +177,7 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..45e16de 100644
+index 4ea62f8..966459e 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
 @@ -5,12 +5,16 @@ use core::{cmp, iter};
@@ -378,7 +378,7 @@ index 4ea62f8..45e16de 100644
      final_block: bool,
      in_data: &[u8],
      lz77: &Lz77Store,
-@@ -1064,40 +1158,246 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1064,40 +1158,247 @@ fn add_lz77_block_auto_type<W: Write>(
      expected_data_size: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -423,9 +423,10 @@ index 4ea62f8..45e16de 100644
 +const MAX_JOINED_BLOCKS: usize = 16;
 +
 +impl BlockMerger {
-+    /// Takes the block `lstart..lend` of `lz77`; writes the block before it if
-+    /// the two stay apart. Blocks written uncompressed are never joined: only
-+    /// for them the estimated bits can differ from the written ones.
++    /// Takes the block `lstart..lend` of `lz77` (nothing if it is empty);
++    /// writes the block before it if the two stay apart. Blocks written
++    /// uncompressed are never joined: only for them the estimated bits can
++    /// differ from the written ones.
 +    fn push<W: Write>(
 +        &mut self,
 +        trials: bool,
@@ -638,7 +639,7 @@ index 4ea62f8..45e16de 100644
              BlockType::Uncompressed,
              final_block,
              in_data,
-@@ -1106,33 +1406,37 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1106,33 +1407,37 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
@@ -699,7 +700,7 @@ index 4ea62f8..45e16de 100644
              BlockType::Dynamic,
              final_block,
              in_data,
-@@ -1141,8 +1445,233 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1141,8 +1446,233 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
@@ -934,7 +935,7 @@ index 4ea62f8..45e16de 100644
  }
  
  /// Calculates block size in bits, automatically using the best btype.
-@@ -1160,6 +1689,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
+@@ -1160,6 +1690,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
  }
  
  fn add_all_blocks<W: Write>(
@@ -942,7 +943,7 @@ index 4ea62f8..45e16de 100644
      splitpoints: &[usize],
      lz77: &Lz77Store,
      final_block: bool,
-@@ -1168,10 +1698,11 @@ fn add_all_blocks<W: Write>(
+@@ -1168,10 +1699,11 @@ fn add_all_blocks<W: Write>(
  ) -> Result<(), Error> {
      let mut last = 0;
      for &item in splitpoints {
@@ -955,7 +956,7 @@ index 4ea62f8..45e16de 100644
          final_block,
          in_data,
          lz77,
-@@ -1190,32 +1721,61 @@ fn blocksplit_attempt<W: Write>(
+@@ -1190,32 +1722,61 @@ fn blocksplit_attempt<W: Write>(
      inend: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -1032,7 +1033,7 @@ index 4ea62f8..45e16de 100644
          totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
          // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1229,14 +1789,7 @@ fn blocksplit_attempt<W: Write>(
+@@ -1229,14 +1790,7 @@ fn blocksplit_attempt<W: Write>(
          last = item;
      }
  
@@ -1048,7 +1049,7 @@ index 4ea62f8..45e16de 100644
      totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
      // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1264,7 +1817,155 @@ fn blocksplit_attempt<W: Write>(
+@@ -1264,7 +1818,155 @@ fn blocksplit_attempt<W: Write>(
          }
      }
  
@@ -1206,7 +1207,7 @@ index 4ea62f8..45e16de 100644
  
  /// Since an uncompressed block can be max 65535 in size, it actually adds
 diff --git a/src/lib.rs b/src/lib.rs
-index 591c608..76e3989 100644
+index 591c608..e3384c5 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -55,6 +55,7 @@ use proptest::prelude::*;
@@ -1225,7 +1226,7 @@ index 591c608..76e3989 100644
  #[cfg(not(feature = "std"))]
  mod math;
  mod squeeze;
-@@ -109,6 +111,47 @@ pub struct Options {
+@@ -109,6 +111,49 @@ pub struct Options {
      ///
      /// Default value: 15.
      pub maximum_block_splits: u16,
@@ -1264,16 +1265,18 @@ index 591c608..76e3989 100644
 +    /// Joins neighbouring blocks, also across the chunks the input arrives in,
 +    /// wherever one block is smaller than the two (at most 16 blocks into one;
 +    /// blocks stored uncompressed are not joined). Never makes the output
-+    /// larger; blocks that are not joined are written as without this option.
-+    /// The last block is held back, with its input and the 32 KiB before it,
-+    /// until the next one is known. Dynamic blocks only.
++    /// larger. Blocks that are not joined are written as without this option,
++    /// except that empty chunks give no empty blocks. The last block is held
++    /// back, with its input and the 32 KiB before it, until the next one is
++    /// known: with the 1 MiB chunks of `compress`, up to about 16 MiB of input.
++    /// Dynamic blocks only.
 +    ///
 +    /// Default value: false.
 +    pub merge_blocks: bool,
  }
  
  impl Default for Options {
-@@ -117,6 +160,12 @@ impl Default for Options {
+@@ -117,6 +162,12 @@ impl Default for Options {
              iteration_count: NonZeroU64::new(15).unwrap(),
              iterations_without_improvement: NonZeroU64::new(u64::MAX).unwrap(),
              maximum_block_splits: 15,
@@ -1286,7 +1289,7 @@ index 591c608..76e3989 100644
          }
      }
  }
-@@ -213,5 +262,171 @@ mod test {
+@@ -213,5 +264,171 @@ mod test {
              let decompressed_data = inflate::decompress_to_vec(&compressed_data).expect("Could not inflate compressed stream");
              prop_assert_eq!(data, decompressed_data, "Decompressed data should match input data");
          }
