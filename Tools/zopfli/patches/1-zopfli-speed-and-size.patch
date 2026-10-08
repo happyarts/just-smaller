@@ -1,6 +1,6 @@
 diff --git a/src/bintree.rs b/src/bintree.rs
 new file mode 100644
-index 0000000..10be97c
+index 0000000..331ad23
 --- /dev/null
 +++ b/src/bintree.rs
 @@ -0,0 +1,155 @@
@@ -140,7 +140,7 @@ index 0000000..10be97c
 +        ) {
 +            let data: Vec<u8> = runs
 +                .iter()
-+                .flat_map(|&(b, n)| core::iter::repeat(b).take(n))
++                .flat_map(|&(b, n)| std::iter::repeat_n(b, n))
 +                .collect();
 +            let mut fast = BinaryTree::new(0);
 +            let mut slow = BinaryTree::new(0);
@@ -160,10 +160,28 @@ index 0000000..10be97c
 +    }
 +}
 diff --git a/src/blocksplitter.rs b/src/blocksplitter.rs
-index 93aba1e..d9da82b 100644
+index 93aba1e..03c5902 100644
 --- a/src/blocksplitter.rs
 +++ b/src/blocksplitter.rs
-@@ -229,9 +229,19 @@ pub fn blocksplit(
+@@ -185,14 +185,12 @@ pub fn blocksplit_lz77(lz77: &Lz77Store, maxblocks: u16, splitpoints: &mut Vec<u
+ 
+         // If `find_largest_splittable_block` returns `None`, no further split will
+         // likely reduce compression.
+-        let is_finished = find_largest_splittable_block(lz77.size(), &done, splitpoints).map_or(
+-            true,
+-            |(start, end)| {
++        let is_finished = find_largest_splittable_block(lz77.size(), &done, splitpoints)
++            .is_none_or(|(start, end)| {
+                 lstart = start;
+                 lend = end;
+                 lend - lstart < 10
+-            },
+-        );
++            });
+ 
+         if is_finished {
+             break;
+@@ -229,9 +227,19 @@ pub fn blocksplit(
      {
          store.greedy(&mut NoCache, in_data, instart, inend);
      }
@@ -185,7 +203,7 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..150b4e7 100644
+index 4ea62f8..946311c 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
 @@ -1,16 +1,21 @@
@@ -1242,7 +1260,7 @@ index 4ea62f8..150b4e7 100644
      totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
      // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1264,7 +1892,385 @@ fn blocksplit_attempt<W: Write>(
+@@ -1264,7 +1892,382 @@ fn blocksplit_attempt<W: Write>(
          }
      }
  
@@ -1383,10 +1401,7 @@ index 4ea62f8..150b4e7 100644
 +        /// An error once a worker has panicked.
 +        pub fn check(&self) -> Result<(), Error> {
 +            if self.poisoned {
-+                return Err(Error::new(
-+                    std::io::ErrorKind::Other,
-+                    "a zopfli worker thread panicked",
-+                ));
++                return Err(Error::other("a zopfli worker thread panicked"));
 +            }
 +            Ok(())
 +        }
@@ -1629,6 +1644,22 @@ index 4ea62f8..150b4e7 100644
  }
  
  /// Since an uncompressed block can be max 65535 in size, it actually adds
+diff --git a/src/gzip.rs b/src/gzip.rs
+index 6985ff2..e643593 100644
+--- a/src/gzip.rs
++++ b/src/gzip.rs
+@@ -97,10 +97,9 @@ impl<W: Write> Write for GzipEncoder<W> {
+             .as_mut()
+             .unwrap()
+             .write(buf)
+-            .map(|bytes_written| {
++            .inspect(|&bytes_written| {
+                 self.crc32_hasher.update(&buf[..bytes_written]);
+                 self.input_size = self.input_size.wrapping_add(bytes_written as u32);
+-                bytes_written
+             })
+     }
+ 
 diff --git a/src/katajainen.rs b/src/katajainen.rs
 index 5b7195f..014e4ee 100644
 --- a/src/katajainen.rs
@@ -2000,7 +2031,7 @@ index 5b7195f..014e4ee 100644
  mod test {
      use super::*;
 diff --git a/src/lib.rs b/src/lib.rs
-index 591c608..4efb9fa 100644
+index 591c608..17d9aed 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -55,6 +55,7 @@ use proptest::prelude::*;
@@ -2182,7 +2213,7 @@ index 591c608..4efb9fa 100644
 +    impl io::Write for Failing {
 +        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
 +            if buf.len() > self.room {
-+                return Err(io::Error::new(io::ErrorKind::Other, "full"));
++                return Err(io::Error::other("full"));
 +            }
 +            self.room -= buf.len();
 +            Ok(buf.len())
@@ -2249,7 +2280,7 @@ index 591c608..4efb9fa 100644
 +            // chunk and meets the panic.
 +            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
 +            let pieces =
-+                || core::iter::once(&first).chain(core::iter::repeat(&other).take(2 * threads + 4));
++                || core::iter::once(&first).chain(core::iter::repeat_n(&other, 2 * threads + 4));
 +            let is_test_panic = |payload: Box<dyn core::any::Any + Send>| {
 +                payload.downcast_ref::<&str>() == Some(&"test panic in a worker")
 +            };
@@ -2291,7 +2322,7 @@ index 591c608..4efb9fa 100644
 +
 +    fn from_runs(runs: &[(u8, usize)]) -> Vec<u8> {
 +        runs.iter()
-+            .flat_map(|&(b, n)| core::iter::repeat(b).take(n))
++            .flat_map(|&(b, n)| std::iter::repeat_n(b, n))
 +            .collect()
 +    }
 +
@@ -2326,7 +2357,7 @@ index 591c608..4efb9fa 100644
      }
  }
 diff --git a/src/lz77.rs b/src/lz77.rs
-index f3f2d23..68c8d11 100644
+index f3f2d23..47d72d4 100644
 --- a/src/lz77.rs
 +++ b/src/lz77.rs
 @@ -1,4 +1,4 @@
@@ -2385,6 +2416,24 @@ index f3f2d23..68c8d11 100644
  impl Lz77Store {
      pub const fn new() -> Self {
          Self {
+@@ -77,7 +100,7 @@ impl Lz77Store {
+         let llstart = ZOPFLI_NUM_LL * (origsize / ZOPFLI_NUM_LL);
+         let dstart = ZOPFLI_NUM_D * (origsize / ZOPFLI_NUM_D);
+ 
+-        if origsize % ZOPFLI_NUM_LL == 0 {
++        if origsize.is_multiple_of(ZOPFLI_NUM_LL) {
+             if origsize == 0 {
+                 self.ll_counts.resize(origsize + ZOPFLI_NUM_LL, 0);
+             } else {
+@@ -87,7 +110,7 @@ impl Lz77Store {
+             }
+         }
+ 
+-        if origsize % ZOPFLI_NUM_D == 0 {
++        if origsize.is_multiple_of(ZOPFLI_NUM_D) {
+             if origsize == 0 {
+                 self.d_counts.resize(ZOPFLI_NUM_D, 0);
+             } else {
 @@ -119,6 +142,14 @@ impl Lz77Store {
          }
      }
@@ -2646,7 +2695,7 @@ index 0000000..f6a749e
 +    }
 +}
 diff --git a/src/squeeze.rs b/src/squeeze.rs
-index 0f66357..e79c415 100644
+index 0f66357..978ebca 100644
 --- a/src/squeeze.rs
 +++ b/src/squeeze.rs
 @@ -14,12 +14,22 @@ use core::cmp;
@@ -2676,6 +2725,15 @@ index 0f66357..e79c415 100644
  };
  
  #[cfg(not(feature = "std"))]
+@@ -109,7 +119,7 @@ impl SymbolStats {
+             let end = n;
+ 
+             while i < end {
+-                if (state.random_marsaglia() >> 4) % 3 == 0 {
++                if (state.random_marsaglia() >> 4).is_multiple_of(3) {
+                     let index = state.random_marsaglia() as usize % n;
+                     freqs[i] = freqs[index];
+                 }
 @@ -166,6 +176,30 @@ impl SymbolStats {
          self.calculate_entropy();
      }
@@ -3486,3 +3544,18 @@ index a4127a1..331e923 100644
 -        Err(_) => unreachable!(),
 -    }
 -}
+diff --git a/src/zlib.rs b/src/zlib.rs
+index 3b2a436..3269e2f 100644
+--- a/src/zlib.rs
++++ b/src/zlib.rs
+@@ -91,9 +91,8 @@ impl<W: Write> Write for ZlibEncoder<W> {
+             .as_mut()
+             .unwrap()
+             .write(buf)
+-            .map(|bytes_written| {
++            .inspect(|&bytes_written| {
+                 self.adler_hasher.write(&buf[..bytes_written]);
+-                bytes_written
+             })
+     }
+ 
