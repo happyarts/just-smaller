@@ -1,0 +1,627 @@
+diff --git a/MANUAL.txt b/MANUAL.txt
+index 0146c23..97d539e 100644
+--- a/MANUAL.txt
++++ b/MANUAL.txt
+@@ -130,6 +130,7 @@ Options:
+               7  =>  Bigrams   Lowest count of distinct bigrams
+               8  =>  BigEnt    Smallest Shannon entropy of bigrams
+               9  =>  Brute     Smallest compressed size (slow)
++              10 =>  Incremental  Smallest size in a running deflate stream (slow)
+           
+           The default value depends on the optimization level preset.
+ 
+diff --git a/src/cli.rs b/src/cli.rs
+index 3b2686f..c2a936c 100644
+--- a/src/cli.rs
++++ b/src/cli.rs
+@@ -238,7 +238,7 @@ losslessly.")
+         )
+         .arg(
+             Arg::new("filters")
+-                .help("Filters to try (0-9; see '--help' for details)")
++                .help("Filters to try (0-10; see '--help' for details)")
+                 .long_help("\
+ Perform compression trials with each of the given filter types. You can specify a \
+ comma-separated list, or a range of values. E.g. '-f 0-3' is the same as '-f 0,1,2,3'.
+@@ -256,6 +256,7 @@ Heuristic strategies (try to find the best delta filter for each line)
+     7  =>  Bigrams   Lowest count of distinct bigrams
+     8  =>  BigEnt    Smallest Shannon entropy of bigrams
+     9  =>  Brute     Smallest compressed size (slow)
++    10 =>  Incremental  Smallest size in a running deflate stream (slow)
+ 
+ The default value depends on the optimization level preset.")
+                 .short('f')
+diff --git a/src/filters/incremental.rs b/src/filters/incremental.rs
+new file mode 100644
+index 0000000..b7867b0
+--- /dev/null
++++ b/src/filters/incremental.rs
+@@ -0,0 +1,486 @@
++//! The Incremental strategy: each line gets the filter whose output adds the fewest bits to a
++//! running deflate stream of the lines chosen before it.
++//!
++//! The chosen lines are parsed into literals and matches as a fast greedy deflate would (hash
++//! chains over a 32 KiB window) and their symbols are counted for the current block. A candidate
++//! line is parsed on top of that, and its score is the size of the block with it, coded with
++//! Huffman codes built for that block. Like a streaming compressor, the parse of the chosen lines
++//! stays a little behind, so a match may run from one line into the next.
++
++use super::strategies::StrategyEvaluator;
++
++const WINDOW: usize = 1 << 15;
++const WINDOW_MASK: usize = WINDOW - 1;
++const MIN_MATCH: usize = 3;
++const MAX_MATCH: usize = 258;
++/// How far the parse of the chosen lines stays behind their end
++const LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
++const MAX_DISTANCE: usize = WINDOW - LOOKAHEAD;
++const HASH_BITS: u32 = 15;
++const NO_POSITION: usize = usize::MAX;
++/// How many earlier positions with the same hash are tried for a match
++const MAX_CHAIN: usize = 1100;
++/// A block ends after this many symbols
++const BLOCK_SYMBOLS: u32 = 16383;
++
++const LITLEN_CODES: usize = 286;
++const END_OF_BLOCK: usize = 256;
++const DISTANCE_CODES: usize = 30;
++const LENGTH_BASE: [u16; 29] = [
++    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
++    163, 195, 227, 258,
++];
++const LENGTH_EXTRA: [u8; 29] = [
++    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
++];
++const DISTANCE_BASE: [u16; 30] = [
++    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
++    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
++];
++const DISTANCE_EXTRA: [u8; 30] = [
++    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
++    13,
++];
++/// The order in which a dynamic block's header lists the code length code lengths
++const CODE_LENGTH_ORDER: [usize; 19] = [
++    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
++];
++
++/// Symbol counts of the current block
++#[derive(Clone)]
++struct Block {
++    litlen: [u32; LITLEN_CODES],
++    distance: [u32; DISTANCE_CODES],
++    symbols: u32,
++    extra_bits: u64,
++}
++
++impl Block {
++    const fn new() -> Self {
++        Self {
++            litlen: [0; LITLEN_CODES],
++            distance: [0; DISTANCE_CODES],
++            symbols: 0,
++            extra_bits: 0,
++        }
++    }
++
++    const fn add_literal(&mut self, byte: u8) {
++        self.litlen[byte as usize] += 1;
++        self.symbols += 1;
++    }
++
++    fn add_match(&mut self, length: usize, distance: usize) {
++        let l = LENGTH_BASE.partition_point(|&b| b as usize <= length) - 1;
++        let d = DISTANCE_BASE.partition_point(|&b| b as usize <= distance) - 1;
++        self.litlen[END_OF_BLOCK + 1 + l] += 1;
++        self.distance[d] += 1;
++        self.extra_bits += u64::from(LENGTH_EXTRA[l] + DISTANCE_EXTRA[d]);
++        self.symbols += 1;
++    }
++
++    /// The size of the block in bits: the smaller of fixed and dynamic Huffman codes
++    fn bits(&self, coder: &mut Coder) -> u64 {
++        let mut litlen = self.litlen;
++        litlen[END_OF_BLOCK] = 1;
++        let mut distance = self.distance;
++
++        let mut fixed = 3 + self.extra_bits;
++        for (symbol, &count) in litlen.iter().enumerate() {
++            let bits = match symbol {
++                144..=255 => 9,
++                256..=279 => 7,
++                _ => 8,
++            };
++            fixed += u64::from(count) * bits;
++        }
++        fixed += 5 * u64::from(distance.iter().sum::<u32>());
++
++        // A dynamic block codes at least one distance
++        if distance.iter().all(|&count| count == 0) {
++            distance[0] = 1;
++        }
++        let mut dynamic = 3 + self.extra_bits;
++        let mut litlen_lengths = [0; LITLEN_CODES];
++        let mut distance_lengths = [0; DISTANCE_CODES];
++        coder.lengths(&litlen, 15, &mut litlen_lengths);
++        coder.lengths(&distance, 15, &mut distance_lengths);
++        for (&count, &length) in litlen.iter().zip(&litlen_lengths) {
++            dynamic += u64::from(count) * u64::from(length);
++        }
++        for (&count, &length) in distance.iter().zip(&distance_lengths) {
++            dynamic += u64::from(count) * u64::from(length);
++        }
++        dynamic += coder.header_bits(&litlen_lengths, &distance_lengths);
++        dynamic.min(fixed)
++    }
++}
++
++/// Builds Huffman code lengths, reusing its buffers
++#[derive(Default)]
++struct Coder {
++    /// (count, node) of the symbols in use, by increasing count
++    leaves: Vec<(u32, u16)>,
++    /// (count, node) of the internal nodes in the order they are made
++    internal: Vec<(u32, u16)>,
++    parent: Vec<u16>,
++    depth: Vec<u8>,
++    /// Symbol of each leaf node
++    symbol: Vec<u16>,
++    /// The code lengths of a dynamic block, run-length coded: (code, extra bits)
++    runs: Vec<(u8, u8)>,
++}
++
++impl Coder {
++    /// Huffman code lengths for `counts`, at most `max_bits` long
++    fn lengths(&mut self, counts: &[u32], max_bits: u8, lengths: &mut [u8]) {
++        lengths.fill(0);
++        self.symbol.clear();
++        self.leaves.clear();
++        for (symbol, &count) in counts.iter().enumerate() {
++            if count > 0 {
++                self.leaves.push((count, self.symbol.len() as u16));
++                self.symbol.push(symbol as u16);
++            }
++        }
++        let n = self.leaves.len();
++        if n < 2 {
++            if let Some(&symbol) = self.symbol.first() {
++                lengths[symbol as usize] = 1;
++            }
++            return;
++        }
++        self.leaves.sort_unstable();
++
++        // Two queues: leaves by count, internal nodes in the order they are made (also by count)
++        self.internal.clear();
++        self.parent.clear();
++        self.parent.resize(2 * n - 1, 0);
++        let (mut next_leaf, mut next_internal) = (0, 0);
++        for node in n..2 * n - 1 {
++            let mut take = || {
++                let leaf = self.leaves.get(next_leaf);
++                let internal = self.internal.get(next_internal);
++                match (leaf, internal) {
++                    (Some(&leaf), Some(&internal)) if leaf.0 > internal.0 => {
++                        next_internal += 1;
++                        internal
++                    }
++                    (Some(&leaf), _) => {
++                        next_leaf += 1;
++                        leaf
++                    }
++                    (None, Some(&internal)) => {
++                        next_internal += 1;
++                        internal
++                    }
++                    (None, None) => unreachable!("a tree of n leaves has n - 1 internal nodes"),
++                }
++            };
++            let (a, b) = (take(), take());
++            self.parent[a.1 as usize] = node as u16;
++            self.parent[b.1 as usize] = node as u16;
++            self.internal.push((a.0 + b.0, node as u16));
++        }
++
++        // Each node's parent comes after it; the root is the last node
++        self.depth.clear();
++        self.depth.resize(2 * n - 1, 0);
++        for node in (0..2 * n - 2).rev() {
++            self.depth[node] = self.depth[self.parent[node] as usize] + 1;
++        }
++        let mut overflow = false;
++        for leaf in 0..n {
++            let depth = self.depth[leaf];
++            overflow |= depth > max_bits;
++            lengths[self.symbol[leaf] as usize] = depth.min(max_bits);
++        }
++        if overflow {
++            // Shortened codes oversubscribe the code: lengthen the least frequent codes that
++            // are still short until it fits again
++            let kraft = |length: u8| 1_u64 << (max_bits - length);
++            let mut sum: u64 = self
++                .symbol
++                .iter()
++                .map(|&s| kraft(lengths[s as usize]))
++                .sum();
++            while sum > 1 << max_bits {
++                let leaf = self
++                    .leaves
++                    .iter()
++                    .map(|&(_, leaf)| self.symbol[leaf as usize] as usize)
++                    .find(|&s| lengths[s] < max_bits)
++                    .expect("a complete code fits in max_bits");
++                sum -= kraft(lengths[leaf]) / 2;
++                lengths[leaf] += 1;
++            }
++        }
++    }
++
++    /// Bits of a dynamic block's header for these code lengths
++    fn header_bits(&mut self, litlen: &[u8; LITLEN_CODES], distance: &[u8; DISTANCE_CODES]) -> u64 {
++        let used_litlen = litlen
++            .iter()
++            .rposition(|&l| l > 0)
++            .map_or(0, |p| p + 1)
++            .max(257);
++        let used_distance = distance
++            .iter()
++            .rposition(|&l| l > 0)
++            .map_or(0, |p| p + 1)
++            .max(1);
++        let all = || {
++            litlen[..used_litlen]
++                .iter()
++                .chain(&distance[..used_distance])
++                .copied()
++        };
++
++        // Run-length code: 16 repeats the previous length 3-6 times, 17 and 18 code 3-10 and
++        // 11-138 zeros
++        self.runs.clear();
++        let mut lengths = all().peekable();
++        while let Some(length) = lengths.next() {
++            let mut run = 1;
++            while lengths.next_if_eq(&length).is_some() {
++                run += 1;
++            }
++            if length == 0 {
++                while run >= 11 {
++                    self.runs.push((18, 7));
++                    run -= run.min(138);
++                }
++                if run >= 3 {
++                    self.runs.push((17, 3));
++                    run = 0;
++                }
++            } else {
++                self.runs.push((length, 0));
++                run -= 1;
++                while run >= 3 {
++                    self.runs.push((16, 2));
++                    run -= run.min(6);
++                }
++            }
++            for _ in 0..run {
++                self.runs.push((length, 0));
++            }
++        }
++
++        let mut counts = [0; 19];
++        for &(code, _) in &self.runs {
++            counts[code as usize] += 1;
++        }
++        let mut code_lengths = [0; 19];
++        self.lengths(&counts, 7, &mut code_lengths);
++        let listed = CODE_LENGTH_ORDER
++            .iter()
++            .rposition(|&code| code_lengths[code] > 0)
++            .map_or(0, |p| p + 1)
++            .max(4);
++        let mut bits = 5 + 5 + 4 + 3 * listed as u64;
++        for &(code, extra) in &self.runs {
++            bits += u64::from(code_lengths[code as usize] + extra);
++        }
++        bits
++    }
++}
++
++/// Hash chains over the positions parsed so far
++struct Matcher {
++    head: Vec<usize>,
++    prev: Vec<usize>,
++}
++
++impl Matcher {
++    fn new() -> Self {
++        Self {
++            head: vec![NO_POSITION; 1 << HASH_BITS],
++            prev: vec![NO_POSITION; WINDOW],
++        }
++    }
++
++    fn hash(data: &[u8], pos: usize) -> usize {
++        let bytes =
++            u32::from(data[pos]) | u32::from(data[pos + 1]) << 8 | u32::from(data[pos + 2]) << 16;
++        (bytes.wrapping_mul(0x9E37_79B1) >> (32 - HASH_BITS)) as usize
++    }
++
++    /// Insert a position; with `undo`, record what it replaced
++    fn insert(&mut self, data: &[u8], pos: usize, undo: Option<&mut Vec<Insertion>>) {
++        if pos + MIN_MATCH > data.len() {
++            return;
++        }
++        let hash = Self::hash(data, pos);
++        if let Some(undo) = undo {
++            undo.push(Insertion {
++                hash,
++                head: self.head[hash],
++                prev: self.prev[pos & WINDOW_MASK],
++            });
++        }
++        self.prev[pos & WINDOW_MASK] = self.head[hash];
++        self.head[hash] = pos;
++    }
++
++    /// Take back insertions, latest first
++    fn undo(&mut self, insertions: &[Insertion]) {
++        for insertion in insertions.iter().rev() {
++            let pos = self.head[insertion.hash];
++            self.prev[pos & WINDOW_MASK] = insertion.prev;
++            self.head[insertion.hash] = insertion.head;
++        }
++    }
++
++    /// The longest earlier match for the bytes at `pos` (at most to the end of `data`):
++    /// (length, distance), or None if shorter than the minimum
++    fn longest_match(&self, data: &[u8], pos: usize) -> Option<(usize, usize)> {
++        let limit = (data.len() - pos).min(MAX_MATCH);
++        if limit < MIN_MATCH {
++            return None;
++        }
++        let target = &data[pos..pos + limit];
++        let lowest = pos.saturating_sub(MAX_DISTANCE);
++        let mut best = (MIN_MATCH - 1, 0);
++        let mut candidate = self.head[Self::hash(data, pos)];
++        let mut chain = MAX_CHAIN;
++        // Chains run to lower positions; anything else is a slot reused by a later position
++        while candidate < pos && candidate >= lowest && chain > 0 {
++            let c = candidate;
++            if data[c + best.0] == target[best.0] {
++                let length = data[c..c + limit]
++                    .iter()
++                    .zip(target)
++                    .take_while(|(a, b)| a == b)
++                    .count();
++                if length > best.0 {
++                    best = (length, pos - c);
++                    if length == limit {
++                        break;
++                    }
++                }
++            }
++            let next = self.prev[c & WINDOW_MASK];
++            if next >= candidate {
++                break;
++            }
++            candidate = next;
++            chain -= 1;
++        }
++        (best.0 >= MIN_MATCH).then_some(best)
++    }
++}
++
++/// What an insertion into the hash chains replaced
++#[derive(Clone, Copy)]
++struct Insertion {
++    hash: usize,
++    head: usize,
++    prev: usize,
++}
++
++/// A parse in progress: the matcher, the current block and the bits of the blocks completed
++struct Parse<'a> {
++    matcher: &'a mut Matcher,
++    block: &'a mut Block,
++    coder: &'a mut Coder,
++    completed_bits: u64,
++}
++
++impl Parse<'_> {
++    /// Parse greedily from `from` until at least `to`, inserting every position; returns where
++    /// it stopped (a match may run past `to`)
++    fn run(
++        &mut self,
++        data: &[u8],
++        from: usize,
++        to: usize,
++        mut undo: Option<&mut Vec<Insertion>>,
++    ) -> usize {
++        let mut pos = from;
++        while pos < to {
++            if let Some((length, distance)) = self.matcher.longest_match(data, pos) {
++                self.block.add_match(length, distance);
++                for p in pos..pos + length {
++                    self.matcher.insert(data, p, undo.as_deref_mut());
++                }
++                pos += length;
++            } else {
++                self.block.add_literal(data[pos]);
++                self.matcher.insert(data, pos, undo.as_deref_mut());
++                pos += 1;
++            }
++            if self.block.symbols >= BLOCK_SYMBOLS {
++                self.completed_bits += self.block.bits(self.coder);
++                *self.block = Block::new();
++            }
++        }
++        pos
++    }
++}
++
++pub(crate) struct IncrementalEvaluator {
++    matcher: Matcher,
++    /// The current block of the chosen lines
++    block: Block,
++    /// Where the parse of the chosen lines stopped
++    parsed: usize,
++    best_bits: u64,
++    coder: Coder,
++    undo: Vec<Insertion>,
++}
++
++impl IncrementalEvaluator {
++    pub(crate) fn new() -> Self {
++        Self {
++            matcher: Matcher::new(),
++            block: Block::new(),
++            parsed: 0,
++            best_bits: u64::MAX,
++            coder: Coder::default(),
++            undo: Vec::new(),
++        }
++    }
++}
++
++impl StrategyEvaluator for IncrementalEvaluator {
++    fn reset(&mut self, _line_len: usize) {
++        self.best_bits = u64::MAX;
++    }
++
++    fn evaluate(&mut self, output: &[u8], offset: usize) -> bool {
++        // Bring the parse of the chosen lines up to the lookahead before this line
++        let chosen = &output[..offset];
++        let target = offset.saturating_sub(LOOKAHEAD);
++        if self.parsed < target {
++            self.parsed = Parse {
++                matcher: &mut self.matcher,
++                block: &mut self.block,
++                coder: &mut self.coder,
++                completed_bits: 0,
++            }
++            .run(chosen, self.parsed, target, None);
++        }
++
++        // Parse the rest with this line to the end, then take back its insertions
++        let mut block = self.block.clone();
++        let mut undo = std::mem::take(&mut self.undo);
++        undo.clear();
++        let mut parse = Parse {
++            matcher: &mut self.matcher,
++            block: &mut block,
++            coder: &mut self.coder,
++            completed_bits: 0,
++        };
++        parse.run(output, self.parsed, output.len(), Some(&mut undo));
++        let bits = parse.completed_bits + block.bits(&mut self.coder);
++        self.matcher.undo(&undo);
++        self.undo = undo;
++
++        if bits < self.best_bits {
++            self.best_bits = bits;
++            return true;
++        }
++        false
++    }
++}
+diff --git a/src/filters/mod.rs b/src/filters/mod.rs
+index a9d8ea3..dd2869c 100644
+--- a/src/filters/mod.rs
++++ b/src/filters/mod.rs
+@@ -1,5 +1,6 @@
+ use std::{fmt, fmt::Display, mem::transmute};
+ 
++mod incremental;
+ mod strategies;
+ pub use strategies::FilterStrategy;
+ 
+diff --git a/src/filters/strategies.rs b/src/filters/strategies.rs
+index ec15d50..217a002 100644
+--- a/src/filters/strategies.rs
++++ b/src/filters/strategies.rs
+@@ -1,6 +1,7 @@
+ use libdeflater::{CompressionLvl, Compressor};
+ use std::{fmt, fmt::Display};
+ 
++use super::incremental::IncrementalEvaluator;
+ use crate::RowFilter;
+ 
+ /// Filtering strategy for use in [`Options`][crate::Options]
+@@ -23,6 +24,8 @@ pub enum FilterStrategy {
+         /// The compression level to use (1-12)
+         level: u8,
+     },
++    /// Smallest size in a running deflate stream of the lines chosen so far
++    Incremental,
+     /// Predefined filter for each row
+     Predefined(Vec<RowFilter>),
+ }
+@@ -44,6 +47,7 @@ impl FilterStrategy {
+             Self::Brute { num_lines, level } => {
+                 Some(Box::new(BruteEvaluator::new(*num_lines, *level)))
+             }
++            Self::Incremental => Some(Box::new(IncrementalEvaluator::new())),
+             _ => None,
+         }
+     }
+@@ -58,6 +62,7 @@ impl Display for FilterStrategy {
+             Self::Bigrams => "Bigrams".fmt(f),
+             Self::BigEnt => "BigEnt".fmt(f),
+             Self::Brute { .. } => "Brute".fmt(f),
++            Self::Incremental => "Incremental".fmt(f),
+             Self::Predefined(_) => "Predefined".fmt(f),
+         }
+     }
+diff --git a/src/main.rs b/src/main.rs
+index 562b56d..ef3aea1 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -31,7 +31,7 @@ fn main() -> ExitCode {
+         // Set the value parser for filters which isn't appropriate to do in the build_command function
+         .mut_arg("filters", |arg| {
+             arg.value_parser(|x: &str| {
+-                parse_numeric_range_opts(x, 0, 9).map_err(|_| "Invalid option for filters")
++                parse_numeric_range_opts(x, 0, 10).map_err(|_| "Invalid option for filters")
+             })
+         })
+         .after_help("Run `oxipng --help` to see full details of all options")
+@@ -301,6 +301,7 @@ fn parse_opts_into_struct(
+                     num_lines: brute_lines.unwrap_or(3),
+                     level: brute_level.unwrap_or(1),
+                 },
++                10 => FilterStrategy::Incremental,
+                 _ => unreachable!(),
+             })
+             .collect();
+diff --git a/tests/strategies.rs b/tests/strategies.rs
+index 5c99169..382aa30 100644
+--- a/tests/strategies.rs
++++ b/tests/strategies.rs
+@@ -121,7 +121,19 @@ fn filter_brute() {
+     );
+ }
+ 
+-const ALL_STRATEGIES: [FilterStrategy; 10] = [
++#[test]
++fn filter_incremental() {
++    test_it_converts(
++        "tests/files/rgba_8_should_be_rgba_8.png",
++        FilterStrategy::Incremental,
++        RGBA,
++        BitDepth::Eight,
++        RGBA,
++        BitDepth::Eight,
++    );
++}
++
++const ALL_STRATEGIES: [FilterStrategy; 11] = [
+     FilterStrategy::NONE,
+     FilterStrategy::SUB,
+     FilterStrategy::UP,
+@@ -135,6 +147,7 @@ const ALL_STRATEGIES: [FilterStrategy; 10] = [
+         num_lines: 4,
+         level: 1,
+     },
++    FilterStrategy::Incremental,
+ ];
+ 
+ /// Choose the filters by section, check the result's shape, and that the filtered image decodes
