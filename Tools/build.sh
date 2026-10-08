@@ -78,7 +78,9 @@ patched_copy() { # checkout dest patches-dir
 	rm -rf "$2" "$2.stamp"
 	mv "$pc_fresh" "$2"
 	echo "$pc_stamp" > "$2.stamp"
+	renewed="$renewed $(basename "$2")"
 }
+renewed=
 
 # System libraries from Homebrew must not leak into the tools.
 CMAKE_COMMON="-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
@@ -138,6 +140,10 @@ cargo_tool() { # name manifest [cargo args…]
 # zopfli from our fork as it is checked out (Vendor/zopfli).
 patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
 patched_copy "$ROOT/Vendor/oxipng" "$WORK/oxipng-src" "$ROOT/Tools/oxipng/patches"
+# Cargo rebuilds libdeflate's C files only when it sees a file of the crate
+# change, and it doesn't look into folders git ignores (build/): a new copy
+# of libdeflater starts OxiPNG's build afresh.
+case $renewed in *libdeflater-src*) rm -rf "$WORK/cargo-oxipng" ;; esac
 cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
 	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
 	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\"" \
