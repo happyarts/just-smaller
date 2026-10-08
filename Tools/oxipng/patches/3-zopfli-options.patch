@@ -1,19 +1,36 @@
 diff --git a/Cargo.lock b/Cargo.lock
+index d4d3171..d4ec7cd 100644
 --- a/Cargo.lock
 +++ b/Cargo.lock
-@@ -634,8 +634,6 @@
+@@ -79,12 +79,6 @@ version = "2.11.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+ 
+-[[package]]
+-name = "bumpalo"
+-version = "3.20.2"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
+-
+ [[package]]
+ name = "bytemuck"
+ version = "1.25.0"
+@@ -634,10 +628,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
  [[package]]
  name = "zopfli"
  version = "0.8.3"
 -source = "registry+https://github.com/rust-lang/crates.io-index"
 -checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
  dependencies = [
-  "bumpalo",
+- "bumpalo",
   "crc32fast",
+  "log",
+  "simd-adler32",
 diff --git a/src/main.rs b/src/main.rs
+index ceb0afb..98bd4ad 100644
 --- a/src/main.rs
 +++ b/src/main.rs
-@@ -453,6 +453,11 @@
+@@ -453,6 +453,11 @@ fn parse_opts_into_struct(
          opts.deflater = Deflater::Zopfli(ZopfliOptions {
              iteration_count,
              iterations_without_improvement,

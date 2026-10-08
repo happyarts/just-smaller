@@ -28,5 +28,5 @@
 	shallow = true
 [submodule "Vendor/zopfli"]
 	path = Vendor/zopfli
-	url = https://github.com/zopfli-rs/zopfli.git
+	url = https://github.com/happyarts/zopfli.git
 	shallow = true

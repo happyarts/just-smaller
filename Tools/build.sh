@@ -2,9 +2,10 @@
 # Builds the command-line optimizers Just Smaller runs, from the sources in
 # Vendor/ (git submodules pinned to released versions; ECT to a master
 # commit, since its last release lacks years of fixes; oxvg to a main commit
-# with path and transform fixes that aren't released yet) and Tools/.
-# ECT, OxiPNG, libdeflate (through the libdeflater crate) and the zopfli
-# crate are built from copies with our patches (Tools/*/patches) applied.
+# with path and transform fixes that aren't released yet; zopfli to our fork,
+# happyarts/zopfli) and Tools/. ECT, OxiPNG and libdeflate (through the
+# libdeflater crate) are built from copies with our patches (Tools/*/patches)
+# applied.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -144,15 +145,15 @@ cargo_tool() { # name manifest [cargo args…]
 		--target-dir "$WORK/cargo-$name" "$@"
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
-# OxiPNG with libdeflate levels 13-14 and a faster zopfli: libdeflater (which
-# brings libdeflate) and zopfli from our patched copies instead of crates.io.
+# OxiPNG with libdeflate levels 13-14 and a faster zopfli instead of the ones
+# from crates.io: libdeflater (which brings libdeflate) from our patched copy,
+# zopfli from our fork as it is checked out (Vendor/zopfli).
 patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
-patched_copy "$ROOT/Vendor/zopfli" "$WORK/zopfli-src" "$ROOT/Tools/zopfli/patches"
 patched_copy "$ROOT/Vendor/oxipng" "$WORK/oxipng-src" "$ROOT/Tools/oxipng/patches"
 cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
 	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
 	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\"" \
-	--config "patch.crates-io.zopfli.path=\"$WORK/zopfli-src\""
+	--config "patch.crates-io.zopfli.path=\"$ROOT/Vendor/zopfli\""
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
