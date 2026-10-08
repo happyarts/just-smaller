@@ -177,7 +177,7 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..966459e 100644
+index 4ea62f8..b4c7b06 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
 @@ -5,12 +5,16 @@ use core::{cmp, iter};
@@ -378,7 +378,7 @@ index 4ea62f8..966459e 100644
      final_block: bool,
      in_data: &[u8],
      lz77: &Lz77Store,
-@@ -1064,40 +1158,247 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1064,40 +1158,253 @@ fn add_lz77_block_auto_type<W: Write>(
      expected_data_size: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -397,7 +397,7 @@ index 4ea62f8..966459e 100644
 +        lstart,
 +        lend,
 +        expected_data_size,
-+        encoding,
++        &encoding,
 +        bitwise_writer,
 +    )
 +}
@@ -453,7 +453,7 @@ index 4ea62f8..966459e 100644
 +            encoding,
 +            joined: 1,
 +        };
-+        let Some(pending) = self.pending.take() else {
++        let Some(pending) = &self.pending else {
 +            self.pending = Some(block);
 +            return Ok(());
 +        };
@@ -479,6 +479,8 @@ index 4ea62f8..966459e 100644
 +                return Ok(());
 +            }
 +        }
++        // The held-back block is replaced only once it is written, so that a
++        // failed write leaves it in place.
 +        write_block_encoding(
 +            false,
 +            in_data,
@@ -486,7 +488,7 @@ index 4ea62f8..966459e 100644
 +            0,
 +            pending.store.size(),
 +            0,
-+            pending.encoding,
++            &pending.encoding,
 +            bitwise_writer,
 +        )?;
 +        self.pending = Some(block);
@@ -500,17 +502,21 @@ index 4ea62f8..966459e 100644
 +        in_data: &[u8],
 +        bitwise_writer: &mut BitwiseWriter<W>,
 +    ) -> Result<(), Error> {
-+        match self.pending.take() {
-+            Some(pending) => write_block_encoding(
-+                true,
-+                in_data,
-+                &pending.store,
-+                0,
-+                pending.store.size(),
-+                0,
-+                pending.encoding,
-+                bitwise_writer,
-+            ),
++        match &self.pending {
++            Some(pending) => {
++                write_block_encoding(
++                    true,
++                    in_data,
++                    &pending.store,
++                    0,
++                    pending.store.size(),
++                    0,
++                    &pending.encoding,
++                    bitwise_writer,
++                )?;
++                self.pending = None;
++                Ok(())
++            }
 +            None => add_lz77_block_auto_type(
 +                false,
 +                true,
@@ -631,7 +637,7 @@ index 4ea62f8..966459e 100644
 +    lstart: usize,
 +    lend: usize,
 +    expected_data_size: usize,
-+    encoding: BlockEncoding,
++    encoding: &BlockEncoding,
 +    bitwise_writer: &mut BitwiseWriter<W>,
 +) -> Result<(), Error> {
 +    match encoding {
@@ -639,7 +645,7 @@ index 4ea62f8..966459e 100644
              BlockType::Uncompressed,
              final_block,
              in_data,
-@@ -1106,33 +1407,37 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1106,33 +1413,37 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
@@ -664,7 +670,7 @@ index 4ea62f8..966459e 100644
 +            BlockType::Fixed,
 +            final_block,
 +            in_data,
-+            &fixedstore,
++            fixedstore,
 +            0,
 +            fixedstore.size(),
 +            expected_data_size,
@@ -688,9 +694,9 @@ index 4ea62f8..966459e 100644
 -                lstart,
 -                lend,
 -                expected_data_size,
-+                &store,
-+                &ll_lengths,
-+                &d_lengths,
++                store,
++                ll_lengths,
++                d_lengths,
                  bitwise_writer,
              )
          }
@@ -700,15 +706,15 @@ index 4ea62f8..966459e 100644
              BlockType::Dynamic,
              final_block,
              in_data,
-@@ -1141,8 +1446,233 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1141,10 +1452,235 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
 -        )
 +        ),
-+    }
-+}
-+
+     }
+ }
+ 
 +/// Smooths counts for run-length coding of the code lengths: the core of
 +/// Brotli's `OptimizeHuffmanCountsForRle` (24.8 fixed point), as the Efficient
 +/// Compression Tool uses it; an alternative to `optimize_huffman_for_rle`.
@@ -741,7 +747,7 @@ index 4ea62f8..966459e 100644
 +        } else {
 +            stride += 1;
 +        }
-     }
++    }
 +
 +    const STREAK_LIMIT: i64 = 1240;
 +    let mut stride: i64 = 0;
@@ -932,10 +938,12 @@ index 4ea62f8..966459e 100644
 +        bitwise_writer,
 +    )?;
 +    bitwise_writer.add_huffman_bits(ll_symbols[256], ll_lengths[256])
- }
- 
++}
++
  /// Calculates block size in bits, automatically using the best btype.
-@@ -1160,6 +1690,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
+ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usize) -> f64 {
+     let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
+@@ -1160,6 +1696,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
  }
  
  fn add_all_blocks<W: Write>(
@@ -943,7 +951,7 @@ index 4ea62f8..966459e 100644
      splitpoints: &[usize],
      lz77: &Lz77Store,
      final_block: bool,
-@@ -1168,10 +1699,11 @@ fn add_all_blocks<W: Write>(
+@@ -1168,10 +1705,11 @@ fn add_all_blocks<W: Write>(
  ) -> Result<(), Error> {
      let mut last = 0;
      for &item in splitpoints {
@@ -956,7 +964,7 @@ index 4ea62f8..966459e 100644
          final_block,
          in_data,
          lz77,
-@@ -1190,32 +1722,61 @@ fn blocksplit_attempt<W: Write>(
+@@ -1190,32 +1728,61 @@ fn blocksplit_attempt<W: Write>(
      inend: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -1033,7 +1041,7 @@ index 4ea62f8..966459e 100644
          totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
          // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1229,14 +1790,7 @@ fn blocksplit_attempt<W: Write>(
+@@ -1229,14 +1796,7 @@ fn blocksplit_attempt<W: Write>(
          last = item;
      }
  
@@ -1049,7 +1057,7 @@ index 4ea62f8..966459e 100644
      totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
      // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1264,7 +1818,155 @@ fn blocksplit_attempt<W: Write>(
+@@ -1264,7 +1824,155 @@ fn blocksplit_attempt<W: Write>(
          }
      }
  
