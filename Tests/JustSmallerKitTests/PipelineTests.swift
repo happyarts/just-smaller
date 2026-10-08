@@ -1,7 +1,5 @@
 import Foundation
-import ImageIO
 import Testing
-import UniformTypeIdentifiers
 @testable import JustSmallerKit
 
 struct PipelineTests {
@@ -85,25 +83,20 @@ struct PipelineTests {
         #expect((plain["cleanupIds"] as? [String: Any])?["remove"] as? Bool == false)
     }
 
-    /// Every filter strategy is tried only on small images, by their pixels:
-    /// a few kilobytes can hold a large, flat image that takes half an hour.
-    @Test func maximumTriesAllFiltersOnlyOnSmallImages() throws {
-        var settings = OptimizationSettings()
-        settings.effort = .maximum
-        func ectRuns(_ facts: FileFacts) -> Int {
-            Pipeline.stages(for: .png, facts: facts, settings: settings).last?.filter { $0.name == "ECT" }.count ?? 0
+    /// ECT runs only at Maximum, next to OxiPNG, and never on animated PNGs.
+    @Test func pngCompressorsPerEffort() {
+        func names(_ effort: Effort, animated: Bool = false) -> [String] {
+            var settings = OptimizationSettings()
+            settings.effort = effort
+            var facts = FileFacts(byteSize: 1_000)
+            facts.isAnimated = animated
+            return Pipeline.stages(for: .png, facts: facts, settings: settings).last?.map(\.name) ?? []
         }
-        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256)) == 2)
-        #expect(ectRuns(FileFacts(byteSize: 1_000, pixelCount: 256 * 256 + 1)) == 1)
-        #expect(ectRuns(FileFacts(byteSize: 1_000)) == 1)
-
-        let dir = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let url = dir.appending(path: "flat.png")
-        let dest = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
-        CGImageDestinationAddImage(dest, TestImages.pattern(width: 300, height: 200), nil)
-        #expect(CGImageDestinationFinalize(dest))
-        #expect(FileOptimizer.facts(about: url, format: .png, size: 1).pixelCount == 300 * 200)
+        #expect(names(.fast) == ["OxiPNG"])
+        #expect(names(.balanced) == ["OxiPNG"])
+        #expect(names(.thorough) == ["OxiPNG"])
+        #expect(names(.maximum) == ["ECT", "OxiPNG"])
+        #expect(names(.maximum, animated: true) == ["OxiPNG"])
     }
 
     private func temporaryDirectory() throws -> URL {

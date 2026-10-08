@@ -49,8 +49,6 @@ struct FileFacts: Sendable {
     var jpegLayout: JPEGLayout?
     var isAnimated = false
     var bitsPerComponent = 8
-    /// Width × height of the first image; unknown counts as large.
-    var pixelCount = Int.max
     /// SVG in UTF-16.
     var isUTF16 = false
     /// SVG content the rendering comparison can't vouch for.
@@ -158,29 +156,25 @@ enum Pipeline {
         }
     }
 
-    /// Maximum effort also tries every filter strategy, but only on images
-    /// small enough for that to end in practical time. Its time follows the
-    /// pixels, not the bytes: a small file can hold a large, flat image.
-    static let allFiltersPixelLimit = 256 * 256
-
-    /// ECT and OxiPNG each win on different images, so from Balanced on both
-    /// run in parallel and the smaller result is kept. ECT breaks animated
-    /// PNGs (it palette-reduces the first frame only); those get OxiPNG alone.
-    /// Maximum lets ECT choose the PNG filters section by section from all of
-    /// its heuristics (`--segmented`, our patch to ECT).
+    /// OxiPNG from Balanced on chooses the PNG filters section by section
+    /// (`-f 10`, our patch) and compresses with libdeflate's levels 13 and 14
+    /// (`--zc`, our patch); with both fixed, its -o presets give the same
+    /// result. Maximum also runs ECT, which still compresses further, with
+    /// its filters chosen section by section (`--segmented`, our patch); the
+    /// smaller result is kept. ECT breaks animated PNGs (it palette-reduces
+    /// the first frame only); those get OxiPNG alone.
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
-        if facts.isAnimated { return [oxipng(level: effort == .fast ? "2" : "4", lossy: lossy)] }
+        if facts.isAnimated { return [oxipng(["-o", effort == .fast ? "2" : "4"], lossy: lossy)] }
         switch effort {
         case .fast:
-            return [oxipng(level: "2", lossy: lossy)]
+            return [oxipng(["-o", "2"], lossy: lossy)]
         case .balanced:
-            return [ect(["-5"], lossy: lossy), oxipng(level: "2", lossy: lossy)]
+            return [oxipng(["-o", "2", "-f", "10", "--zc", "13"], lossy: lossy)]
         case .thorough:
-            return [ect(["-7"], lossy: lossy), oxipng(level: "4", lossy: lossy)]
+            return [oxipng(["-o", "2", "-f", "10", "--zc", "14"], lossy: lossy)]
         case .maximum:
-            var candidates = [ect(["-9", "--segmented"], lossy: lossy), oxipng(level: "6", lossy: lossy)]
-            if facts.pixelCount <= allFiltersPixelLimit { candidates.append(ect(["-9", "--allfilters-b"], lossy: lossy)) }
-            return candidates
+            return [ect(["-9", "--segmented"], lossy: lossy),
+                    oxipng(["-o", "2", "-f", "10", "--zc", "14"], lossy: lossy)]
         }
     }
 
@@ -197,12 +191,12 @@ enum Pipeline {
         }
     }
 
-    static func oxipng(level: String, lossy: Bool) -> Candidate {
+    static func oxipng(_ options: [String], lossy: Bool) -> Candidate {
         Candidate(name: "OxiPNG", changesHiddenColour: lossy) { input, output, work in
             // No --strip: OxiPNG keeps every chunk that stays valid. (It reads
             // "--strip none" as a list of chunk names and then also swaps an sRGB
             // profile; that is our metadata filter's job.)
-            var args = ["-o", level, "-i", "0"]
+            var args = options + ["-i", "0"]
             // -a rewrites the colour of fully transparent pixels. Invisible,
             // but not identical, so only in lossy mode.
             if lossy { args += ["-a"] }

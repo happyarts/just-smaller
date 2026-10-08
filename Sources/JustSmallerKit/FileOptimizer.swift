@@ -341,10 +341,6 @@ public struct FileOptimizer: Sendable {
             facts.orientation = FileFacts.orientation(of: source)
             if let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
                 facts.bitsPerComponent = props[kCGImagePropertyDepth] as? Int ?? 8
-                if let width = props[kCGImagePropertyPixelWidth] as? Int, let height = props[kCGImagePropertyPixelHeight] as? Int,
-                   width > 0, height > 0 {
-                    facts.pixelCount = width.multipliedReportingOverflow(by: height).overflow ? .max : width * height
-                }
             }
         }
         if format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
