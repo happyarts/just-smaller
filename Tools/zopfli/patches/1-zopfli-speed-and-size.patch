@@ -2233,7 +2233,7 @@ index 0000000..f6a749e
 +    }
 +}
 diff --git a/src/squeeze.rs b/src/squeeze.rs
-index 0f66357..6043c1f 100644
+index 0f66357..e79c415 100644
 --- a/src/squeeze.rs
 +++ b/src/squeeze.rs
 @@ -14,12 +14,22 @@ use core::cmp;
@@ -2922,7 +2922,25 @@ index 0f66357..6043c1f 100644
              beststats = stats;
              bestcost = cost;
  
-@@ -512,5 +1040,110 @@ pub fn lz77_optimal<C: Cache>(
+@@ -490,6 +1018,7 @@ pub fn lz77_optimal<C: Cache>(
+                 break;
+             }
+         }
++        let iteration = current_iteration;
+         current_iteration += 1;
+         if current_iteration >= max_iterations {
+             break;
+@@ -504,13 +1033,118 @@ pub fn lz77_optimal<C: Cache>(
+             stats = add_weighed_stat_freqs(&stats, 1.0, &laststats, 0.5);
+             stats.calculate_entropy();
+         }
+-        if current_iteration > 5 && (cost - lastcost).abs() < f64::EPSILON {
++        if iteration > 5 && (cost - lastcost).abs() < f64::EPSILON {
+             stats = beststats;
+             stats.randomize_stat_freqs(&mut ran_state);
+             stats.calculate_entropy();
+-            lastrandomstep = current_iteration;
++            lastrandomstep = iteration;
          }
          lastcost = cost;
      }
