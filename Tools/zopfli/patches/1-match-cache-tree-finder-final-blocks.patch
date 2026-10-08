@@ -121,7 +121,7 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..83b5d65 100644
+index 4ea62f8..d78ce36 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
 @@ -5,12 +5,15 @@ use core::{cmp, iter};
@@ -165,7 +165,7 @@ index 4ea62f8..83b5d65 100644
 +    inend: usize,
 +    chunk: Option<(&MatchCache, usize)>,
 +) -> Lz77Store {
-+    if options.match_cache {
++    if options.match_cache && MatchCache::fits(inend - instart) {
 +        let prefilled =
 +            chunk.map(|(c, chunkstart)| block_match_cache(c, chunkstart, in_data, instart, inend));
 +        lz77_optimal(&mut NoCache, in_data, instart, inend, options, prefilled)
@@ -184,17 +184,15 @@ index 4ea62f8..83b5d65 100644
  /// `options`: global program options
  /// `btype`: the block type, must be `Fixed` or `Dynamic`
  /// `final`: whether to set the "final" bit on this block, must be the last block
-@@ -1055,7 +1083,9 @@ fn add_lz77_data<W: Write>(
- }
+@@ -1056,6 +1084,7 @@ fn add_lz77_data<W: Write>(
  
  #[allow(clippy::too_many_arguments)] // Not feasible to refactor in a more readable way
-+#[allow(clippy::too_many_arguments)]
  fn add_lz77_block_auto_type<W: Write>(
 +    trials: bool,
      final_block: bool,
      in_data: &[u8],
      lz77: &Lz77Store,
-@@ -1066,7 +1096,12 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1066,7 +1095,12 @@ fn add_lz77_block_auto_type<W: Write>(
  ) -> Result<(), Error> {
      let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
      let mut fixedcost = calculate_block_size(lz77, lstart, lend, BlockType::Fixed);
@@ -208,7 +206,7 @@ index 4ea62f8..83b5d65 100644
  
      /* Whether to perform the expensive calculation of creating an optimal block
      with fixed huffman tree to check if smaller. Only do this for small blocks or
-@@ -1131,6 +1166,8 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1131,6 +1165,8 @@ fn add_lz77_block_auto_type<W: Write>(
                  bitwise_writer,
              )
          }
@@ -217,7 +215,7 @@ index 4ea62f8..83b5d65 100644
      } else {
          add_lz77_block(
              BlockType::Dynamic,
-@@ -1145,6 +1182,230 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1145,6 +1181,230 @@ fn add_lz77_block_auto_type<W: Write>(
      }
  }
  
@@ -448,7 +446,7 @@ index 4ea62f8..83b5d65 100644
  /// Calculates block size in bits, automatically using the best btype.
  pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usize) -> f64 {
      let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
-@@ -1160,6 +1421,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
+@@ -1160,6 +1420,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
  }
  
  fn add_all_blocks<W: Write>(
@@ -456,7 +454,7 @@ index 4ea62f8..83b5d65 100644
      splitpoints: &[usize],
      lz77: &Lz77Store,
      final_block: bool,
-@@ -1168,10 +1430,11 @@ fn add_all_blocks<W: Write>(
+@@ -1168,10 +1429,11 @@ fn add_all_blocks<W: Write>(
  ) -> Result<(), Error> {
      let mut last = 0;
      for &item in splitpoints {
@@ -469,7 +467,7 @@ index 4ea62f8..83b5d65 100644
          final_block,
          in_data,
          lz77,
-@@ -1196,26 +1459,36 @@ fn blocksplit_attempt<W: Write>(
+@@ -1196,26 +1458,37 @@ fn blocksplit_attempt<W: Write>(
      /* byte coordinates rather than lz77 index */
      let mut splitpoints_uncompressed = Vec::with_capacity(options.maximum_block_splits as usize);
  
@@ -482,8 +480,9 @@ index 4ea62f8..83b5d65 100644
 -    );
 +    // With the tree match finder, the matches of the whole range are found once,
 +    // for the block splitting and every block.
-+    let chunk = (options.match_cache && options.tree_match_finder)
-+        .then(|| fill_match_cache_tree(in_data, instart, inend));
++    let chunk =
++        (options.match_cache && options.tree_match_finder && MatchCache::fits(inend - instart))
++            .then(|| fill_match_cache_tree(in_data, instart, inend));
 +    match &chunk {
 +        Some(c) => {
 +            let mut store = Lz77Store::new();
@@ -682,13 +681,13 @@ index f3f2d23..9ef425b 100644
 +pub(crate) fn verify_len_dist(_data: &[u8], _pos: usize, _dist: u16, _length: u16) {}
 diff --git a/src/matches.rs b/src/matches.rs
 new file mode 100644
-index 0000000..393e776
+index 0000000..66f6334
 --- /dev/null
 +++ b/src/matches.rs
-@@ -0,0 +1,94 @@
+@@ -0,0 +1,100 @@
 +use alloc::vec::Vec;
 +
-+use crate::util::ZOPFLI_MIN_MATCH;
++use crate::util::{ZOPFLI_MAX_MATCH, ZOPFLI_MIN_MATCH};
 +
 +/// Every match the first forward pass of a block found, so that later passes
 +/// over the same block need no hashing and no match search. For each position
@@ -702,6 +701,12 @@ index 0000000..393e776
 +}
 +
 +impl MatchCache {
++    /// Whether a range of `size` positions fits: every position has at most
++    /// `ZOPFLI_MAX_MATCH + 1` runs, and positions are counted in `u32`.
++    pub const fn fits(size: usize) -> bool {
++        size <= u32::MAX as usize / (ZOPFLI_MAX_MATCH + 1)
++    }
++
 +    pub fn new(blocksize: usize) -> Self {
 +        Self {
 +            start: Vec::with_capacity(blocksize),
@@ -728,7 +733,7 @@ index 0000000..393e776
 +    /// for length `k`, up to `length`.
 +    pub fn push(&mut self, sublen: &[u16], length: usize) {
 +        self.start
-+            .push(u32::try_from(self.entries.len()).expect("match cache too large"));
++            .push(u32::try_from(self.entries.len()).expect("checked by fits"));
 +        if length < ZOPFLI_MIN_MATCH {
 +            return;
 +        }
@@ -742,14 +747,14 @@ index 0000000..393e776
 +    /// Appends the next position with matches already in the form of the runs.
 +    pub fn push_runs(&mut self, runs: &[u32]) {
 +        self.start
-+            .push(u32::try_from(self.entries.len()).expect("match cache too large"));
++            .push(u32::try_from(self.entries.len()).expect("checked by fits"));
 +        self.entries.extend_from_slice(runs);
 +    }
 +
 +    /// Appends a position with a single match of `length` at `dist`.
 +    pub fn push_one(&mut self, dist: u16, length: usize) {
 +        self.start
-+            .push(u32::try_from(self.entries.len()).expect("match cache too large"));
++            .push(u32::try_from(self.entries.len()).expect("checked by fits"));
 +        self.entries.push((length as u32) << 16 | u32::from(dist));
 +    }
 +
@@ -781,7 +786,7 @@ index 0000000..393e776
 +    }
 +}
 diff --git a/src/squeeze.rs b/src/squeeze.rs
-index 0f66357..2f6c770 100644
+index 0f66357..710e384 100644
 --- a/src/squeeze.rs
 +++ b/src/squeeze.rs
 @@ -14,12 +14,22 @@ use core::cmp;
@@ -1228,7 +1233,7 @@ index 0f66357..2f6c770 100644
 +    let max_iterations_without_improvement = options.iterations_without_improvement.get();
 +    let mut h = ZopfliHash::new();
 +    let mut matches = prefilled.or_else(|| {
-+        options.match_cache.then(|| {
++        (options.match_cache && MatchCache::fits(inend - instart)).then(|| {
 +            if options.tree_match_finder {
 +                fill_match_cache_tree(in_data, instart, inend)
 +            } else {
