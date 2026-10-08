@@ -1,5 +1,7 @@
 import Foundation
+import ImageIO
 import Testing
+import UniformTypeIdentifiers
 @testable import JustSmallerKit
 
 struct PipelineTests {
@@ -97,6 +99,22 @@ struct PipelineTests {
         #expect(names(.thorough) == ["OxiPNG"])
         #expect(names(.maximum) == ["ECT", "OxiPNG"])
         #expect(names(.maximum, animated: true) == ["OxiPNG"])
+        // Section-wise filters from Balanced on; libdeflate 13, then 14.
+        #expect(Pipeline.oxipngOptions(.fast) == ["-o", "2"])
+        #expect(Pipeline.oxipngOptions(.balanced) == ["-o", "2", "-f", "10", "--zc", "13"])
+        #expect(Pipeline.oxipngOptions(.thorough) == ["-o", "2", "-f", "10", "--zc", "14"])
+        #expect(Pipeline.oxipngOptions(.maximum) == Pipeline.oxipngOptions(.thorough))
+    }
+
+    @Test func factsAboutAPNG() throws {
+        let dir = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appending(path: "still.png")
+        let dest = try #require(CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, TestImages.pattern(width: 30, height: 20), nil)
+        #expect(CGImageDestinationFinalize(dest))
+        let facts = FileOptimizer.facts(about: url, format: .png, size: 1)
+        #expect(!facts.isAnimated && facts.bitsPerComponent == 8)
     }
 
     private func temporaryDirectory() throws -> URL {

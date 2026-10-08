@@ -159,22 +159,22 @@ enum Pipeline {
     /// OxiPNG from Balanced on chooses the PNG filters section by section
     /// (`-f 10`, our patch) and compresses with libdeflate's levels 13 and 14
     /// (`--zc`, our patch); with both fixed, its -o presets give the same
-    /// result. Maximum also runs ECT, which still compresses further, with
-    /// its filters chosen section by section (`--segmented`, our patch); the
-    /// smaller result is kept. ECT breaks animated PNGs (it palette-reduces
-    /// the first frame only); those get OxiPNG alone.
+    /// result. Maximum runs ECT next to it, with ECT's filters chosen section
+    /// by section (`--segmented`, our patch), and keeps the smaller result.
+    /// ECT breaks animated PNGs (it palette-reduces the first frame only);
+    /// those get OxiPNG alone.
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
         if facts.isAnimated { return [oxipng(["-o", effort == .fast ? "2" : "4"], lossy: lossy)] }
+        let oxipng = oxipng(oxipngOptions(effort), lossy: lossy)
+        return effort == .maximum ? [ect(["-9", "--segmented"], lossy: lossy), oxipng] : [oxipng]
+    }
+
+    /// OxiPNG's options for still PNGs at each effort.
+    static func oxipngOptions(_ effort: Effort) -> [String] {
         switch effort {
-        case .fast:
-            return [oxipng(["-o", "2"], lossy: lossy)]
-        case .balanced:
-            return [oxipng(["-o", "2", "-f", "10", "--zc", "13"], lossy: lossy)]
-        case .thorough:
-            return [oxipng(["-o", "2", "-f", "10", "--zc", "14"], lossy: lossy)]
-        case .maximum:
-            return [ect(["-9", "--segmented"], lossy: lossy),
-                    oxipng(["-o", "2", "-f", "10", "--zc", "14"], lossy: lossy)]
+        case .fast: ["-o", "2"]
+        case .balanced: ["-o", "2", "-f", "10", "--zc", "13"]
+        case .thorough, .maximum: ["-o", "2", "-f", "10", "--zc", "14"]
         }
     }
 
