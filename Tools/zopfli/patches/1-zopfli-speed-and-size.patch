@@ -185,10 +185,16 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..232227a 100644
+index 4ea62f8..150b4e7 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
-@@ -5,12 +5,15 @@ use core::{cmp, iter};
+@@ -1,16 +1,21 @@
+ use alloc::vec::Vec;
+ use core::{cmp, iter};
++#[cfg(feature = "std")]
++use std::sync::{Mutex, PoisonError};
+ 
+ #[cfg(feature = "std")]
  use log::{debug, log_enabled};
  
  use crate::{
@@ -207,7 +213,7 @@ index 4ea62f8..232227a 100644
      symbols::{
          get_dist_extra_bits, get_dist_extra_bits_value, get_dist_symbol,
          get_dist_symbol_extra_bits, get_length_extra_bits, get_length_extra_bits_value,
-@@ -25,7 +28,9 @@ use crate::{
+@@ -25,7 +30,9 @@ use crate::{
  /// to it to the specified sink. Most users will find using [`compress`](crate::compress)
  /// easier and more performant.
  ///
@@ -218,30 +224,31 @@ index 4ea62f8..232227a 100644
  /// backreference window. As a consequence, frequent short writes may cause more
  /// DEFLATE blocks to be emitted with less optimal Huffman trees, which can hurt
  /// compression and runtime. If they are a concern, short writes can be conveniently
-@@ -40,6 +45,12 @@ pub struct DeflateEncoder<W: Write> {
+@@ -40,6 +47,13 @@ pub struct DeflateEncoder<W: Write> {
      chunk_start: usize,
      window_and_chunk: Vec<u8>,
      bitwise_writer: Option<BitwiseWriter<W>>,
-+    /// With `Options::parallel_chunks`: all input so far, and where each
-+    /// written chunk ends in it.
++    /// With `Options::parallel_chunks`: the chunks before the last one, worked
++    /// out on other threads. Only used through `&mut self` (`get_mut`); the
++    /// mutex keeps the encoder `Sync` and unwind safe.
 +    #[cfg(feature = "std")]
-+    all_chunks: (Vec<u8>, Vec<usize>),
++    pool: Option<Mutex<chunk_pool::ChunkPool>>,
 +    /// With `Options::merge_blocks`.
 +    merger: BlockMerger,
  }
  
  impl<W: Write> DeflateEncoder<W> {
-@@ -53,6 +64,9 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -53,6 +67,9 @@ impl<W: Write> DeflateEncoder<W> {
              chunk_start: 0,
              window_and_chunk: Vec::with_capacity(ZOPFLI_WINDOW_SIZE),
              bitwise_writer: Some(BitwiseWriter::new(sink)),
 +            #[cfg(feature = "std")]
-+            all_chunks: (Vec::new(), Vec::new()),
++            pool: None,
 +            merger: BlockMerger::default(),
          }
      }
  
-@@ -85,6 +99,31 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -85,6 +102,32 @@ impl<W: Write> DeflateEncoder<W> {
      /// available.
      #[inline]
      fn compress_chunk(&mut self, is_last: bool) -> Result<(), Error> {
@@ -259,6 +266,7 @@ index 4ea62f8..232227a 100644
 +                    self.options.final_block_trials,
 +                    &self.window_and_chunk,
 +                    &lz77,
++                    0,
 +                    last,
 +                    item,
 +                    writer,
@@ -273,7 +281,7 @@ index 4ea62f8..232227a 100644
          deflate_part(
              &self.options,
              self.btype,
-@@ -103,13 +142,17 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -103,13 +146,17 @@ impl<W: Write> DeflateEncoder<W> {
          // Remove bytes exceeding the window size. Start with the
          // oldest bytes, which are at the beginning of the buffer.
          // The buffer length is then the position where the chunk
@@ -298,45 +306,124 @@ index 4ea62f8..232227a 100644
          self.chunk_start = self.window_and_chunk.len();
  
          self.window_and_chunk.extend_from_slice(chunk);
-@@ -127,6 +170,22 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -127,7 +174,16 @@ impl<W: Write> DeflateEncoder<W> {
              return Ok(None);
          }
  
+-        self.compress_chunk(true)?;
 +        #[cfg(feature = "std")]
-+        if self.options.parallel_chunks
-+            && self.btype == BlockType::Dynamic
-+            && !self.all_chunks.1.is_empty()
-+        {
-+            let (data, ends) = core::mem::take(&mut self.all_chunks);
-+            deflate_chunks_parallel(
-+                &self.options,
-+                &data,
-+                &ends,
-+                self.bitwise_writer.as_mut().unwrap(),
-+            )?;
++        let pooled = self.pool.is_some();
++        #[cfg(not(feature = "std"))]
++        let pooled = false;
++        if pooled {
++            #[cfg(feature = "std")]
++            self.finish_pool()?;
 +        } else {
 +            self.compress_chunk(true)?;
 +        }
-+        #[cfg(not(feature = "std"))]
-         self.compress_chunk(true)?;
  
          let mut bitwise_writer = self.bitwise_writer.take().unwrap();
-@@ -151,6 +210,14 @@ impl<W: Write> DeflateEncoder<W> {
+         bitwise_writer.finish_partial_bits()?;
+@@ -135,6 +191,37 @@ impl<W: Write> DeflateEncoder<W> {
+         Ok(Some(bitwise_writer.out))
+     }
+ 
++    /// The thread pool, if chunks went to it.
++    #[cfg(feature = "std")]
++    fn pool_mut(&mut self) -> Option<&mut chunk_pool::ChunkPool> {
++        self.pool
++            .as_mut()
++            .map(|pool| pool.get_mut().unwrap_or_else(PoisonError::into_inner))
++    }
++
++    /// Hands the last chunk to the thread pool too and writes all chunks, the
++    /// last one as the final one.
++    #[cfg(feature = "std")]
++    fn finish_pool(&mut self) -> Result<(), Error> {
++        let Some(pool) = self.pool.as_mut() else {
++            return Ok(());
++        };
++        let pool = pool.get_mut().unwrap_or_else(PoisonError::into_inner);
++        pool.check()?;
++        if !pool.has_last() {
++            // Without a chunk (after a write that failed), the final block is
++            // empty.
++            let start = if self.have_chunk {
++                self.chunk_start
++            } else {
++                self.window_and_chunk.len()
++            };
++            pool.submit_last(core::mem::take(&mut self.window_and_chunk), start);
++            self.have_chunk = false;
++        }
++        pool.write_all(self.bitwise_writer.as_mut().unwrap())
++    }
++
+     /// Gets a reference to the underlying writer.
+     pub fn get_ref(&self) -> &W {
+         &self.bitwise_writer.as_ref().unwrap().out
+@@ -151,6 +238,32 @@ impl<W: Write> DeflateEncoder<W> {
  
  impl<W: Write> Write for DeflateEncoder<W> {
      fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
 +        #[cfg(feature = "std")]
 +        if self.options.parallel_chunks && self.btype == BlockType::Dynamic {
-+            // Kept until `finish`, which compresses all chunks at once.
-+            self.all_chunks.0.extend_from_slice(buf);
-+            self.all_chunks.1.push(self.all_chunks.0.len());
++            if self.have_chunk {
++                // The previous chunk is not the last: it goes to a worker, and its
++                // end stays as the window of this one.
++                let data = core::mem::take(&mut self.window_and_chunk);
++                self.window_and_chunk
++                    .extend_from_slice(&data[data.len().saturating_sub(ZOPFLI_WINDOW_SIZE)..]);
++                self.have_chunk = false;
++                let options = self.options;
++                self.pool
++                    .get_or_insert_with(|| Mutex::new(chunk_pool::ChunkPool::new(options)))
++                    .get_mut()
++                    .unwrap_or_else(PoisonError::into_inner)
++                    .submit(data, self.chunk_start);
++            }
++            let bitwise_writer = self.bitwise_writer.as_mut().unwrap();
++            if let Some(pool) = self.pool.as_mut() {
++                pool.get_mut()
++                    .unwrap_or_else(PoisonError::into_inner)
++                    .write_finished(false, bitwise_writer)?;
++            }
++            self.set_chunk(buf);
 +            return Ok(buf.len());
 +        }
 +
          // Any previous chunk is known to be non-last at this point,
          // so compress it now
          if self.have_chunk {
-@@ -286,7 +353,7 @@ fn fixed_tree() -> (Vec<u32>, Vec<u32>) {
+@@ -165,12 +278,27 @@ impl<W: Write> Write for DeflateEncoder<W> {
+     }
+ 
+     fn flush(&mut self) -> Result<(), Error> {
++        #[cfg(feature = "std")]
++        {
++            let bitwise_writer = self.bitwise_writer.as_mut().unwrap();
++            if let Some(pool) = self.pool.as_mut() {
++                pool.get_mut()
++                    .unwrap_or_else(PoisonError::into_inner)
++                    .write_finished(true, bitwise_writer)?;
++            }
++        }
+         self.bitwise_writer.as_mut().unwrap().out.flush()
+     }
+ }
+ 
+ impl<W: Write> Drop for DeflateEncoder<W> {
+     fn drop(&mut self) {
++        // After the sink failed or a thread panicked, the chunks still queued
++        // for the threads are left out rather than worked out for nothing.
++        #[cfg(feature = "std")]
++        if self.pool_mut().is_some_and(|pool| pool.failed()) {
++            return;
++        }
+         self.__finish().ok();
+     }
+ }
+@@ -286,7 +414,7 @@ fn fixed_tree() -> (Vec<u32>, Vec<u32>) {
  /// Changes the population counts in a way that the consequent Huffman tree
  /// compression, especially its rle-part, will be more likely to compress this data
  /// more efficiently. length contains the size of the histogram.
@@ -345,7 +432,7 @@ index 4ea62f8..232227a 100644
      let mut length = counts.len();
      // 1) We don't want to touch the trailing zeros. We may break the
      // rules of the format by adding more data in the distance codes.
-@@ -310,17 +377,19 @@ fn optimize_huffman_for_rle(counts: &mut [usize]) {
+@@ -310,17 +438,19 @@ fn optimize_huffman_for_rle(counts: &mut [usize]) {
      // Mark any seq of non-0's that is longer than 7 as a good_for_rle.
      let mut symbol = counts[0];
      let mut stride = 0;
@@ -370,7 +457,7 @@ index 4ea62f8..232227a 100644
          }
      }
  
-@@ -468,8 +537,8 @@ fn calculate_block_symbol_size(
+@@ -468,8 +598,8 @@ fn calculate_block_symbol_size(
      } else {
          let (ll_counts, d_counts) = lz77.get_histogram(lstart, lend);
          calculate_block_symbol_size_given_counts(
@@ -381,7 +468,7 @@ index 4ea62f8..232227a 100644
              ll_lengths,
              d_lengths,
              lz77,
-@@ -807,6 +876,30 @@ fn add_dynamic_tree<W: Write>(
+@@ -807,6 +937,30 @@ fn add_dynamic_tree<W: Write>(
      .map(|_| ())
  }
  
@@ -412,7 +499,7 @@ index 4ea62f8..232227a 100644
  /// Adds a deflate block with the given LZ77 data to the output.
  /// `options`: global program options
  /// `btype`: the block type, must be `Fixed` or `Dynamic`
-@@ -939,8 +1032,12 @@ fn try_optimize_huffman_for_rle(
+@@ -939,8 +1093,12 @@ fn try_optimize_huffman_for_rle(
      ll_lengths: Vec<u32>,
      d_lengths: Vec<u32>,
  ) -> (f64, Vec<u32>, Vec<u32>) {
@@ -427,7 +514,7 @@ index 4ea62f8..232227a 100644
  
      let treesize = calculate_tree_size(&ll_lengths, &d_lengths);
      let datasize = calculate_block_symbol_size_given_counts(
-@@ -953,11 +1050,11 @@ fn try_optimize_huffman_for_rle(
+@@ -953,11 +1111,11 @@ fn try_optimize_huffman_for_rle(
          lend,
      );
  
@@ -443,7 +530,7 @@ index 4ea62f8..232227a 100644
      patch_distance_codes_for_buggy_decoders(&mut d_lengths2[..]);
  
      let treesize2 = calculate_tree_size(&ll_lengths2, &d_lengths2);
-@@ -987,8 +1084,8 @@ fn get_dynamic_lengths(lz77: &Lz77Store, lstart: usize, lend: usize) -> (f64, Ve
+@@ -987,8 +1145,8 @@ fn get_dynamic_lengths(lz77: &Lz77Store, lstart: usize, lend: usize) -> (f64, Ve
      let (mut ll_counts, d_counts) = lz77.get_histogram(lstart, lend);
      ll_counts[256] = 1; /* End symbol. */
  
@@ -454,7 +541,7 @@ index 4ea62f8..232227a 100644
  
      patch_distance_codes_for_buggy_decoders(&mut d_lengths[..]);
  
-@@ -996,8 +1093,8 @@ fn get_dynamic_lengths(lz77: &Lz77Store, lstart: usize, lend: usize) -> (f64, Ve
+@@ -996,8 +1154,8 @@ fn get_dynamic_lengths(lz77: &Lz77Store, lstart: usize, lend: usize) -> (f64, Ve
          lz77,
          lstart,
          lend,
@@ -465,7 +552,7 @@ index 4ea62f8..232227a 100644
          ll_lengths,
          d_lengths,
      )
-@@ -1056,6 +1153,7 @@ fn add_lz77_data<W: Write>(
+@@ -1056,6 +1214,7 @@ fn add_lz77_data<W: Write>(
  
  #[allow(clippy::too_many_arguments)] // Not feasible to refactor in a more readable way
  fn add_lz77_block_auto_type<W: Write>(
@@ -473,7 +560,7 @@ index 4ea62f8..232227a 100644
      final_block: bool,
      in_data: &[u8],
      lz77: &Lz77Store,
-@@ -1064,40 +1162,253 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1064,40 +1223,256 @@ fn add_lz77_block_auto_type<W: Write>(
      expected_data_size: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -518,15 +605,18 @@ index 4ea62f8..232227a 100644
 +const MAX_JOINED_BLOCKS: usize = 16;
 +
 +impl BlockMerger {
-+    /// Takes the block `lstart..lend` of `lz77` (nothing if it is empty);
-+    /// writes the block before it if the two stay apart. Blocks written
-+    /// uncompressed are never joined: only for them the estimated bits can
-+    /// differ from the written ones.
++    /// Takes the block `lstart..lend` of `lz77` (nothing if it is empty),
++    /// whose positions lie `offset` further in `in_data`; writes the block
++    /// before it if the two stay apart. Blocks written uncompressed are never
++    /// joined: only for them the estimated bits can differ from the written
++    /// ones.
++    #[allow(clippy::too_many_arguments)]
 +    fn push<W: Write>(
 +        &mut self,
 +        trials: bool,
 +        in_data: &[u8],
 +        lz77: &Lz77Store,
++        offset: usize,
 +        lstart: usize,
 +        lend: usize,
 +        bitwise_writer: &mut BitwiseWriter<W>,
@@ -536,7 +626,7 @@ index 4ea62f8..232227a 100644
 +        }
 +        let mut store = Lz77Store::new();
 +        for i in lstart..lend {
-+            store.append_store_item(lz77.litlens[i], lz77.pos[i]);
++            store.append_store_item(lz77.litlens[i], lz77.pos[i] + offset);
 +        }
 +        // Chosen exactly as `add_lz77_block_auto_type` chooses for the block of
 +        // `lz77`, so that blocks that stay apart are written as without merging.
@@ -740,7 +830,7 @@ index 4ea62f8..232227a 100644
              BlockType::Uncompressed,
              final_block,
              in_data,
-@@ -1106,33 +1417,37 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1106,33 +1481,37 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
@@ -801,15 +891,15 @@ index 4ea62f8..232227a 100644
              BlockType::Dynamic,
              final_block,
              in_data,
-@@ -1141,8 +1456,233 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1141,10 +1520,235 @@ fn add_lz77_block_auto_type<W: Write>(
              lend,
              expected_data_size,
              bitwise_writer,
 -        )
 +        ),
-+    }
-+}
-+
+     }
+ }
+ 
 +/// Smooths counts for run-length coding of the code lengths: the core of
 +/// Brotli's `OptimizeHuffmanCountsForRle` (24.8 fixed point), as the Efficient
 +/// Compression Tool uses it; an alternative to `optimize_huffman_for_rle`.
@@ -928,7 +1018,7 @@ index 4ea62f8..232227a 100644
 +                best = (bits, ll_lengths, d_lengths);
 +            }
 +        }
-     }
++    }
 +    best
 +}
 +
@@ -1033,10 +1123,12 @@ index 4ea62f8..232227a 100644
 +        bitwise_writer,
 +    )?;
 +    bitwise_writer.add_huffman_bits(ll_symbols[256], ll_lengths[256])
- }
- 
++}
++
  /// Calculates block size in bits, automatically using the best btype.
-@@ -1160,6 +1700,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
+ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usize) -> f64 {
+     let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
+@@ -1160,6 +1764,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
  }
  
  fn add_all_blocks<W: Write>(
@@ -1044,7 +1136,7 @@ index 4ea62f8..232227a 100644
      splitpoints: &[usize],
      lz77: &Lz77Store,
      final_block: bool,
-@@ -1168,10 +1709,11 @@ fn add_all_blocks<W: Write>(
+@@ -1168,10 +1773,11 @@ fn add_all_blocks<W: Write>(
  ) -> Result<(), Error> {
      let mut last = 0;
      for &item in splitpoints {
@@ -1057,7 +1149,7 @@ index 4ea62f8..232227a 100644
          final_block,
          in_data,
          lz77,
-@@ -1190,32 +1732,61 @@ fn blocksplit_attempt<W: Write>(
+@@ -1190,32 +1796,61 @@ fn blocksplit_attempt<W: Write>(
      inend: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -1134,7 +1226,7 @@ index 4ea62f8..232227a 100644
          totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
          // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1229,14 +1800,7 @@ fn blocksplit_attempt<W: Write>(
+@@ -1229,14 +1864,7 @@ fn blocksplit_attempt<W: Write>(
          last = item;
      }
  
@@ -1150,7 +1242,7 @@ index 4ea62f8..232227a 100644
      totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
      // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1264,7 +1828,158 @@ fn blocksplit_attempt<W: Write>(
+@@ -1264,7 +1892,385 @@ fn blocksplit_attempt<W: Write>(
          }
      }
  
@@ -1161,152 +1253,379 @@ index 4ea62f8..232227a 100644
 +    (lz77, splitpoints)
 +}
 +
-+/// The LZ77 data of a chunk and its block split points, see `blocksplit_plan`.
++/// A chunk that starts with these bytes makes the thread working on it panic.
++#[cfg(all(test, feature = "std"))]
++pub(crate) const TEST_PANIC: &[u8] = b"zopfli test: panic in the thread of this chunk";
++
++/// Works out the LZ77 data and block splits of an encoder's chunks on worker
++/// threads, for `Options::parallel_chunks`. Each chunk is handed over with the
++/// window before it, so the plans are the ones the encoder would make itself;
++/// the encoder's thread writes them in order.
 +#[cfg(feature = "std")]
-+type BlockPlan = (Lz77Store, Vec<usize>);
-+
-+/// Compresses `data`, cut into chunks that end at `ends`, the way successive
-+/// `DeflateEncoder` writes of those chunks would. The chunks' LZ77 data is
-+/// worked out on several threads, at most a few chunks ahead of the one being
-+/// written, which this thread writes in order as they become ready.
-+#[cfg(feature = "std")]
-+fn deflate_chunks_parallel<W: Write>(
-+    options: &Options,
-+    data: &[u8],
-+    ends: &[usize],
-+    bitwise_writer: &mut BitwiseWriter<W>,
-+) -> Result<(), Error> {
-+    use std::sync::{Condvar, Mutex};
-+
-+    struct Shared {
-+        /// The next chunk to work on, and the next to write.
-+        next: usize,
-+        written: usize,
-+        plans: Vec<Option<BlockPlan>>,
-+        /// A worker panicked.
-+        failed: bool,
-+    }
-+
-+    /// When its thread panics, stops the others from waiting: no more chunks
-+    /// are handed out, and the writing thread doesn't wait for one that never
-+    /// comes.
-+    struct PanicGuard<'a>(&'a Mutex<Shared>, &'a Condvar, usize);
-+    impl Drop for PanicGuard<'_> {
-+        fn drop(&mut self) {
-+            if std::thread::panicking() {
-+                let mut s = self.0.lock().unwrap_or_else(|e| e.into_inner());
-+                s.failed = true;
-+                s.next = self.2;
-+                drop(s);
-+                self.1.notify_all();
-+            }
-+        }
-+    }
-+
-+    let starts: Vec<usize> = iter::once(0)
-+        .chain(ends[..ends.len() - 1].iter().copied())
-+        .collect();
-+    let threads = std::thread::available_parallelism()
-+        .map_or(1, |n| n.get())
-+        .min(ends.len());
-+    let ahead = 2 * threads;
-+    let shared = Mutex::new(Shared {
-+        next: 0,
-+        written: 0,
-+        plans: ends.iter().map(|_| None).collect(),
-+        failed: false,
-+    });
-+    let changed = Condvar::new();
-+    let work = || {
-+        let _guard = PanicGuard(&shared, &changed, ends.len());
-+        loop {
-+            let k = {
-+                let mut s = shared.lock().unwrap();
-+                while s.next < ends.len() && s.next >= s.written + ahead {
-+                    s = changed.wait(s).unwrap();
-+                }
-+                if s.next >= ends.len() {
-+                    break;
-+                }
-+                s.next += 1;
-+                s.next - 1
-+            };
-+            let plan = blocksplit_plan(options, data, starts[k], ends[k]);
-+            shared.lock().unwrap().plans[k] = Some(plan);
-+            changed.notify_all();
-+        }
++mod chunk_pool {
++    use std::{
++        collections::BTreeMap,
++        panic::{self, AssertUnwindSafe},
++        sync::{
++            atomic::{AtomicBool, Ordering},
++            mpsc, Arc, Mutex,
++        },
++        thread,
 +    };
-+    std::thread::scope(|scope| {
-+        // In place before any worker starts, so that they never wait for a
-+        // writer that is gone.
-+        let _guard = PanicGuard(&shared, &changed, ends.len());
-+        // A worker that can't be started is left out; this thread also works
-+        // out chunks itself, so it gets by with none.
-+        for _ in 1..threads {
-+            if std::thread::Builder::new()
-+                .spawn_scoped(scope, work)
-+                .is_err()
-+            {
-+                break;
++
++    use super::{add_all_blocks, blocksplit_plan, BitwiseWriter, BlockMerger};
++    use crate::{lz77::Lz77Store, util::ZOPFLI_WINDOW_SIZE, Error, Options, Write};
++
++    /// The LZ77 data of a chunk and its block split points.
++    type Plan = (Lz77Store, Vec<usize>);
++
++    /// A chunk: the window before it and the chunk itself, and where the chunk
++    /// starts in that data.
++    struct Job {
++        index: usize,
++        data: Vec<u8>,
++        instart: usize,
++    }
++
++    /// A chunk with its plan, or the panic of the thread that worked on it.
++    struct Done {
++        data: Vec<u8>,
++        instart: usize,
++        plan: thread::Result<Plan>,
++    }
++
++    fn work_out(options: &Options, job: Job) -> (usize, Done) {
++        let plan = panic::catch_unwind(AssertUnwindSafe(|| {
++            #[cfg(test)]
++            if job.data[job.instart..].starts_with(super::TEST_PANIC) {
++                panic!("test panic in a worker");
++            }
++            blocksplit_plan(options, &job.data, job.instart, job.data.len())
++        }));
++        (
++            job.index,
++            Done {
++                data: job.data,
++                instart: job.instart,
++                plan,
++            },
++        )
++    }
++
++    /// With `Options::merge_blocks`: the bytes the held-back block needs (it
++    /// and the window before it) followed by the chunk being written, and how
++    /// far that chunk got, so that a write that fails can be tried again.
++    #[derive(Default)]
++    struct Merging {
++        merger: BlockMerger,
++        buffer: Vec<u8>,
++        /// The chunk whose bytes are at the end of `buffer`, how much further
++        /// its positions lie there than in its own data, and how many of its
++        /// blocks the merger has taken.
++        chunk: Option<usize>,
++        offset: usize,
++        blocks: usize,
++    }
++
++    pub struct ChunkPool {
++        options: Options,
++        threads: usize,
++        jobs: mpsc::Sender<Job>,
++        queue: Arc<Mutex<mpsc::Receiver<Job>>>,
++        done_sender: mpsc::Sender<(usize, Done)>,
++        done: mpsc::Receiver<(usize, Done)>,
++        /// Set when the pool is dropped: the workers leave the chunks still
++        /// queued and stop.
++        cancelled: Arc<AtomicBool>,
++        workers: usize,
++        /// Chunks handed over, chunks written, and finished ones not written yet.
++        submitted: usize,
++        written: usize,
++        finished: BTreeMap<usize, Done>,
++        merging: Option<Merging>,
++        /// The chunk handed over by `submit_last`.
++        last: Option<usize>,
++        /// The last attempt to write a chunk failed.
++        failed: bool,
++        /// A worker panicked: nothing more is written.
++        poisoned: bool,
++    }
++
++    impl ChunkPool {
++        pub fn new(options: Options) -> Self {
++            let (jobs, queue) = mpsc::channel();
++            let (done_sender, done) = mpsc::channel();
++            Self {
++                options,
++                threads: thread::available_parallelism().map_or(1, |n| n.get()),
++                jobs,
++                queue: Arc::new(Mutex::new(queue)),
++                done_sender,
++                done,
++                cancelled: Arc::new(AtomicBool::new(false)),
++                workers: 0,
++                submitted: 0,
++                written: 0,
++                finished: BTreeMap::new(),
++                merging: options.merge_blocks.then(Merging::default),
++                last: None,
++                failed: false,
++                poisoned: false,
 +            }
 +        }
-+        let mut merger = BlockMerger::default();
-+        for k in 0..ends.len() {
-+            let (lz77, splitpoints) = loop {
-+                let mut s = shared.lock().unwrap();
-+                if let Some(plan) = s.plans[k].take() {
-+                    break plan;
-+                }
-+                assert!(!s.failed, "a compression thread panicked");
-+                if s.next == k {
-+                    s.next += 1;
-+                    drop(s);
-+                    break blocksplit_plan(options, data, starts[k], ends[k]);
-+                }
-+                drop(changed.wait(s).unwrap());
++
++        /// Whether the last attempt to write to the sink failed, or a worker
++        /// panicked.
++        pub fn failed(&self) -> bool {
++            self.failed || self.poisoned
++        }
++
++        /// An error once a worker has panicked.
++        pub fn check(&self) -> Result<(), Error> {
++            if self.poisoned {
++                return Err(Error::new(
++                    std::io::ErrorKind::Other,
++                    "a zopfli worker thread panicked",
++                ));
++            }
++            Ok(())
++        }
++
++        /// Hands a chunk over: `data` holds the window before it and the chunk
++        /// from `instart` on. Starts a worker while there are fewer than threads
++        /// and than chunks not written yet.
++        pub fn submit(&mut self, data: Vec<u8>, instart: usize) {
++            let job = Job {
++                index: self.submitted,
++                data,
++                instart,
 +            };
-+            let result = if options.merge_blocks {
-+                (|| -> Result<(), Error> {
-+                    let mut last = 0;
-+                    for &item in splitpoints.iter().chain(iter::once(&lz77.size())) {
-+                        merger.push(
-+                            options.final_block_trials,
-+                            data,
-+                            &lz77,
-+                            last,
-+                            item,
-+                            bitwise_writer,
-+                        )?;
-+                        last = item;
-+                    }
-+                    if k == ends.len() - 1 {
-+                        merger.finish(data, bitwise_writer)?;
-+                    }
-+                    Ok(())
-+                })()
-+            } else {
-+                add_all_blocks(
-+                    options.final_block_trials,
-+                    &splitpoints,
-+                    &lz77,
-+                    k == ends.len() - 1,
-+                    data,
-+                    bitwise_writer,
-+                )
-+            };
++            self.submitted += 1;
++            if self.workers < self.threads
++                && self.workers < self.submitted - self.written
++                && self.start_worker()
 +            {
-+                let mut s = shared.lock().unwrap();
-+                s.written = k + 1;
-+                if result.is_err() {
-+                    // Let the workers stop: nothing more is written.
-+                    s.next = ends.len();
++                self.workers += 1;
++            }
++            // Without a worker (none could be started), this thread works it out.
++            let job = if self.workers > 0 {
++                match self.jobs.send(job) {
++                    Ok(()) => return,
++                    Err(mpsc::SendError(job)) => job,
++                }
++            } else {
++                job
++            };
++            let (index, done) = work_out(&self.options, job);
++            self.finished.insert(index, done);
++        }
++
++        /// Hands the last chunk over, see `submit`; it is written as the final
++        /// one.
++        pub fn submit_last(&mut self, data: Vec<u8>, instart: usize) {
++            self.last = Some(self.submitted);
++            self.submit(data, instart);
++        }
++
++        pub fn has_last(&self) -> bool {
++            self.last.is_some()
++        }
++
++        fn start_worker(&self) -> bool {
++            let queue = Arc::clone(&self.queue);
++            let done = self.done_sender.clone();
++            let cancelled = Arc::clone(&self.cancelled);
++            let options = self.options;
++            thread::Builder::new()
++                .name("zopfli".into())
++                .spawn(move || loop {
++                    let job = match queue.lock() {
++                        Ok(queue) => queue.recv(),
++                        Err(_) => return,
++                    };
++                    let Ok(job) = job else { return };
++                    if cancelled.load(Ordering::Relaxed) {
++                        continue;
++                    }
++                    if done.send(work_out(&options, job)).is_err() {
++                        return;
++                    }
++                })
++                .is_ok()
++        }
++
++        /// Takes the chunks that have finished meanwhile.
++        fn collect(&mut self) {
++            while let Ok((index, done)) = self.done.try_recv() {
++                self.finished.insert(index, done);
++            }
++        }
++
++        /// Waits until the chunk `index` is among the finished ones.
++        fn wait_for(&mut self, index: usize) {
++            while !self.finished.contains_key(&index) {
++                // The pool holds a sender of `done` itself, so this only waits:
++                // every chunk handed over is queued, with a worker or finished.
++                if let Ok((i, done)) = self.done.recv() {
++                    self.finished.insert(i, done);
 +                }
 +            }
-+            changed.notify_all();
-+            result?;
++        }
++
++        /// Writes chunks that have finished, in order: while more than twice
++        /// as many chunks as threads are not written, waiting for the oldest
++        /// one; then one more if it has finished, or with `all` every one that
++        /// has. Writing only a few lets the caller hand over the next chunk
++        /// soon, so that the threads do not run out of work while blocks are
++        /// being joined.
++        pub fn write_finished<W: Write>(
++            &mut self,
++            all: bool,
++            bitwise_writer: &mut BitwiseWriter<W>,
++        ) -> Result<(), Error> {
++            self.check()?;
++            let mut more = true;
++            loop {
++                self.collect();
++                if self.written == self.submitted {
++                    return Ok(());
++                }
++                let over = self.submitted - self.written > self.threads.saturating_mul(2);
++                if !over && !(more || all) {
++                    return Ok(());
++                }
++                if !self.finished.contains_key(&self.written) {
++                    if !over {
++                        return Ok(());
++                    }
++                    self.wait_for(self.written);
++                }
++                if !over {
++                    more = false;
++                }
++                self.write_next(bitwise_writer)?;
++            }
++        }
++
++        /// Writes every chunk handed over, waiting for those not finished.
++        pub fn write_all<W: Write>(
++            &mut self,
++            bitwise_writer: &mut BitwiseWriter<W>,
++        ) -> Result<(), Error> {
++            self.check()?;
++            while self.written < self.submitted {
++                self.wait_for(self.written);
++                self.write_next(bitwise_writer)?;
++            }
++            Ok(())
++        }
++
++        /// Writes the chunk `written`, which has finished. It stays until it is
++        /// written, so that a write that fails leaves it in place.
++        fn write_next<W: Write>(
++            &mut self,
++            bitwise_writer: &mut BitwiseWriter<W>,
++        ) -> Result<(), Error> {
++            if self.finished[&self.written].plan.is_err() {
++                // The panic of the worker goes on here, as it would have without
++                // threads (also when this runs from `Drop`). Its chunk is gone, so
++                // nothing after it can be written any more.
++                self.poisoned = true;
++                if let Some(Done {
++                    plan: Err(payload), ..
++                }) = self.finished.remove(&self.written)
++                {
++                    panic::resume_unwind(payload);
++                }
++            }
++            let next = &self.finished[&self.written];
++            if let Ok(plan) = &next.plan {
++                let written = write_plan(
++                    &self.options,
++                    self.merging.as_mut(),
++                    self.written,
++                    &next.data,
++                    next.instart,
++                    plan,
++                    self.last == Some(self.written),
++                    bitwise_writer,
++                );
++                self.failed = written.is_err();
++                written?;
++            }
++            self.finished.remove(&self.written);
++            self.written += 1;
++            Ok(())
++        }
++    }
++
++    /// Writes the blocks of chunk `index`, through the merger if blocks are
++    /// joined.
++    #[allow(clippy::too_many_arguments)]
++    fn write_plan<W: Write>(
++        options: &Options,
++        merging: Option<&mut Merging>,
++        index: usize,
++        data: &[u8],
++        instart: usize,
++        (lz77, splitpoints): &Plan,
++        last: bool,
++        bitwise_writer: &mut BitwiseWriter<W>,
++    ) -> Result<(), Error> {
++        let Some(merging) = merging else {
++            return add_all_blocks(
++                options.final_block_trials,
++                splitpoints,
++                lz77,
++                last,
++                data,
++                bitwise_writer,
++            );
++        };
++        if merging.chunk != Some(index) {
++            // The chunk joins the buffer, which keeps the held-back block and
++            // the window before it, as the encoder without threads does.
++            let mut dropped = merging.buffer.len().saturating_sub(ZOPFLI_WINDOW_SIZE);
++            if let Some(start) = merging.merger.start() {
++                dropped = dropped.min(start.saturating_sub(ZOPFLI_WINDOW_SIZE));
++            }
++            merging.buffer.drain(..dropped);
++            merging.merger.shift_positions(dropped);
++            merging.offset = merging.buffer.len() - instart;
++            merging.buffer.extend_from_slice(&data[instart..]);
++            merging.chunk = Some(index);
++            merging.blocks = 0;
++        }
++        let ends: Vec<usize> = splitpoints
++            .iter()
++            .copied()
++            .chain(core::iter::once(lz77.size()))
++            .collect();
++        while merging.blocks < ends.len() {
++            let block = merging.blocks;
++            let start = if block == 0 { 0 } else { ends[block - 1] };
++            merging.merger.push(
++                options.final_block_trials,
++                &merging.buffer,
++                lz77,
++                merging.offset,
++                start,
++                ends[block],
++                bitwise_writer,
++            )?;
++            merging.blocks += 1;
++        }
++        if last {
++            merging.merger.finish(&merging.buffer, bitwise_writer)?;
 +        }
 +        Ok(())
-+    })
++    }
++
++    impl Drop for ChunkPool {
++        fn drop(&mut self) {
++            self.cancelled.store(true, Ordering::Relaxed);
++        }
++    }
  }
  
  /// Since an uncompressed block can be max 65535 in size, it actually adds
@@ -1681,7 +2000,7 @@ index 5b7195f..014e4ee 100644
  mod test {
      use super::*;
 diff --git a/src/lib.rs b/src/lib.rs
-index 591c608..e3384c5 100644
+index 591c608..4efb9fa 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -55,6 +55,7 @@ use proptest::prelude::*;
@@ -1700,7 +2019,7 @@ index 591c608..e3384c5 100644
  #[cfg(not(feature = "std"))]
  mod math;
  mod squeeze;
-@@ -109,6 +111,49 @@ pub struct Options {
+@@ -109,6 +111,53 @@ pub struct Options {
      ///
      /// Default value: 15.
      pub maximum_block_splits: u16,
@@ -1731,8 +2050,12 @@ index 591c608..e3384c5 100644
 +    /// Default value: false.
 +    pub tree_match_finder: bool,
 +    /// Compresses the chunks the input arrives in (1 MB with `compress`) on
-+    /// several threads at once, keeping all input in memory until the end; same
-+    /// output. Only with the `std` feature and dynamic blocks.
++    /// several threads at once; same output. A chunk goes to a worker thread
++    /// with the window before it once the next one arrives; threads start as
++    /// chunks come, up to the available parallelism, and at most twice as many
++    /// chunks as threads are held before a write waits. An error of the sink
++    /// can surface on a later call; a write that returns an error has taken
++    /// none of its data. Only with the `std` feature and dynamic blocks.
 +    ///
 +    /// Default value: false.
 +    pub parallel_chunks: bool,
@@ -1750,7 +2073,7 @@ index 591c608..e3384c5 100644
  }
  
  impl Default for Options {
-@@ -117,6 +162,12 @@ impl Default for Options {
+@@ -117,6 +166,12 @@ impl Default for Options {
              iteration_count: NonZeroU64::new(15).unwrap(),
              iterations_without_improvement: NonZeroU64::new(u64::MAX).unwrap(),
              maximum_block_splits: 15,
@@ -1763,7 +2086,7 @@ index 591c608..e3384c5 100644
          }
      }
  }
-@@ -213,5 +264,171 @@ mod test {
+@@ -213,5 +268,238 @@ mod test {
              let decompressed_data = inflate::decompress_to_vec(&compressed_data).expect("Could not inflate compressed stream");
              prop_assert_eq!(data, decompressed_data, "Decompressed data should match input data");
          }
@@ -1886,11 +2209,78 @@ index 591c608..e3384c5 100644
 +            };
 +            let mut encoder =
 +                DeflateEncoder::new(options, BlockType::Dynamic, Failing { room: 100 });
-+            for piece in data.chunks(64 * 1024) {
-+                encoder.write_all(piece).unwrap();
-+            }
-+            assert!(encoder.finish().is_err());
++            // The error surfaces on a later write or at the end.
++            let written = data
++                .chunks(64 * 1024)
++                .try_for_each(|piece| encoder.write_all(piece));
++            assert!(written.is_err() || encoder.finish().is_err());
 +        }
++    }
++
++    #[test]
++    fn encoders_are_send_sync_and_unwind_safe() {
++        fn check<T: Send + Sync + std::panic::UnwindSafe + std::panic::RefUnwindSafe>() {}
++        check::<DeflateEncoder<Vec<u8>>>();
++        #[cfg(feature = "gzip")]
++        check::<GzipEncoder<Vec<u8>>>();
++        #[cfg(feature = "zlib")]
++        check::<ZlibEncoder<Vec<u8>>>();
++    }
++
++    /// Runs `f` on a thread of its own; fails if it panics or takes more than
++    /// a minute.
++    fn within_a_minute(f: impl FnOnce() + Send + 'static) {
++        let (done, wait) = std::sync::mpsc::channel();
++        std::thread::spawn(move || {
++            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
++            let _ = done.send(result.is_ok());
++        });
++        let finished = wait.recv_timeout(std::time::Duration::from_secs(60));
++        assert_eq!(finished, Ok(true), "failed or still running after a minute");
++    }
++
++    #[test]
++    fn a_panic_in_a_worker_reaches_the_caller_and_nothing_waits_for_it() {
++        within_a_minute(|| {
++            let mut first = deflate::TEST_PANIC.to_vec();
++            first.resize(30_000, 7);
++            let other = vec![3; 30_000];
++            // More chunks than the threads hold: a write waits for the first
++            // chunk and meets the panic.
++            let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
++            let pieces =
++                || core::iter::once(&first).chain(core::iter::repeat(&other).take(2 * threads + 4));
++            let is_test_panic = |payload: Box<dyn core::any::Any + Send>| {
++                payload.downcast_ref::<&str>() == Some(&"test panic in a worker")
++            };
++            for merge_blocks in [false, true] {
++                let options = Options {
++                    iteration_count: NonZeroU64::new(1).unwrap(),
++                    parallel_chunks: true,
++                    merge_blocks,
++                    ..Options::default()
++                };
++                // Caught, then finished: an error.
++                let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, Vec::new());
++                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                    for piece in pieces() {
++                        encoder.write_all(piece).unwrap();
++                    }
++                }));
++                assert!(is_test_panic(written.unwrap_err()));
++                assert!(encoder.write_all(&other).is_err());
++                assert!(encoder.finish().is_err());
++
++                // Not caught: the encoder is dropped while the panic unwinds.
++                let dropped = std::panic::catch_unwind(|| {
++                    let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, Vec::new());
++                    for piece in pieces() {
++                        encoder.write_all(piece).unwrap();
++                    }
++                });
++                assert!(is_test_panic(dropped.unwrap_err()));
++            }
++        });
 +    }
 +
 +    /// Data from runs of one of `symbols` byte values, each up to `longest`
