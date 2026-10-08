@@ -3,8 +3,8 @@
 # Vendor/ (git submodules pinned to released versions; ECT to a master
 # commit, since its last release lacks years of fixes; oxvg to a main commit
 # with path and transform fixes that aren't released yet) and Tools/.
-# ECT, OxiPNG and libdeflate (through the libdeflater crate) are built from
-# copies with our patches (Tools/*/patches) applied.
+# ECT, OxiPNG, libdeflate (through the libdeflater crate) and the zopfli
+# crate are built from copies with our patches (Tools/*/patches) applied.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -35,7 +35,7 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect libdeflater; do
+for dep in oxipng oxvg libwebp libjpeg-turbo jpegli ect libdeflater zopfli; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
@@ -52,7 +52,7 @@ done
 # pin) would build the old version or fail on a lockfile. It is left as it
 # is — it may hold local work — so stop and say how to update it.
 stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/ect Vendor/libdeflater | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+	Vendor/jpegli Vendor/ect Vendor/libdeflater Vendor/zopfli | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
 if [ -n "$stale" ]; then
 	echo "Not at the pinned commit: $stale" >&2
 	echo "Update with: git submodule update --depth 1 $stale" >&2
@@ -144,13 +144,15 @@ cargo_tool() { # name manifest [cargo args…]
 		--target-dir "$WORK/cargo-$name" "$@"
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
-# OxiPNG with libdeflate levels 13-14: libdeflater (which brings libdeflate)
-# from our patched copy instead of crates.io.
+# OxiPNG with libdeflate levels 13-14 and a faster zopfli: libdeflater (which
+# brings libdeflate) and zopfli from our patched copies instead of crates.io.
 patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
+patched_copy "$ROOT/Vendor/zopfli" "$WORK/zopfli-src" "$ROOT/Tools/zopfli/patches"
 patched_copy "$ROOT/Vendor/oxipng" "$WORK/oxipng-src" "$ROOT/Tools/oxipng/patches"
 cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
 	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
-	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\""
+	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\"" \
+	--config "patch.crates-io.zopfli.path=\"$WORK/zopfli-src\""
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked

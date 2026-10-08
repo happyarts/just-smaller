@@ -26,3 +26,7 @@
 	path = Vendor/libdeflater
 	url = https://github.com/libdeflater/libdeflater.git
 	shallow = true
+[submodule "Vendor/zopfli"]
+	path = Vendor/zopfli
+	url = https://github.com/zopfli-rs/zopfli.git
+	shallow = true

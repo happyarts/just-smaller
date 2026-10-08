@@ -4,12 +4,13 @@
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
   tags (ECT, oxvg: a master/main commit); build.sh only fetches missing ones and never moves
   a checkout — it stops when one isn't at its pinned commit (after a pull).
-  ECT, OxiPNG and libdeflate are built from copies with
-  `Tools/{ect-png,oxipng,libdeflater}/patches/*.patch` applied (the checkouts
-  stay pinned). libdeflate comes with the libdeflater crate
-  (`Vendor/libdeflater`, pinned to the version OxiPNG's Cargo.lock names —
-  move both together); build.sh points OxiPNG at the copy, which adds levels
-  13 and 14 (`--zc`). A patch that
+  ECT, OxiPNG, libdeflate and zopfli are built from copies with
+  `Tools/{ect-png,oxipng,libdeflater,zopfli}/patches/*.patch` applied (the
+  checkouts stay pinned). libdeflate comes with the libdeflater crate
+  (`Vendor/libdeflater`), zopfli is `Vendor/zopfli`, both pinned to the
+  versions OxiPNG's Cargo.lock names — move them together; build.sh points
+  OxiPNG at the copies (libdeflate levels 13 and 14, `--zc`; a faster zopfli
+  for `--zopfli`). A patch that
   went upstream is deleted when the pin moves past it; ECT's `1-simd-…` is
   fhanau/Efficient-Compression-Tool#161.
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the

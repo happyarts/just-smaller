@@ -1,0 +1,25 @@
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -634,8 +634,6 @@
+ [[package]]
+ name = "zopfli"
+ version = "0.8.3"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "f05cd8797d63865425ff89b5c4a48804f35ba0ce8d125800027ad6017d2b5249"
+ dependencies = [
+  "bumpalo",
+  "crc32fast",
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -453,6 +453,9 @@
+         opts.deflater = Deflater::Zopfli(ZopfliOptions {
+             iteration_count,
+             iterations_without_improvement,
++            final_block_trials: true,
++            code_length_passes: true,
++            tree_match_finder: true,
+             ..Default::default()
+         });
+     }
