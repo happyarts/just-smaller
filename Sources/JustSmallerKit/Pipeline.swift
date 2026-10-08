@@ -156,8 +156,9 @@ enum Pipeline {
         }
     }
 
-    /// OxiPNG from Balanced on chooses the PNG filters section by section
-    /// (`-f 10`, our patch) and compresses with libdeflate's levels 13 and 14
+    /// OxiPNG from Balanced on tries all its filter strategies (`-f 0-9`) and,
+    /// on larger images, chooses among them section by section (our patch,
+    /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
     /// (`--zc`, our patch); with both fixed, its -o presets give the same
     /// result. Maximum runs ECT next to it, with ECT's filters chosen section
     /// by section (`--segmented`, our patch), and keeps the smaller result.
@@ -173,8 +174,8 @@ enum Pipeline {
     static func oxipngOptions(_ effort: Effort) -> [String] {
         switch effort {
         case .fast: ["-o", "2"]
-        case .balanced: ["-o", "2", "-f", "10", "--zc", "13"]
-        case .thorough, .maximum: ["-o", "2", "-f", "10", "--zc", "14"]
+        case .balanced: ["-o", "2", "-f", "0-9", "--zc", "13"]
+        case .thorough, .maximum: ["-o", "2", "-f", "0-9", "--zc", "14"]
         }
     }
 
