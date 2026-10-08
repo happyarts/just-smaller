@@ -1,9 +1,9 @@
 diff --git a/src/bintree.rs b/src/bintree.rs
 new file mode 100644
-index 0000000..183a61a
+index 0000000..c54544d
 --- /dev/null
 +++ b/src/bintree.rs
-@@ -0,0 +1,91 @@
+@@ -0,0 +1,147 @@
 +use alloc::{vec, vec::Vec};
 +use core::cmp;
 +
@@ -35,7 +35,17 @@ index 0000000..183a61a
 +    /// Inserts `pos` and appends its matches to `out` as `(length << 16) | distance`,
 +    /// lengths increasing, each length at least 3 and at most `ZOPFLI_MAX_MATCH`
 +    /// and `end - pos`. Every position from `base` on must be inserted in order.
-+    pub fn insert(&mut self, data: &[u8], pos: usize, end: usize, out: Option<&mut Vec<u32>>) {
++    /// `repeats` tells that the byte before `pos` and the `limit` bytes from it
++    /// are all the same, so the walk stops at distance 1 with a match of the
++    /// full length; it is then taken without comparing the bytes.
++    pub fn insert(
++        &mut self,
++        data: &[u8],
++        pos: usize,
++        end: usize,
++        repeats: bool,
++        out: Option<&mut Vec<u32>>,
++    ) {
 +        let limit = cmp::min(ZOPFLI_MAX_MATCH, end - pos);
 +        if limit < ZOPFLI_MIN_MATCH {
 +            return;
@@ -52,6 +62,19 @@ index 0000000..183a61a
 +        let mut ptr0 = 2 * cyc + 1;
 +        let mut ptr1 = 2 * cyc;
 +        let (mut len0, mut len1) = (0, 0);
++        if repeats && cur_match + 1 == id {
++            debug_assert!(data[pos - 1..=pos - 1 + limit]
++                .iter()
++                .all(|&b| b == data[pos]));
++            // What the first step of the walk below does for this match.
++            let pair = 2 * ((cyc + ZOPFLI_WINDOW_SIZE - 1) & (ZOPFLI_WINDOW_SIZE - 1));
++            if let Some(out) = out {
++                out.push((limit as u32) << 16 | 1);
++            }
++            self.son[ptr1] = self.son[pair];
++            self.son[ptr0] = self.son[pair + 1];
++            return;
++        }
 +        let mut max_len = ZOPFLI_MIN_MATCH - 1;
 +        let cur = &data[pos..pos + limit];
 +        for _ in 0..MAX_DEPTH {
@@ -95,6 +118,39 @@ index 0000000..183a61a
 +        self.son[ptr1] = 0;
 +    }
 +}
++
++#[cfg(all(test, feature = "std"))]
++mod test {
++    use proptest::prelude::*;
++
++    use super::*;
++
++    proptest! {
++        #[test]
++        fn taking_repeats_without_comparing_changes_nothing(
++            runs in prop::collection::vec((0..3u8, 1..700usize), 1..200)
++        ) {
++            let data: Vec<u8> = runs
++                .iter()
++                .flat_map(|&(b, n)| core::iter::repeat(b).take(n))
++                .collect();
++            let mut fast = BinaryTree::new(0);
++            let mut slow = BinaryTree::new(0);
++            for pos in 0..data.len() {
++                let limit = cmp::min(ZOPFLI_MAX_MATCH, data.len() - pos);
++                let repeats = pos > 0 && data[pos - 1..=pos - 1 + limit].iter().all(|&b| b == data[pos]);
++                let (mut a, mut b) = (Vec::new(), Vec::new());
++                fast.insert(&data, pos, data.len(), repeats, Some(&mut a));
++                slow.insert(&data, pos, data.len(), false, Some(&mut b));
++                prop_assert_eq!(a, b);
++                if pos % 64 == 0 {
++                    prop_assert!(fast.head == slow.head && fast.son == slow.son);
++                }
++            }
++            prop_assert!(fast.head == slow.head && fast.son == slow.son);
++        }
++    }
++}
 diff --git a/src/blocksplitter.rs b/src/blocksplitter.rs
 index 93aba1e..d9da82b 100644
 --- a/src/blocksplitter.rs
@@ -121,10 +177,10 @@ index 93aba1e..d9da82b 100644
      let nlz77points = lz77splitpoints.len();
  
 diff --git a/src/deflate.rs b/src/deflate.rs
-index 4ea62f8..39e5e9e 100644
+index 4ea62f8..45e16de 100644
 --- a/src/deflate.rs
 +++ b/src/deflate.rs
-@@ -5,12 +5,15 @@ use core::{cmp, iter};
+@@ -5,12 +5,16 @@ use core::{cmp, iter};
  use log::{debug, log_enabled};
  
  use crate::{
@@ -139,11 +195,23 @@ index 4ea62f8..39e5e9e 100644
 +    matches::MatchCache,
 +    squeeze::{
 +        block_match_cache, fill_match_cache_tree, greedy_cached, lz77_optimal, lz77_optimal_fixed,
++        uses_match_cache,
 +    },
      symbols::{
          get_dist_extra_bits, get_dist_extra_bits_value, get_dist_symbol,
          get_dist_symbol_extra_bits, get_length_extra_bits, get_length_extra_bits_value,
-@@ -40,6 +43,10 @@ pub struct DeflateEncoder<W: Write> {
+@@ -25,7 +29,9 @@ use crate::{
+ /// to it to the specified sink. Most users will find using [`compress`](crate::compress)
+ /// easier and more performant.
+ ///
+-/// The data will be compressed as soon as possible, without trying to fill a
++/// Unless `Options::parallel_chunks` or `Options::merge_blocks` is set, which
++/// hold data back until later writes or [`finish`](DeflateEncoder::finish),
++/// the data will be compressed as soon as possible, without trying to fill a
+ /// backreference window. As a consequence, frequent short writes may cause more
+ /// DEFLATE blocks to be emitted with less optimal Huffman trees, which can hurt
+ /// compression and runtime. If they are a concern, short writes can be conveniently
+@@ -40,6 +46,12 @@ pub struct DeflateEncoder<W: Write> {
      chunk_start: usize,
      window_and_chunk: Vec<u8>,
      bitwise_writer: Option<BitwiseWriter<W>>,
@@ -151,19 +219,79 @@ index 4ea62f8..39e5e9e 100644
 +    /// written chunk ends in it.
 +    #[cfg(feature = "std")]
 +    all_chunks: (Vec<u8>, Vec<usize>),
++    /// With `Options::merge_blocks`.
++    merger: BlockMerger,
  }
  
  impl<W: Write> DeflateEncoder<W> {
-@@ -53,6 +60,8 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -53,6 +65,9 @@ impl<W: Write> DeflateEncoder<W> {
              chunk_start: 0,
              window_and_chunk: Vec::with_capacity(ZOPFLI_WINDOW_SIZE),
              bitwise_writer: Some(BitwiseWriter::new(sink)),
 +            #[cfg(feature = "std")]
 +            all_chunks: (Vec::new(), Vec::new()),
++            merger: BlockMerger::default(),
          }
      }
  
-@@ -127,6 +136,22 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -85,6 +100,31 @@ impl<W: Write> DeflateEncoder<W> {
+     /// available.
+     #[inline]
+     fn compress_chunk(&mut self, is_last: bool) -> Result<(), Error> {
++        if self.options.merge_blocks && self.btype == BlockType::Dynamic {
++            let (lz77, splitpoints) = blocksplit_plan(
++                &self.options,
++                &self.window_and_chunk,
++                self.chunk_start,
++                self.window_and_chunk.len(),
++            );
++            let writer = self.bitwise_writer.as_mut().unwrap();
++            let mut last = 0;
++            for &item in splitpoints.iter().chain(iter::once(&lz77.size())) {
++                self.merger.push(
++                    self.options.final_block_trials,
++                    &self.window_and_chunk,
++                    &lz77,
++                    last,
++                    item,
++                    writer,
++                )?;
++                last = item;
++            }
++            if is_last {
++                self.merger.finish(&self.window_and_chunk, writer)?;
++            }
++            return Ok(());
++        }
+         deflate_part(
+             &self.options,
+             self.btype,
+@@ -103,13 +143,17 @@ impl<W: Write> DeflateEncoder<W> {
+         // Remove bytes exceeding the window size. Start with the
+         // oldest bytes, which are at the beginning of the buffer.
+         // The buffer length is then the position where the chunk
+-        // we've just received starts
+-        self.window_and_chunk.drain(
+-            ..self
+-                .window_and_chunk
+-                .len()
+-                .saturating_sub(ZOPFLI_WINDOW_SIZE),
+-        );
++        // we've just received starts. A block held back for merging keeps
++        // its bytes and the window before them in the buffer.
++        let mut dropped = self
++            .window_and_chunk
++            .len()
++            .saturating_sub(ZOPFLI_WINDOW_SIZE);
++        if let Some(start) = self.merger.start() {
++            dropped = cmp::min(dropped, start.saturating_sub(ZOPFLI_WINDOW_SIZE));
++        }
++        self.window_and_chunk.drain(..dropped);
++        self.merger.shift_positions(dropped);
+         self.chunk_start = self.window_and_chunk.len();
+ 
+         self.window_and_chunk.extend_from_slice(chunk);
+@@ -127,6 +171,22 @@ impl<W: Write> DeflateEncoder<W> {
              return Ok(None);
          }
  
@@ -186,7 +314,7 @@ index 4ea62f8..39e5e9e 100644
          self.compress_chunk(true)?;
  
          let mut bitwise_writer = self.bitwise_writer.take().unwrap();
-@@ -151,6 +176,14 @@ impl<W: Write> DeflateEncoder<W> {
+@@ -151,6 +211,14 @@ impl<W: Write> DeflateEncoder<W> {
  
  impl<W: Write> Write for DeflateEncoder<W> {
      fn write(&mut self, buf: &[u8]) -> Result<usize, Error> {
@@ -201,7 +329,7 @@ index 4ea62f8..39e5e9e 100644
          // Any previous chunk is known to be non-last at this point,
          // so compress it now
          if self.have_chunk {
-@@ -286,7 +319,7 @@ fn fixed_tree() -> (Vec<u32>, Vec<u32>) {
+@@ -286,7 +354,7 @@ fn fixed_tree() -> (Vec<u32>, Vec<u32>) {
  /// Changes the population counts in a way that the consequent Huffman tree
  /// compression, especially its rle-part, will be more likely to compress this data
  /// more efficiently. length contains the size of the histogram.
@@ -210,10 +338,10 @@ index 4ea62f8..39e5e9e 100644
      let mut length = counts.len();
      // 1) We don't want to touch the trailing zeros. We may break the
      // rules of the format by adding more data in the distance codes.
-@@ -808,6 +841,31 @@ fn add_dynamic_tree<W: Write>(
+@@ -807,6 +875,31 @@ fn add_dynamic_tree<W: Write>(
+     .map(|_| ())
  }
  
- /// Adds a deflate block with the given LZ77 data to the output.
 +/// Runs `lz77_optimal` on one block; with the match cache, the longest match
 +/// cache is not needed.
 +fn lz77_optimal_block(
@@ -223,7 +351,7 @@ index 4ea62f8..39e5e9e 100644
 +    inend: usize,
 +    chunk: Option<(&MatchCache, usize)>,
 +) -> Lz77Store {
-+    if options.match_cache && MatchCache::fits(inend - instart) {
++    if uses_match_cache(options, inend - instart) {
 +        let prefilled =
 +            chunk.map(|(c, chunkstart)| block_match_cache(c, chunkstart, in_data, instart, inend));
 +        lz77_optimal(&mut NoCache, in_data, instart, inend, options, prefilled)
@@ -239,10 +367,10 @@ index 4ea62f8..39e5e9e 100644
 +    }
 +}
 +
+ /// Adds a deflate block with the given LZ77 data to the output.
  /// `options`: global program options
  /// `btype`: the block type, must be `Fixed` or `Dynamic`
- /// `final`: whether to set the "final" bit on this block, must be the last block
-@@ -1056,6 +1114,7 @@ fn add_lz77_data<W: Write>(
+@@ -1056,6 +1149,7 @@ fn add_lz77_data<W: Write>(
  
  #[allow(clippy::too_many_arguments)] // Not feasible to refactor in a more readable way
  fn add_lz77_block_auto_type<W: Write>(
@@ -250,35 +378,339 @@ index 4ea62f8..39e5e9e 100644
      final_block: bool,
      in_data: &[u8],
      lz77: &Lz77Store,
-@@ -1066,7 +1125,12 @@ fn add_lz77_block_auto_type<W: Write>(
+@@ -1064,40 +1158,246 @@ fn add_lz77_block_auto_type<W: Write>(
+     expected_data_size: usize,
+     bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
++    if lstart == lend {
++        /* Smallest empty block is represented by fixed block */
++        bitwise_writer.add_bits(u32::from(final_block), 1)?;
++        bitwise_writer.add_bits(1, 2)?; /* btype 01 */
++        bitwise_writer.add_bits(0, 7)?; /* end symbol has code 0000000 */
++        return Ok(());
++    }
++    let (_, encoding) = choose_block_encoding(trials, in_data, lz77, lstart, lend, lz77.size());
++    write_block_encoding(
++        final_block,
++        in_data,
++        lz77,
++        lstart,
++        lend,
++        expected_data_size,
++        encoding,
++        bitwise_writer,
++    )
++}
++
++/// Holds back the last block so that the next one can be joined to it when
++/// `choose_block_encoding` finds one block cheaper than the two.
++#[derive(Default)]
++struct BlockMerger {
++    pending: Option<Pending>,
++}
++
++/// A held-back block: its LZ77 data, estimated bits, chosen encoding, and how
++/// many pushed blocks it joins.
++struct Pending {
++    store: Lz77Store,
++    bits: f64,
++    encoding: BlockEncoding,
++    joined: usize,
++}
++
++/// At most this many pushed blocks are joined into one, which bounds the work
++/// and memory of each `push` by that many blocks.
++const MAX_JOINED_BLOCKS: usize = 16;
++
++impl BlockMerger {
++    /// Takes the block `lstart..lend` of `lz77`; writes the block before it if
++    /// the two stay apart. Blocks written uncompressed are never joined: only
++    /// for them the estimated bits can differ from the written ones.
++    fn push<W: Write>(
++        &mut self,
++        trials: bool,
++        in_data: &[u8],
++        lz77: &Lz77Store,
++        lstart: usize,
++        lend: usize,
++        bitwise_writer: &mut BitwiseWriter<W>,
++    ) -> Result<(), Error> {
++        if lstart == lend {
++            return Ok(());
++        }
++        let mut store = Lz77Store::new();
++        for i in lstart..lend {
++            store.append_store_item(lz77.litlens[i], lz77.pos[i]);
++        }
++        // Chosen exactly as `add_lz77_block_auto_type` chooses for the block of
++        // `lz77`, so that blocks that stay apart are written as without merging.
++        let (bits, encoding) =
++            choose_block_encoding(trials, in_data, &store, 0, store.size(), lz77.size());
++        let block = Pending {
++            store,
++            bits,
++            encoding,
++            joined: 1,
++        };
++        let Some(pending) = self.pending.take() else {
++            self.pending = Some(block);
++            return Ok(());
++        };
++        if pending.joined < MAX_JOINED_BLOCKS
++            && !matches!(pending.encoding, BlockEncoding::Uncompressed)
++            && !matches!(block.encoding, BlockEncoding::Uncompressed)
++        {
++            let mut merged = pending.store.clone();
++            for (&litlen, &pos) in block.store.litlens.iter().zip(&block.store.pos) {
++                merged.append_store_item(litlen, pos);
++            }
++            let (merged_bits, merged_encoding) =
++                choose_block_encoding(trials, in_data, &merged, 0, merged.size(), merged.size());
++            if merged_bits < pending.bits + block.bits
++                && !matches!(merged_encoding, BlockEncoding::Uncompressed)
++            {
++                self.pending = Some(Pending {
++                    store: merged,
++                    bits: merged_bits,
++                    encoding: merged_encoding,
++                    joined: pending.joined + 1,
++                });
++                return Ok(());
++            }
++        }
++        write_block_encoding(
++            false,
++            in_data,
++            &pending.store,
++            0,
++            pending.store.size(),
++            0,
++            pending.encoding,
++            bitwise_writer,
++        )?;
++        self.pending = Some(block);
++        Ok(())
++    }
++
++    /// Writes the held-back block as the final one (an empty final block if
++    /// there is none).
++    fn finish<W: Write>(
++        &mut self,
++        in_data: &[u8],
++        bitwise_writer: &mut BitwiseWriter<W>,
++    ) -> Result<(), Error> {
++        match self.pending.take() {
++            Some(pending) => write_block_encoding(
++                true,
++                in_data,
++                &pending.store,
++                0,
++                pending.store.size(),
++                0,
++                pending.encoding,
++                bitwise_writer,
++            ),
++            None => add_lz77_block_auto_type(
++                false,
++                true,
++                in_data,
++                &Lz77Store::new(),
++                0,
++                0,
++                0,
++                bitwise_writer,
++            ),
++        }
++    }
++
++    /// Where the held-back block starts in the input buffer.
++    fn start(&self) -> Option<usize> {
++        self.pending.as_ref().map(|pending| pending.store.pos[0])
++    }
++
++    /// See `Lz77Store::shift_positions`.
++    fn shift_positions(&mut self, by: usize) {
++        if let Some(Pending {
++            store, encoding, ..
++        }) = &mut self.pending
++        {
++            store.shift_positions(by);
++            match encoding {
++                BlockEncoding::Fixed(Some(store)) | BlockEncoding::Dynamic(Some((store, _, _))) => {
++                    store.shift_positions(by);
++                }
++                _ => {}
++            }
++        }
++    }
++}
++
++/// How `add_lz77_block_auto_type` writes a block.
++enum BlockEncoding {
++    Uncompressed,
++    /// With the LZ77 data recalculated for the fixed tree, if it was.
++    Fixed(Option<Lz77Store>),
++    /// With the result of `dynamic_block_trials`, if they ran.
++    Dynamic(Option<(Lz77Store, Vec<u32>, Vec<u32>)>),
++}
++
++/// The cheapest way to write the block `lstart..lend` (not empty) and its
++/// estimated size in bits. `store_size` is the size of the LZ77 data the block
++/// was cut from; below 1000 symbols the block is always also tried with the
++/// fixed tree.
++fn choose_block_encoding(
++    trials: bool,
++    in_data: &[u8],
++    lz77: &Lz77Store,
++    lstart: usize,
++    lend: usize,
++    store_size: usize,
++) -> (f64, BlockEncoding) {
      let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
      let mut fixedcost = calculate_block_size(lz77, lstart, lend, BlockType::Fixed);
 -    let dyncost = calculate_block_size(lz77, lstart, lend, BlockType::Dynamic);
 +    let mut dyncost = calculate_block_size(lz77, lstart, lend, BlockType::Dynamic);
-+    let tried =
-+        (trials && lstart != lend).then(|| dynamic_block_trials(in_data, lz77, lstart, lend));
-+    if let Some((bits, _, _, _)) = &tried {
-+        dyncost = dyncost.min(*bits as f64 + 3.0);
-+    }
  
      /* Whether to perform the expensive calculation of creating an optimal block
      with fixed huffman tree to check if smaller. Only do this for small blocks or
-@@ -1131,6 +1195,8 @@ fn add_lz77_block_auto_type<W: Write>(
+     blocks which already are pretty good with fixed huffman tree. */
+-    let expensivefixed = (lz77.size() < 1000) || fixedcost <= dyncost * 1.1;
++    let expensivefixed = (store_size < 1000) || fixedcost <= dyncost * 1.1;
+ 
+-    let mut fixedstore = Lz77Store::new();
+-    if lstart == lend {
+-        /* Smallest empty block is represented by fixed block */
+-        bitwise_writer.add_bits(u32::from(final_block), 1)?;
+-        bitwise_writer.add_bits(1, 2)?; /* btype 01 */
+-        bitwise_writer.add_bits(0, 7)?; /* end symbol has code 0000000 */
+-        return Ok(());
++    // Decided before the trials, so that they only ever add a smaller choice.
++    let tried = trials.then(|| dynamic_block_trials(in_data, lz77, lstart, lend));
++    if let Some((bits, _, _, _)) = &tried {
++        dyncost = dyncost.min(*bits as f64 + 3.0);
+     }
++
++    let mut fixedstore = None;
+     if expensivefixed {
+         /* Recalculate the LZ77 with lz77_optimal_fixed */
+         let instart = lz77.pos[lstart];
+         let inend = instart + lz77.get_byte_range(lstart, lend);
+-
++        let mut store = Lz77Store::new();
+         lz77_optimal_fixed(
+             &mut ZopfliLongestMatchCache::new(inend - instart),
+             in_data,
+             instart,
+             inend,
+-            &mut fixedstore,
++            &mut store,
+         );
+-        fixedcost = calculate_block_size(&fixedstore, 0, fixedstore.size(), BlockType::Fixed);
++        fixedcost = calculate_block_size(&store, 0, store.size(), BlockType::Fixed);
++        fixedstore = Some(store);
+     }
+ 
+     if uncompressedcost <= fixedcost && uncompressedcost <= dyncost {
+-        add_lz77_block(
++        (uncompressedcost, BlockEncoding::Uncompressed)
++    } else if fixedcost <= dyncost {
++        (fixedcost, BlockEncoding::Fixed(fixedstore))
++    } else {
++        let tried = tried.map(|(_, store, ll, d)| (store, ll, d));
++        (dyncost, BlockEncoding::Dynamic(tried))
++    }
++}
++
++/// Writes the block `lstart..lend` the way `choose_block_encoding` chose.
++#[allow(clippy::too_many_arguments)]
++fn write_block_encoding<W: Write>(
++    final_block: bool,
++    in_data: &[u8],
++    lz77: &Lz77Store,
++    lstart: usize,
++    lend: usize,
++    expected_data_size: usize,
++    encoding: BlockEncoding,
++    bitwise_writer: &mut BitwiseWriter<W>,
++) -> Result<(), Error> {
++    match encoding {
++        BlockEncoding::Uncompressed => add_lz77_block(
+             BlockType::Uncompressed,
+             final_block,
+             in_data,
+@@ -1106,33 +1406,37 @@ fn add_lz77_block_auto_type<W: Write>(
+             lend,
+             expected_data_size,
+             bitwise_writer,
+-        )
+-    } else if fixedcost <= dyncost {
+-        if expensivefixed {
+-            add_lz77_block(
+-                BlockType::Fixed,
+-                final_block,
+-                in_data,
+-                &fixedstore,
+-                0,
+-                fixedstore.size(),
+-                expected_data_size,
+-                bitwise_writer,
+-            )
+-        } else {
+-            add_lz77_block(
+-                BlockType::Fixed,
++        ),
++        BlockEncoding::Fixed(Some(fixedstore)) => add_lz77_block(
++            BlockType::Fixed,
++            final_block,
++            in_data,
++            &fixedstore,
++            0,
++            fixedstore.size(),
++            expected_data_size,
++            bitwise_writer,
++        ),
++        BlockEncoding::Fixed(None) => add_lz77_block(
++            BlockType::Fixed,
++            final_block,
++            in_data,
++            lz77,
++            lstart,
++            lend,
++            expected_data_size,
++            bitwise_writer,
++        ),
++        BlockEncoding::Dynamic(Some((store, ll_lengths, d_lengths))) => {
++            add_dynamic_block_with_lengths(
+                 final_block,
+-                in_data,
+-                lz77,
+-                lstart,
+-                lend,
+-                expected_data_size,
++                &store,
++                &ll_lengths,
++                &d_lengths,
                  bitwise_writer,
              )
          }
-+    } else if let Some((_, store, ll_lengths, d_lengths)) = tried {
-+        add_dynamic_block_with_lengths(final_block, &store, &ll_lengths, &d_lengths, bitwise_writer)
-     } else {
-         add_lz77_block(
+-    } else {
+-        add_lz77_block(
++        BlockEncoding::Dynamic(None) => add_lz77_block(
              BlockType::Dynamic,
-@@ -1145,6 +1211,230 @@ fn add_lz77_block_auto_type<W: Write>(
-     }
- }
- 
-+/// Smooths counts for run-length coding of the code lengths, the way Brotli
-+/// does (24.8 fixed point); an alternative to `optimize_huffman_for_rle`.
+             final_block,
+             in_data,
+@@ -1141,8 +1445,233 @@ fn add_lz77_block_auto_type<W: Write>(
+             lend,
+             expected_data_size,
+             bitwise_writer,
+-        )
++        ),
++    }
++}
++
++/// Smooths counts for run-length coding of the code lengths: the core of
++/// Brotli's `OptimizeHuffmanCountsForRle` (24.8 fixed point), as the Efficient
++/// Compression Tool uses it; an alternative to `optimize_huffman_for_rle`.
 +fn optimize_huffman_for_rle_brotli(counts: &mut [usize]) {
 +    let n = counts.len();
 +    let mut length = n;
@@ -308,7 +740,7 @@ index 4ea62f8..39e5e9e 100644
 +        } else {
 +            stride += 1;
 +        }
-+    }
+     }
 +
 +    const STREAK_LIMIT: i64 = 1240;
 +    let mut stride: i64 = 0;
@@ -499,12 +931,10 @@ index 4ea62f8..39e5e9e 100644
 +        bitwise_writer,
 +    )?;
 +    bitwise_writer.add_huffman_bits(ll_symbols[256], ll_lengths[256])
-+}
-+
+ }
+ 
  /// Calculates block size in bits, automatically using the best btype.
- pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usize) -> f64 {
-     let uncompressedcost = calculate_block_size(lz77, lstart, lend, BlockType::Uncompressed);
-@@ -1160,6 +1450,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
+@@ -1160,6 +1689,7 @@ pub fn calculate_block_size_auto_type(lz77: &Lz77Store, lstart: usize, lend: usi
  }
  
  fn add_all_blocks<W: Write>(
@@ -512,7 +942,7 @@ index 4ea62f8..39e5e9e 100644
      splitpoints: &[usize],
      lz77: &Lz77Store,
      final_block: bool,
-@@ -1168,10 +1459,11 @@ fn add_all_blocks<W: Write>(
+@@ -1168,10 +1698,11 @@ fn add_all_blocks<W: Write>(
  ) -> Result<(), Error> {
      let mut last = 0;
      for &item in splitpoints {
@@ -525,7 +955,7 @@ index 4ea62f8..39e5e9e 100644
          final_block,
          in_data,
          lz77,
-@@ -1190,32 +1482,62 @@ fn blocksplit_attempt<W: Write>(
+@@ -1190,32 +1721,61 @@ fn blocksplit_attempt<W: Write>(
      inend: usize,
      bitwise_writer: &mut BitwiseWriter<W>,
  ) -> Result<(), Error> {
@@ -563,9 +993,8 @@ index 4ea62f8..39e5e9e 100644
 -    );
 +    // With the tree match finder, the matches of the whole range are found once,
 +    // for the block splitting and every block.
-+    let chunk =
-+        (options.match_cache && options.tree_match_finder && MatchCache::fits(inend - instart))
-+            .then(|| fill_match_cache_tree(in_data, instart, inend));
++    let chunk = (options.tree_match_finder && uses_match_cache(options, inend - instart))
++        .then(|| fill_match_cache_tree(in_data, instart, inend));
 +    match &chunk {
 +        Some(c) => {
 +            let mut store = Lz77Store::new();
@@ -603,7 +1032,7 @@ index 4ea62f8..39e5e9e 100644
          totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
          // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1229,14 +1551,7 @@ fn blocksplit_attempt<W: Write>(
+@@ -1229,14 +1789,7 @@ fn blocksplit_attempt<W: Write>(
          last = item;
      }
  
@@ -619,7 +1048,7 @@ index 4ea62f8..39e5e9e 100644
      totalcost += calculate_block_size_auto_type(&store, 0, store.size());
  
      // ZopfliAppendLZ77Store(&store, &lz77);
-@@ -1264,7 +1579,118 @@ fn blocksplit_attempt<W: Write>(
+@@ -1264,7 +1817,155 @@ fn blocksplit_attempt<W: Write>(
          }
      }
  
@@ -683,46 +1112,83 @@ index 4ea62f8..39e5e9e 100644
 +        failed: false,
 +    });
 +    let changed = Condvar::new();
-+    std::thread::scope(|scope| {
-+        for _ in 0..threads {
-+            scope.spawn(|| {
-+                let _guard = PanicGuard(&shared, &changed, ends.len());
-+                loop {
-+                    let k = {
-+                        let mut s = shared.lock().unwrap();
-+                        while s.next < ends.len() && s.next >= s.written + ahead {
-+                            s = changed.wait(s).unwrap();
-+                        }
-+                        if s.next >= ends.len() {
-+                            break;
-+                        }
-+                        s.next += 1;
-+                        s.next - 1
-+                    };
-+                    let plan = blocksplit_plan(options, data, starts[k], ends[k]);
-+                    shared.lock().unwrap().plans[k] = Some(plan);
-+                    changed.notify_all();
-+                }
-+            });
-+        }
++    let work = || {
 +        let _guard = PanicGuard(&shared, &changed, ends.len());
-+        for k in 0..ends.len() {
-+            let (lz77, splitpoints) = {
++        loop {
++            let k = {
 +                let mut s = shared.lock().unwrap();
-+                while s.plans[k].is_none() {
-+                    assert!(!s.failed, "a compression thread panicked");
++                while s.next < ends.len() && s.next >= s.written + ahead {
 +                    s = changed.wait(s).unwrap();
 +                }
-+                s.plans[k].take().unwrap()
++                if s.next >= ends.len() {
++                    break;
++                }
++                s.next += 1;
++                s.next - 1
 +            };
-+            let result = add_all_blocks(
-+                options.final_block_trials,
-+                &splitpoints,
-+                &lz77,
-+                k == ends.len() - 1,
-+                data,
-+                bitwise_writer,
-+            );
++            let plan = blocksplit_plan(options, data, starts[k], ends[k]);
++            shared.lock().unwrap().plans[k] = Some(plan);
++            changed.notify_all();
++        }
++    };
++    std::thread::scope(|scope| {
++        // In place before any worker starts, so that they never wait for a
++        // writer that is gone.
++        let _guard = PanicGuard(&shared, &changed, ends.len());
++        // A worker that can't be started is left out; this thread also works
++        // out chunks itself, so it gets by with none.
++        for _ in 1..threads {
++            if std::thread::Builder::new()
++                .spawn_scoped(scope, work)
++                .is_err()
++            {
++                break;
++            }
++        }
++        let mut merger = BlockMerger::default();
++        for k in 0..ends.len() {
++            let (lz77, splitpoints) = loop {
++                let mut s = shared.lock().unwrap();
++                if let Some(plan) = s.plans[k].take() {
++                    break plan;
++                }
++                assert!(!s.failed, "a compression thread panicked");
++                if s.next == k {
++                    s.next += 1;
++                    drop(s);
++                    break blocksplit_plan(options, data, starts[k], ends[k]);
++                }
++                drop(changed.wait(s).unwrap());
++            };
++            let result = if options.merge_blocks {
++                (|| -> Result<(), Error> {
++                    let mut last = 0;
++                    for &item in splitpoints.iter().chain(iter::once(&lz77.size())) {
++                        merger.push(
++                            options.final_block_trials,
++                            data,
++                            &lz77,
++                            last,
++                            item,
++                            bitwise_writer,
++                        )?;
++                        last = item;
++                    }
++                    if k == ends.len() - 1 {
++                        merger.finish(data, bitwise_writer)?;
++                    }
++                    Ok(())
++                })()
++            } else {
++                add_all_blocks(
++                    options.final_block_trials,
++                    &splitpoints,
++                    &lz77,
++                    k == ends.len() - 1,
++                    data,
++                    bitwise_writer,
++                )
++            };
 +            {
 +                let mut s = shared.lock().unwrap();
 +                s.written = k + 1;
@@ -740,7 +1206,7 @@ index 4ea62f8..39e5e9e 100644
  
  /// Since an uncompressed block can be max 65535 in size, it actually adds
 diff --git a/src/lib.rs b/src/lib.rs
-index 591c608..701b2cf 100644
+index 591c608..76e3989 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
 @@ -55,6 +55,7 @@ use proptest::prelude::*;
@@ -759,12 +1225,14 @@ index 591c608..701b2cf 100644
  #[cfg(not(feature = "std"))]
  mod math;
  mod squeeze;
-@@ -109,6 +111,36 @@ pub struct Options {
+@@ -109,6 +111,47 @@ pub struct Options {
      ///
      /// Default value: 15.
      pub maximum_block_splits: u16,
-+    /// Keeps every match of the first pass over a block, so later passes need no
-+    /// match search. Same output, more memory.
++    /// Finds the matches of each block once and keeps them, so that the
++    /// iterations need no match search. Same output. Replaces the longest match
++    /// cache in this path: 4 bytes per position and 4 per run of equal
++    /// distance, instead of its 28 bytes per position.
 +    ///
 +    /// Default value: true.
 +    pub match_cache: bool,
@@ -793,10 +1261,19 @@ index 591c608..701b2cf 100644
 +    ///
 +    /// Default value: false.
 +    pub parallel_chunks: bool,
++    /// Joins neighbouring blocks, also across the chunks the input arrives in,
++    /// wherever one block is smaller than the two (at most 16 blocks into one;
++    /// blocks stored uncompressed are not joined). Never makes the output
++    /// larger; blocks that are not joined are written as without this option.
++    /// The last block is held back, with its input and the 32 KiB before it,
++    /// until the next one is known. Dynamic blocks only.
++    ///
++    /// Default value: false.
++    pub merge_blocks: bool,
  }
  
  impl Default for Options {
-@@ -117,6 +149,11 @@ impl Default for Options {
+@@ -117,6 +160,12 @@ impl Default for Options {
              iteration_count: NonZeroU64::new(15).unwrap(),
              iterations_without_improvement: NonZeroU64::new(u64::MAX).unwrap(),
              maximum_block_splits: 15,
@@ -805,10 +1282,11 @@ index 591c608..701b2cf 100644
 +            code_length_passes: false,
 +            tree_match_finder: false,
 +            parallel_chunks: false,
++            merge_blocks: false,
          }
      }
  }
-@@ -213,5 +250,82 @@ mod test {
+@@ -213,5 +262,171 @@ mod test {
              let decompressed_data = inflate::decompress_to_vec(&compressed_data).expect("Could not inflate compressed stream");
              prop_assert_eq!(data, decompressed_data, "Decompressed data should match input data");
          }
@@ -816,86 +1294,190 @@ index 591c608..701b2cf 100644
 +        #[test]
 +        fn match_cache_does_not_change_the_output(
 +            iterations in 1..6u64,
-+            runs in prop::collection::vec((0..4u8, 1..1500usize), 0..200)
++            cuts in cuts(),
++            runs in runs(4, 1500, 200)
 +        ) {
-+            // Few symbols and long runs: many matches, and long repetitions of one byte.
-+            let data: Vec<u8> = runs.iter().flat_map(|&(b, n)| core::iter::repeat(b).take(n)).collect();
-+            let compress = |match_cache| {
-+                let options = Options {
-+                    iteration_count: NonZeroU64::new(iterations).unwrap(),
-+                    match_cache,
-+                    ..Options::default()
-+                };
-+                let mut out = Vec::new();
-+                let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, &mut out);
-+                io::copy(&mut &*data, &mut encoder).unwrap();
-+                encoder.finish().unwrap();
-+                out
++            let data = from_runs(&runs);
++            let options = |match_cache| Options {
++                iteration_count: NonZeroU64::new(iterations).unwrap(),
++                match_cache,
++                ..Options::default()
 +            };
-+            prop_assert_eq!(compress(true), compress(false));
++            prop_assert_eq!(
++                compress_in_pieces(options(true), &data, &cuts),
++                compress_in_pieces(options(false), &data, &cuts)
++            );
 +        }
 +
 +        #[test]
 +        fn parallel_chunks_do_not_change_the_output(
 +            others: bool,
-+            cuts in prop::collection::vec(0..1usize << 20, 0..5),
-+            runs in prop::collection::vec((0..6u8, 1..3000usize), 0..400)
++            merge_blocks: bool,
++            cuts in cuts(),
++            runs in runs(6, 3000, 400)
 +        ) {
-+            let data: Vec<u8> = runs.iter().flat_map(|&(b, n)| core::iter::repeat(b).take(n)).collect();
-+            let mut cuts: Vec<usize> = cuts.into_iter().map(|c| c % (data.len() + 1)).collect();
-+            cuts.sort_unstable();
-+            let compress = |parallel_chunks| {
-+                let options = Options {
-+                    iteration_count: NonZeroU64::new(2).unwrap(),
-+                    final_block_trials: others,
-+                    code_length_passes: others,
-+                    tree_match_finder: others,
-+                    parallel_chunks,
-+                    ..Options::default()
-+                };
-+                let mut out = Vec::new();
-+                let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, &mut out);
-+                let mut last = 0;
-+                for &cut in cuts.iter().chain(core::iter::once(&data.len())) {
-+                    encoder.write_all(&data[last..cut]).unwrap();
-+                    last = cut;
-+                }
-+                encoder.finish().unwrap();
-+                out
++            let data = from_runs(&runs);
++            let options = |parallel_chunks| Options {
++                iteration_count: NonZeroU64::new(2).unwrap(),
++                final_block_trials: others,
++                code_length_passes: others,
++                tree_match_finder: others,
++                parallel_chunks,
++                merge_blocks,
++                ..Options::default()
 +            };
-+            let parallel = compress(true);
-+            prop_assert_eq!(&parallel, &compress(false));
++            let parallel = compress_in_pieces(options(true), &data, &cuts);
++            prop_assert_eq!(&parallel, &compress_in_pieces(options(false), &data, &cuts));
 +            let decompressed = inflate::decompress_to_vec(&parallel).expect("Could not inflate compressed stream");
++            prop_assert_eq!(data, decompressed);
++        }
++
++        #[test]
++        fn merging_blocks_never_makes_the_output_larger(
++            others: bool,
++            cuts in cuts(),
++            runs in runs(6, 3000, 400)
++        ) {
++            let data = from_runs(&runs);
++            let options = |merge_blocks| Options {
++                iteration_count: NonZeroU64::new(2).unwrap(),
++                final_block_trials: others,
++                code_length_passes: others,
++                tree_match_finder: others,
++                merge_blocks,
++                ..Options::default()
++            };
++            let merged = compress_in_pieces(options(true), &data, &cuts);
++            prop_assert!(merged.len() <= compress_in_pieces(options(false), &data, &cuts).len());
++            let decompressed = inflate::decompress_to_vec(&merged).expect("Could not inflate compressed stream");
 +            prop_assert_eq!(data, decompressed);
 +        }
 +
 +        #[test]
 +        fn all_options_are_reversible(
 +            iterations in 1..5u64,
-+            runs in prop::collection::vec((0..6u8, 1..1500usize), 0..300)
++            cuts in cuts(),
++            runs in runs(6, 1500, 300)
 +        ) {
-+            let data: Vec<u8> = runs.iter().flat_map(|&(b, n)| core::iter::repeat(b).take(n)).collect();
++            let data = from_runs(&runs);
 +            let options = Options {
 +                iteration_count: NonZeroU64::new(iterations).unwrap(),
 +                final_block_trials: true,
 +                code_length_passes: true,
 +                tree_match_finder: true,
++                merge_blocks: true,
 +                ..Options::default()
 +            };
-+            let mut compressed = Vec::new();
-+            let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, &mut compressed);
-+            io::copy(&mut &*data, &mut encoder).unwrap();
-+            encoder.finish().unwrap();
++            let compressed = compress_in_pieces(options, &data, &cuts);
 +            let decompressed = inflate::decompress_to_vec(&compressed).expect("Could not inflate compressed stream");
 +            prop_assert_eq!(data, decompressed);
 +        }
++    }
++
++    /// A sink that fails once `room` bytes are written.
++    struct Failing {
++        room: usize,
++    }
++
++    impl io::Write for Failing {
++        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
++            if buf.len() > self.room {
++                return Err(io::Error::new(io::ErrorKind::Other, "full"));
++            }
++            self.room -= buf.len();
++            Ok(buf.len())
++        }
++
++        fn flush(&mut self) -> io::Result<()> {
++            Ok(())
++        }
++    }
++
++    #[test]
++    fn parallel_chunks_report_a_failing_sink() {
++        let data = from_runs(
++            &(0..3000)
++                .map(|i| ((i % 7) as u8, 1 + i % 900))
++                .collect::<Vec<_>>(),
++        );
++        for merge_blocks in [false, true] {
++            let options = Options {
++                iteration_count: NonZeroU64::new(1).unwrap(),
++                parallel_chunks: true,
++                merge_blocks,
++                ..Options::default()
++            };
++            let mut encoder =
++                DeflateEncoder::new(options, BlockType::Dynamic, Failing { room: 100 });
++            for piece in data.chunks(64 * 1024) {
++                encoder.write_all(piece).unwrap();
++            }
++            assert!(encoder.finish().is_err());
++        }
++    }
++
++    /// Data from runs of one of `symbols` byte values, each up to `longest`
++    /// long: many matches, and long repetitions of one byte.
++    fn runs(symbols: u8, longest: usize, count: usize) -> impl Strategy<Value = Vec<(u8, usize)>> {
++        prop::collection::vec((0..symbols, 1..longest), 0..count)
++    }
++
++    fn from_runs(runs: &[(u8, usize)]) -> Vec<u8> {
++        runs.iter()
++            .flat_map(|&(b, n)| core::iter::repeat(b).take(n))
++            .collect()
++    }
++
++    /// Where to cut the input into separate writes, as fractions of its length
++    /// (in 1/1024); equal cuts give empty writes.
++    fn cuts() -> impl Strategy<Value = Vec<usize>> {
++        prop::collection::vec(0..=1024usize, 0..6)
++    }
++
++    /// Compresses `data` with one `write` call per piece between the `cuts`,
++    /// including empty ones, so that the encoder sees several chunks.
++    fn compress_in_pieces(options: Options, data: &[u8], cuts: &[usize]) -> Vec<u8> {
++        let mut cuts: Vec<usize> = cuts.iter().map(|&c| c * data.len() / 1024).collect();
++        cuts.sort_unstable();
++        let mut out = Vec::new();
++        let mut encoder = DeflateEncoder::new(options, BlockType::Dynamic, &mut out);
++        let mut last = 0;
++        for &cut in cuts.iter().chain(core::iter::once(&data.len())) {
++            let mut piece = &data[last..cut];
++            // `write_all` skips empty pieces; `write` hands them over.
++            if piece.is_empty() {
++                assert_eq!(encoder.write(piece).unwrap(), 0);
++            }
++            while !piece.is_empty() {
++                let n = encoder.write(piece).unwrap();
++                piece = &piece[n..];
++            }
++            last = cut;
++        }
++        encoder.finish().unwrap();
++        out
      }
  }
 diff --git a/src/lz77.rs b/src/lz77.rs
-index f3f2d23..9ef425b 100644
+index f3f2d23..4f6a694 100644
 --- a/src/lz77.rs
 +++ b/src/lz77.rs
-@@ -499,7 +499,7 @@ pub fn find_longest_match<C: Cache>(
+@@ -119,6 +119,14 @@ impl Lz77Store {
+         }
+     }
+ 
++    /// Moves every position `by` bytes towards the start, for when that many
++    /// bytes are dropped from the front of the input buffer.
++    pub fn shift_positions(&mut self, by: usize) {
++        for pos in &mut self.pos {
++            *pos -= by;
++        }
++    }
++
+     pub fn lit_len_dist(&mut self, length: u16, dist: u16, pos: usize) {
+         let litlen = if dist == 0 {
+             LitLen::Literal(length)
+@@ -499,7 +507,7 @@ pub fn find_longest_match<C: Cache>(
      longest_match
  }
  
@@ -904,7 +1486,7 @@ index f3f2d23..9ef425b 100644
      h: &ZopfliHash,
      array: &[u8],
      pos: usize,
-@@ -617,7 +617,7 @@ fn find_longest_match_loop(
+@@ -617,7 +625,7 @@ fn find_longest_match_loop(
  ///  rather unpredictable way
  /// -the first zopfli run, so it affects the chance of the first run being closer
  ///  to the optimal output
@@ -913,7 +1495,7 @@ index f3f2d23..9ef425b 100644
      // At 1024, the distance uses 9+ extra bits and this seems to be the sweet spot
      // on tested files.
      if distance > 1024 {
-@@ -628,7 +628,7 @@ const fn get_length_score(length: i32, distance: i32) -> i32 {
+@@ -628,7 +636,7 @@ const fn get_length_score(length: i32, distance: i32) -> i32 {
  }
  
  #[cfg(debug_assertions)]
@@ -922,7 +1504,7 @@ index f3f2d23..9ef425b 100644
      for i in 0..length {
          let d1 = data[pos - (dist as usize) + (i as usize)];
          let d2 = data[pos + (i as usize)];
-@@ -640,4 +640,4 @@ fn verify_len_dist(data: &[u8], pos: usize, dist: u16, length: u16) {
+@@ -640,4 +648,4 @@ fn verify_len_dist(data: &[u8], pos: usize, dist: u16, length: u16) {
  }
  
  #[cfg(not(debug_assertions))]
@@ -930,7 +1512,7 @@ index f3f2d23..9ef425b 100644
 +pub(crate) fn verify_len_dist(_data: &[u8], _pos: usize, _dist: u16, _length: u16) {}
 diff --git a/src/matches.rs b/src/matches.rs
 new file mode 100644
-index 0000000..66f6334
+index 0000000..eca6c34
 --- /dev/null
 +++ b/src/matches.rs
 @@ -0,0 +1,100 @@
@@ -938,11 +1520,11 @@ index 0000000..66f6334
 +
 +use crate::util::{ZOPFLI_MAX_MATCH, ZOPFLI_MIN_MATCH};
 +
-+/// Every match the first forward pass of a block found, so that later passes
-+/// over the same block need no hashing and no match search. For each position
-+/// it keeps the distance for every length up to the longest match, as runs of
-+/// `(last length << 16) | distance`, and where the pass skipped ahead through a
-+/// long repetition of one byte.
++/// Every match of a block, found once in a pass of its own, so that the
++/// passes over the block need no hashing and no match search. For each
++/// position it keeps the distance for every length up to the longest match,
++/// as runs of `(last length << 16) | distance`, and where the forward pass
++/// skips ahead through a long repetition of one byte.
 +pub struct MatchCache {
 +    start: Vec<u32>,
 +    entries: Vec<u32>,
@@ -950,10 +1532,10 @@ index 0000000..66f6334
 +}
 +
 +impl MatchCache {
-+    /// Whether a range of `size` positions fits: every position has at most
-+    /// `ZOPFLI_MAX_MATCH + 1` runs, and positions are counted in `u32`.
++    /// Whether a range of `size` positions fits: every position has at most one
++    /// run per match length (3 to 258), and runs are counted in `u32`.
 +    pub const fn fits(size: usize) -> bool {
-+        size <= u32::MAX as usize / (ZOPFLI_MAX_MATCH + 1)
++        size <= u32::MAX as usize / (ZOPFLI_MAX_MATCH - ZOPFLI_MIN_MATCH + 1)
 +    }
 +
 +    pub fn new(blocksize: usize) -> Self {
@@ -1035,7 +1617,7 @@ index 0000000..66f6334
 +    }
 +}
 diff --git a/src/squeeze.rs b/src/squeeze.rs
-index 0f66357..710e384 100644
+index 0f66357..2456214 100644
 --- a/src/squeeze.rs
 +++ b/src/squeeze.rs
 @@ -14,12 +14,22 @@ use core::cmp;
@@ -1065,12 +1647,13 @@ index 0f66357..710e384 100644
  };
  
  #[cfg(not(feature = "std"))]
-@@ -166,6 +176,29 @@ impl SymbolStats {
+@@ -166,6 +176,30 @@ impl SymbolStats {
          self.calculate_entropy();
      }
  
 +    /// Sets the costs to the code lengths a dynamic block would use for these
-+    /// counts (after the RLE adjustment of the counts).
++    /// counts (after the RLE adjustment of the counts). A symbol without a code
++    /// gets the longest code length, 15 bits: using it would need a new code.
 +    fn use_code_lengths(&mut self, from: &Self) {
 +        let mut litlens = from.litlens;
 +        let mut dists = from.dists;
@@ -1081,21 +1664,21 @@ index 0f66357..710e384 100644
 +            .iter_mut()
 +            .zip(length_limited_code_lengths(&litlens, 15))
 +        {
-+            *cost = f64::from(bits);
++            *cost = if bits == 0 { 15.0 } else { f64::from(bits) };
 +        }
 +        for (cost, bits) in self
 +            .d_symbols
 +            .iter_mut()
 +            .zip(length_limited_code_lengths(&dists, 15))
 +        {
-+            *cost = f64::from(bits);
++            *cost = if bits == 0 { 15.0 } else { f64::from(bits) };
 +        }
 +    }
 +
      fn clear_freqs(&mut self) {
          self.litlens = [0; ZOPFLI_NUM_LL];
          self.dists = [0; ZOPFLI_NUM_D];
-@@ -191,6 +224,15 @@ fn add_weighed_stat_freqs(
+@@ -191,6 +225,15 @@ fn add_weighed_stat_freqs(
      result
  }
  
@@ -1111,7 +1694,7 @@ index 0f66357..710e384 100644
  /// Finds the minimum possible cost this cost model can return for valid length and
  /// distance symbols.
  fn get_cost_model_min_cost<F: Fn(usize, u16) -> f64>(costmodel: F) -> f64 {
-@@ -202,11 +244,6 @@ fn get_cost_model_min_cost<F: Fn(usize, u16) -> f64>(costmodel: F) -> f64 {
+@@ -202,11 +245,6 @@ fn get_cost_model_min_cost<F: Fn(usize, u16) -> f64>(costmodel: F) -> f64 {
      // different symbols affect the cost model so only these need to be checked.
      // See RFC 1951 section 3.2.5. Compressed blocks (length and distance codes).
  
@@ -1123,7 +1706,7 @@ index 0f66357..710e384 100644
      let mut mincost = f64::INFINITY;
      for i in 3..259 {
          let c = costmodel(i, 1);
-@@ -344,6 +381,345 @@ fn get_best_lengths<F: Fn(usize, u16) -> f64, C: Cache>(
+@@ -344,6 +382,353 @@ fn get_best_lengths<F: Fn(usize, u16) -> f64, C: Cache>(
      (f64::from(costs[blocksize]), length_array)
  }
  
@@ -1214,6 +1797,13 @@ index 0f66357..710e384 100644
 +        }
 +    }
 +
++    /// Whether the byte before `i` and the bytes from `i` up to the longest
++    /// match there are all the same (see `BinaryTree::insert`).
++    fn repeats_before(&self, i: usize) -> bool {
++        let limit = cmp::min(ZOPFLI_MAX_MATCH, self.inend - i);
++        i > self.runstart && usize::from(self.same[i - 1 - self.runstart]) >= limit
++    }
++
 +    /// The same test as in `get_best_lengths`; then the `ZOPFLI_MAX_MATCH`
 +    /// positions from `i` on all have a match of that length at distance 1.
 +    fn starts_at(&self, i: usize) -> bool {
@@ -1274,7 +1864,7 @@ index 0f66357..710e384 100644
 +    let arr = &in_data[..inend];
 +    let mut tree = BinaryTree::new(windowstart);
 +    for i in windowstart..instart {
-+        tree.insert(arr, i, inend, None);
++        tree.insert(arr, i, inend, false, None);
 +    }
 +
 +    let runs_at = LongRuns::new(arr, instart, inend);
@@ -1284,13 +1874,13 @@ index 0f66357..710e384 100644
 +        if runs_at.starts_at(i) {
 +            m.mark_run(i - instart);
 +            for _ in 0..ZOPFLI_MAX_MATCH {
-+                tree.insert(arr, i, inend, None);
++                tree.insert(arr, i, inend, runs_at.repeats_before(i), None);
 +                m.push_one(1, ZOPFLI_MAX_MATCH);
 +                i += 1;
 +            }
 +        }
 +        runs.clear();
-+        tree.insert(arr, i, inend, Some(&mut runs));
++        tree.insert(arr, i, inend, runs_at.repeats_before(i), Some(&mut runs));
 +        m.push_runs(&runs);
 +        i += 1;
 +    }
@@ -1394,6 +1984,7 @@ index 0f66357..710e384 100644
 +        *cost = costmodel(c, 0);
 +    }
 +
++    let mincost = get_cost_model_min_cost(&costmodel);
 +    let mut j = 0;
 +    while j < blocksize {
 +        if m.is_run(j) {
@@ -1414,10 +2005,10 @@ index 0f66357..710e384 100644
 +            costs[j + 1] = new_cost as f32;
 +            length_array[j + 1] = 1;
 +        }
-+        // Lengths.
-+        // `get_best_lengths` skips lengths whose cost is already at most the
-+        // cheapest possible match; the comparison below fails for them anyway, so
-+        // the loop does without that test and without branches.
++        // Lengths. Like `get_best_lengths`, leaves alone every length whose cost
++        // is already at most that of the cheapest match; both tests are
++        // combined without branches.
++        let mincostaddcostj = mincost + costj;
 +        let kend = inend - i;
 +        let mut k = ZOPFLI_MIN_MATCH;
 +        for &e in m.matches(j) {
@@ -1431,7 +2022,7 @@ index 0f66357..710e384 100644
 +            let lengths = &mut length_array[j + k..=j + last];
 +            for (n, ((&cost, old), length)) in row.iter().zip(reach).zip(lengths).enumerate() {
 +                let new_cost = cost + costj;
-+                let better = new_cost < f64::from(*old);
++                let better = (f64::from(*old) > mincostaddcostj) & (new_cost < f64::from(*old));
 +                *old = if better { new_cost as f32 } else { *old };
 +                *length = if better { (k + n) as u16 } else { *length };
 +            }
@@ -1469,7 +2060,20 @@ index 0f66357..710e384 100644
  /// Calculates the optimal path of lz77 lengths to use, from the calculated
  /// `length_array`. The `length_array` must contain the optimal length to reach that
  /// byte. The path will be filled with the lengths to use, so its data size will be
-@@ -432,19 +808,33 @@ pub fn lz77_optimal<C: Cache>(
+@@ -424,6 +809,12 @@ pub fn lz77_optimal_fixed<C: Cache>(
+     );
+ }
+ 
++/// Whether `lz77_optimal` keeps the matches of a block of `size` positions in a
++/// `MatchCache`.
++pub fn uses_match_cache(options: &Options, size: usize) -> bool {
++    options.match_cache && MatchCache::fits(size)
++}
++
+ /// Calculates lit/len and dist pairs for given data.
+ /// If `instart` is larger than 0, it uses values before `instart` as starting
+ /// dictionary.
+@@ -432,19 +823,34 @@ pub fn lz77_optimal<C: Cache>(
      in_data: &[u8],
      instart: usize,
      inend: usize,
@@ -1480,16 +2084,17 @@ index 0f66357..710e384 100644
  ) -> Lz77Store {
 +    let max_iterations = options.iteration_count.get();
 +    let max_iterations_without_improvement = options.iterations_without_improvement.get();
-+    let mut h = ZopfliHash::new();
-+    let mut matches = prefilled.or_else(|| {
-+        (options.match_cache && MatchCache::fits(inend - instart)).then(|| {
++    let matches = prefilled.or_else(|| {
++        uses_match_cache(options, inend - instart).then(|| {
 +            if options.tree_match_finder {
 +                fill_match_cache_tree(in_data, instart, inend)
 +            } else {
-+                fill_match_cache(in_data, instart, inend, &mut h)
++                fill_match_cache(in_data, instart, inend, &mut ZopfliHash::new())
 +            }
 +        })
 +    });
++    // Only the passes without the match cache search, with this hash.
++    let mut h = matches.is_none().then(ZopfliHash::new);
      /* Dist to get to here with smallest cost. */
      let mut currentstore = Lz77Store::new();
      let mut outputstore = currentstore.clone();
@@ -1507,7 +2112,7 @@ index 0f66357..710e384 100644
      let mut costs = Vec::with_capacity(inend - instart + 1);
  
      let mut beststats = SymbolStats::default();
-@@ -463,16 +853,25 @@ pub fn lz77_optimal<C: Cache>(
+@@ -463,16 +869,25 @@ pub fn lz77_optimal<C: Cache>(
      let mut iterations_without_improvement: u64 = 0;
      loop {
          currentstore.reset();
@@ -1530,10 +2135,10 @@ index 0f66357..710e384 100644
 +                inend,
 +                costmodel,
 +                &mut currentstore,
-+                &mut h,
++                h.as_mut().unwrap(),
 +                &mut costs,
 +            ),
-+            Some(ref mut m) => {
++            Some(ref m) => {
 +                let (_, length_array) =
 +                    get_best_lengths_cached(m, in_data, instart, inend, costmodel, &mut costs);
 +                let path = trace(inend - instart, &length_array);
@@ -1543,7 +2148,7 @@ index 0f66357..710e384 100644
          let cost = calculate_block_size(&currentstore, 0, currentstore.size(), BlockType::Dynamic);
  
          if cost < bestcost {
-@@ -512,5 +911,32 @@ pub fn lz77_optimal<C: Cache>(
+@@ -512,5 +927,32 @@ pub fn lz77_optimal<C: Cache>(
          }
          lastcost = cost;
      }
