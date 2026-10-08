@@ -156,11 +156,12 @@ cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml" --locked
 # The C tools come with their symbol tables, which nothing needs; the Rust
 # tools are stripped by their release profiles.
 strip "$OUT/jpeg-scan" "$OUT/jpegcmp" "$OUT/cjpegli" "$OUT/cwebp"
+# Signed with the hardened runtime: none of them loads code at run time.
 for tool in jpeg-scan jpegcmp cjpegli cwebp oxipng svg-tool png-quantize; do
 	if [ -n "$ENTITLEMENTS" ]; then
-		codesign --force --sign "$IDENTITY" --timestamp=none --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
+		codesign --force --sign "$IDENTITY" --timestamp=none --options runtime --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
 	else
-		codesign --force --sign "$IDENTITY" --timestamp=none "$OUT/$tool" 2>/dev/null
+		codesign --force --sign "$IDENTITY" --timestamp=none --options runtime "$OUT/$tool" 2>/dev/null
 	fi
 done
 log "tools in $OUT"
