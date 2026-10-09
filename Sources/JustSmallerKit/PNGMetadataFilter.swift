@@ -12,9 +12,12 @@ import Foundation
 /// recompressed where that is smaller. EXIF (eXIf), XMP and text chunks
 /// are filtered field by field; the physical size stays with the image info;
 /// time and every other ancillary chunk go. At `.keep` only the XMP padding
-/// and the sRGB profile go. EXIF goes right after IHDR, where the
-/// specification wants it; if the image is rotated and no EXIF is left, a
-/// minimal eXIf chunk holding only the orientation is written there.
+/// and the sRGB profile go. EXIF stays where it stands: readers disagree
+/// about an eXIf after the image data (some skip it, some apply its
+/// orientation), so moving it could turn the image for some of them. If the
+/// image is rotated and no EXIF is left, a minimal eXIf chunk holding only
+/// the orientation is written right after IHDR, where the specification
+/// wants it.
 enum PNGMetadataFilter {
     struct Malformed: Error {}
 
@@ -41,14 +44,16 @@ enum PNGMetadataFilter {
             }
             return out
         }
-        let exif = chunks.first { $0.type == "eXIf" }.flatMap { EXIFFilter.filter([UInt8]($0.data.bytes), level: level) }
-        if let exif {
-            out.append(PNGChunks.write("eXIf", exif))
-        } else if orientation != 1 {
+        let exifIndex = chunks[...end].firstIndex { $0.type == "eXIf" }
+        let exif = exifIndex.flatMap { EXIFFilter.filter([UInt8](chunks[$0].data.bytes), level: level) }
+        if exif == nil, orientation != 1 {
             out.append(PNGChunks.write("eXIf", JPEGMetadataFilter.minimalTIFF(orientation: orientation)))
         }
-        for c in chunks[1...end] where c.type != "eXIf" {
-            if ["tEXt", "zTXt", "iTXt"].contains(c.type) {
+        for i in 1...end {
+            let c = chunks[i]
+            if c.type == "eXIf" {
+                if i == exifIndex, let exif { out.append(PNGChunks.write("eXIf", exif)) } // only the first, filtered
+            } else if ["tEXt", "zTXt", "iTXt"].contains(c.type) {
                 guard let keyword = try? PNGChunks.keyword(c) else { continue } // no readable keyword: it goes
                 if c.type == "iTXt", keyword == PNGChunks.xmpKeyword {
                     if let text = try? PNGChunks.text(c), let packet = XMPFilter.filter([UInt8](text.content), level: level) {

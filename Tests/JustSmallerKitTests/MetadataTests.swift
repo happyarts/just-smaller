@@ -528,11 +528,10 @@ final class MetadataTests {
         #expect(decoded == [.removePrivate, .keep, .copyrightOnly])
     }
 
-    /// ImageMagick writes eXIf after the image data, where ImageIO doesn't
-    /// read it; the filter moves it in front, as the specification wants.
-    /// Its values are the original's all the same, and what the level
-    /// removes goes from it too — but a rotation no viewer showed before
-    /// must not appear: then the file stays as it is.
+    /// ImageMagick writes eXIf after the image data. Browsers and ImageIO
+    /// skip it there, other readers apply its orientation: it is filtered
+    /// where it stands, so every reader shows the image as before — and the
+    /// check sees it, so what the level removes goes from it too.
     @Test(arguments: [1, 6])
     func exifAfterTheImageData(orientation: Int) async throws {
         let url = dir.appending(path: "late-exif-\(orientation).png")
@@ -550,26 +549,24 @@ final class MetadataTests {
         try png.write(to: url)
         #expect(props(url)[kCGImagePropertyOrientation] == nil)
         #expect(MetadataCheck.hasFieldsToRemove(url, level: .removePrivate)) // the comment
-        let original = try Data(contentsOf: url)
+        func types(_ url: URL) throws -> [String] { try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true).map(\.type) }
+        let order = try types(url)
 
         let out = dir.appending(path: "late-exif-\(orientation)-filtered.png")
         try PNGMetadataFilter.filter(Data(contentsOf: url), level: .removePrivate, orientation: 1).write(to: out)
-        #expect(try PNGChunks.read(ByteView(Data(contentsOf: out)), strict: true).map(\.type).prefix(2) == ["IHDR", "eXIf"])
+        #expect(try types(out) == order)
         try MetadataCheck.verify(original: url, result: out, level: .removePrivate)
 
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false
         let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
-        switch (orientation, outcome) {
-        case (1, .optimized):
-            #expect(!MetadataCheck.hasFieldsToRemove(url, level: .removePrivate))
-            #expect(MetadataCheck.fields(try Data(contentsOf: url))[MetadataCheck.Key(ns: MetadataPolicy.NS.tiff, name: "XResolution")]?.text == "144/1")
-        case (6, .unchanged):
-            #expect(try Data(contentsOf: url) == original)
-        default:
-            Issue.record("unexpected: \(outcome)")
-        }
-        #expect(props(url)[kCGImagePropertyOrientation] as? Int ?? 1 == 1)
+        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(try types(url).last(where: { $0 != "IEND" }) == "eXIf")
+        #expect(props(url)[kCGImagePropertyOrientation] == nil)
+        #expect(!MetadataCheck.hasFieldsToRemove(url, level: .removePrivate))
+        let fields = MetadataCheck.fields(try Data(contentsOf: url))
+        #expect(fields[MetadataCheck.Key(ns: MetadataPolicy.NS.tiff, name: "Orientation")]?.text == "\(orientation)")
+        #expect(fields[MetadataCheck.Key(ns: MetadataPolicy.NS.tiff, name: "XResolution")]?.text == "144/1")
     }
 
     @Test func checkRejectsInventedValues() throws {

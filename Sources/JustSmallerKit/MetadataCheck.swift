@@ -22,7 +22,7 @@ import ImageIO
 ///
 /// A PNG's eXIf after the image data counts like one before it: ImageIO
 /// skips it there (the specification wants it before, some programs write
-/// it after), other readers show it, and the filter moves it in front.
+/// it after), other readers show it, and the filter leaves it there.
 ///
 /// A JPEG that holds several images is checked image by image: a gain map
 /// or a depth image can carry EXIF with the location too.

@@ -838,6 +838,11 @@ final class FileOptimizerTests {
         #expect(try types(PNGMetadataFilter.filter(png, level: .copyrightOnly, orientation: 1))
                 == ["IHDR", "iCCP", "tEXt", "cICP", "IDAT", "IEND"])
         #expect(try PNGMetadataFilter.filter(png, level: .keep, orientation: 6) == png)
+        // Readable EXIF stays where it stands, once.
+        var rotated = Data(PNGChunks.signature)
+        for c in [chunk("IHDR", Array(repeating: 1, count: 13)), chunk("iCCP", [1, 2]),
+                  chunk("eXIf", JPEGMetadataFilter.minimalTIFF(orientation: 6)), chunk("IDAT", [9]), chunk("IEND")] { rotated.append(c) }
+        #expect(try types(PNGMetadataFilter.filter(rotated, level: .removeAll, orientation: 6)) == ["IHDR", "iCCP", "eXIf", "IDAT", "IEND"])
         // Known CRC of an empty IEND chunk.
         #expect(chunk("IEND").suffix(4) == Data([0xAE, 0x42, 0x60, 0x82]))
         #expect(throws: PNGMetadataFilter.Malformed.self) {
