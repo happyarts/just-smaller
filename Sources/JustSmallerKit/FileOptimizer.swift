@@ -241,11 +241,17 @@ public struct FileOptimizer: Sendable {
         }
 
         guard best != source else {
-            if metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
+            // Nothing came of it: when the original itself isn't sound, that
+            // is the reason, not what a tool or a check said about it.
+            let damage = lastError != nil || rejected != nil || metadataFailure != nil ? Self.damage(of: source, format: format) : nil
+            if damage == nil, metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {
                 copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
                                                  moveAsideToTrash: settings.moveOriginalsToTrash)
+            }
+            if let damage {
+                return .unchanged(reason: String(localized: "Unchanged – the file is damaged: \(damage)", bundle: .module), size: size, copy: copy)
             }
             if let metadataFailure {
                 return .unchanged(reason: String(localized: "Unchanged – the metadata couldn’t be filtered safely: \(metadataFailure)", bundle: .module),
@@ -299,6 +305,17 @@ public struct FileOptimizer: Sendable {
               CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete
         else { return false }
         return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
+    }
+
+    /// Why the original isn't sound in itself (the structure check's
+    /// reason), or nil when it is or can't be read again.
+    static func damage(of url: URL, format: ImageFormat) -> String? {
+        do {
+            try StructureCheck.verifyOriginal(url, format: format)
+        } catch let error as VerificationError {
+            return error.reason
+        } catch {}
+        return nil
     }
 
     /// C2PA Content Credentials are signed with a hash over the file's bytes,

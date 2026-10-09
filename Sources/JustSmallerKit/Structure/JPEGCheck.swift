@@ -71,6 +71,20 @@ enum JPEGCheck {
         try layout(b, firstEnd: image.end, against: reference)
     }
 
+    /// An original on its own: each of its images strict, with its own frame
+    /// type allowed, and every coefficient coded — not the rules around the
+    /// images, which hold a result to its original.
+    static func checkImages(_ b: ByteView) throws {
+        func image(from start: Int) throws -> Image {
+            let frame = JPEGMarkers.frame(try JPEGMarkers.headers(b.view(from: start)).segments)?.marker
+            let image = try parse(b, from: start, allowing: frame)
+            guard image.complete else { throw Invalid("image data incomplete") }
+            return image
+        }
+        let first = try image(from: 0)
+        for range in JPEGLayout.read(b, firstEnd: first.end)?.images.dropFirst() ?? [] { _ = try image(from: range.lowerBound) }
+    }
+
     /// Around the images, the rules of the original's `JPEGLayout`; each
     /// image after the first a sound JPEG with only metadata changed that
     /// may change. An original whose layout can't be read gives one image,

@@ -1130,6 +1130,46 @@ final class FileOptimizerTests {
         #expect(leftovers == ["source.png", "text.gif", "truncated.png"])
     }
 
+    /// A file whose end and first image are whole but that is damaged
+    /// elsewhere gets past the first check. When nothing comes of it, the
+    /// damage is the reason given (not a tool's message, nor the metadata
+    /// step's), and the file stays as it is: a PNG with a second colour
+    /// profile whose checksum is wrong, at every level; a JPEG with a
+    /// restart marker out of turn, whose location must go.
+    @Test func damageIsTheReasonAFileStays() async throws {
+        func staysDamaged(_ url: URL, _ level: MetadataHandling) async throws {
+            var settings = self.settings
+            settings.metadata = level
+            let before = try Data(contentsOf: url)
+            let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in }
+            guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(url.lastPathComponent), \(level): \(outcome)"); return }
+            #expect(["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) },
+                    "\(level): \(reason)")
+            #expect(try Data(contentsOf: url) == before)
+        }
+        let png = try Data(contentsOf: write(image(space: CGColorSpace.displayP3), "profiles.png", type: .png,
+                                              properties: [kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGSoftware: "SecretApp"]]))
+        let profile = try #require(try PNGChunks.read(ByteView(png), strict: true).first { $0.type == "iCCP" }).whole.bytes
+        let at = try #require(png.range(of: profile)).lowerBound
+        var broken = Data(profile)
+        broken[broken.count - 1] ^= 1
+        let profiles = dir.appending(path: "two-profiles.png")
+        for level in MetadataHandling.allCases {
+            try (png[..<at] + broken + png[at...]).write(to: profiles)
+            try await staysDamaged(profiles, level)
+        }
+
+        let jpeg = dir.appending(path: "restart.jpg")
+        let dest = try #require(CGImageDestinationCreateWithURL(jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
+        CGImageDestinationAddImage(dest, image(), [kCGImagePropertyGPSDictionary: TestImages.gps] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        var b = try Data(contentsOf: jpeg)
+        let marker = try #require(RestartMarkerTests.restarts(b).scans.first?.markers.dropFirst().first)
+        b[marker + 1] = 0xD7
+        try b.write(to: jpeg)
+        try await staysDamaged(jpeg, .removePrivate)
+    }
+
     @Test func originalGoesToTrashAndCanBeFound() async throws {
         var settings = self.settings
         settings.moveOriginalsToTrash = true

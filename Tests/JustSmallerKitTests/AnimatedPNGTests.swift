@@ -285,13 +285,20 @@ final class AnimatedPNGTests {
     }
 
     /// A damaged animation whose first frame still shows stays exactly as
-    /// it is: it counts as damaged from the start, the tools refuse it, or
-    /// what they make of it is rejected.
+    /// it is, and the damage is the reason given: found by the first check,
+    /// or once nothing came of the tools.
     @Test(arguments: Damage.allCases)
     func damagedAnimationStaysAsItIs(damage: Damage) async throws {
         let data = Self.changed(damage.change)
         let url = try saved(data, "\(damage).png")
-        if case .optimized = try? await optimize(url) { Issue.record("optimized") }
+        switch try await optimize(url) {
+        case .skipped(let reason, _):
+            #expect(["The file is damaged or incomplete", "Die Datei ist beschädigt oder unvollständig"].contains(reason))
+        case .unchanged(let reason, _, _):
+            #expect(["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) }, "\(reason)")
+        case let outcome:
+            Issue.record("\(outcome)")
+        }
         #expect(try Data(contentsOf: url) == data)
     }
 }

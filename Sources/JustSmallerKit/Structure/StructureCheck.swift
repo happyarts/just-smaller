@@ -48,7 +48,7 @@ enum StructureCheck {
     }
 
     static func verify(_ b: ByteView, against reference: Reference) throws {
-        do {
+        try reporting {
             switch reference.summary {
             case .jpeg(let r): try JPEGCheck.check(b, against: r)
             case .png(let r): try PNGCheck.check(b, against: r)
@@ -57,6 +57,22 @@ enum StructureCheck {
             case .svg(let r): try SVGCheck.check(b, against: r)
             case .none: break
             }
+        }
+    }
+
+    /// The original by the same rules, on its own: whether it is sound in
+    /// itself, to say why a file stays as it is. A JPEG's images each on
+    /// their own; the rules around them hold a result to its original.
+    static func verifyOriginal(_ url: URL, format: ImageFormat) throws {
+        guard format == .jpeg else { return try verify(result: url, against: Reference(original: url, format: format)) }
+        let b = ByteView(try Data(contentsOf: url, options: .alwaysMapped))
+        try reporting { try JPEGCheck.checkImages(b) }
+    }
+
+    /// A check's finding as the reason a file is rejected.
+    private static func reporting(_ check: () throws -> Void) throws {
+        do {
+            try check()
         } catch let error as Invalid {
             throw VerificationError(reason: String(localized: "invalid file structure (\(error.detail))", bundle: .module))
         }

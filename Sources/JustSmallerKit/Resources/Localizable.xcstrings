@@ -561,6 +561,16 @@
         }
       }
     },
+    "Unchanged – the file is damaged: %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unverändert – die Datei ist beschädigt: %@"
+          }
+        }
+      }
+    },
     "Contains scripts": {
       "localizations": {
         "de": {
