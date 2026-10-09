@@ -23,8 +23,14 @@ private let log = Logger(subsystem: "JustSmallerKit", category: "optimizer")
 /// chosen metadata level removes.
 public struct FileOptimizer: Sendable {
     public let settings: OptimizationSettings
+    /// Picks the quality of lossy encodings in lossy mode, instead of
+    /// `settings.quality`.
+    public let chooser: (any QualityChooser)?
 
-    public init(settings: OptimizationSettings) { self.settings = settings }
+    public init(settings: OptimizationSettings, chooser: (any QualityChooser)? = nil) {
+        self.settings = settings
+        self.chooser = chooser
+    }
 
     public func optimize(_ url: URL, to destination: Destination = .replace,
                   progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
@@ -94,7 +100,7 @@ public struct FileOptimizer: Sendable {
             }
             facts.isUncheckableSVG = true
         }
-        let stages = Pipeline.stages(for: format, facts: facts, settings: settings)
+        let stages = Pipeline.stages(for: format, facts: facts, settings: settings, chooser: chooser)
         guard !stages.isEmpty else {
             return .skipped(reason: Pipeline.reasonForNoStages(format, facts: facts, settings: settings), size: size)
         }
@@ -110,6 +116,7 @@ public struct FileOptimizer: Sendable {
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
         var pixelIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
+        var lossyResult = false
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
@@ -181,7 +188,7 @@ public struct FileOptimizer: Sendable {
                     continue
                 }
                 best = output; bestSize = outSize; used.append(candidate.name)
-                if candidate.isLossy { pixelIdentical = false }
+                if candidate.isLossy { pixelIdentical = false; lossyResult = true }
                 break
             }
         }
@@ -193,6 +200,17 @@ public struct FileOptimizer: Sendable {
                 try MetadataCheck.verify(original: source, result: best, level: settings.metadata)
             } catch {
                 metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                best = source
+            }
+        }
+        // A chosen encoding is measured once more, as the finished file.
+        if best != source, lossyResult, let chooser {
+            do {
+                try await chooser.verify(original: source, result: best, format: format, work: work)
+            } catch {
+                try Task.checkCancellation()
+                log.fault("The chosen encoding of \(url.lastPathComponent, privacy: .private) failed its check: \(error.localizedDescription, privacy: .public)")
+                rejected = VerificationError(reason: error.localizedDescription)
                 best = source
             }
         }

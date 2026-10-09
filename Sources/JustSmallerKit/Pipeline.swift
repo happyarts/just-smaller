@@ -61,7 +61,19 @@ struct FileFacts: Sendable {
 /// run in parallel on the best result so far and the smallest valid output
 /// wins; stages run in order.
 enum Pipeline {
-    static func stages(for format: ImageFormat, facts: FileFacts, settings s: OptimizationSettings) -> [[Candidate]] {
+    static func stages(for format: ImageFormat, facts: FileFacts, settings s: OptimizationSettings,
+                       chooser: (any QualityChooser)? = nil) -> [[Candidate]] {
+        // With a chooser its encodings are the only lossy step; everything
+        // else runs as without loss.
+        if s.lossy, let chooser {
+            var lossless = s
+            lossless.lossy = false
+            var stages = stages(for: format, facts: facts, settings: lossless)
+            if format == .jpeg, chooser.formats.contains(.jpeg), facts.jpegLayout?.mayChangeWithLoss ?? true {
+                stages.insert([jpegli(chosenBy: chooser, layout: facts.jpegLayout)], at: 0)
+            }
+            return stages
+        }
         switch format {
         case .png:
             var stages: [[Candidate]] = []
@@ -267,12 +279,34 @@ enum Pipeline {
     static func jpegli(quality: Int, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
             try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
-                let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")
-                try await ToolRunner.run("cjpegli", [from.path, encoded.path, "--quality=\(quality)"], in: work)
-                try JPEGMetadataFilter.transplant(metadataFrom: Data(contentsOf: from), into: Data(contentsOf: encoded)).write(to: to)
+                try await jpegli(from, quality: quality, to: to, work: work)
                 return true
             }
         }
+    }
+
+    /// jpegli at the quality `chooser` picks, image by image.
+    static func jpegli(chosenBy chooser: any QualityChooser, layout: JPEGLayout?) -> Candidate {
+        Candidate(name: "jpegli", isLossy: true) { input, output, work in
+            try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
+                let size = try from.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+                let own = work.appending(path: "chooser-\(UUID().uuidString)")
+                try FileManager.default.createDirectory(at: own, withIntermediateDirectories: false)
+                defer { try? FileManager.default.removeItem(at: own) }
+                guard try await chooser.choose(image: from, output: to, work: own, encode: { quality, encoded in
+                    try await jpegli(from, quality: quality, to: encoded, work: own)
+                }) else { return false }
+                return (try to.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? .max) < size
+            }
+        }
+    }
+
+    /// `from` encoded anew by cjpegli, with its metadata.
+    private static func jpegli(_ from: URL, quality: Int, to: URL, work: URL) async throws {
+        let encoded = work.appending(path: "jpegli-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: encoded) }
+        try await ToolRunner.run("cjpegli", [from.path, encoded.path, "--quality=\(quality)"], in: work)
+        try JPEGMetadataFilter.transplant(metadataFrom: Data(contentsOf: from), into: Data(contentsOf: encoded)).write(to: to)
     }
 
     /// A step on a JPEG, image by image along its `JPEGLayout` (the

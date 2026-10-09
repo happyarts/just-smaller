@@ -36,8 +36,8 @@ public enum ToolRunner {
     @discardableResult
     /// `stderr`, if given, receives the tool's messages and is left for the
     /// caller; otherwise they are only used for the error.
-    static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, stderr: URL? = nil,
-                    in directory: URL, timeout: Duration = .seconds(3600)) async throws -> Int32 {
+    public static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, stderr: URL? = nil,
+                           in directory: URL, timeout: Duration = .seconds(3600)) async throws -> Int32 {
         guard let executable = executable(name) else {
             throw ToolError(tool: name, status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
         }
