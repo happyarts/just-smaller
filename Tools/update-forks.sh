@@ -12,7 +12,7 @@
 # Then the tools are built and checked as for any change to a level: the unit
 # tests and the quick corpus at Balanced and at Maximum (zopfli runs only
 # there). If all of that passes, the new pins are committed here (not pushed);
-# otherwise they stay as uncommitted changes to look at. A fork checkout that
+# otherwise they stay as staged, uncommitted changes to look at. A fork checkout that
 # holds local work is never moved.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -80,6 +80,8 @@ if git -C "$ROOT" diff --quiet -- Vendor/oxipng Vendor/zopfli Vendor/libdeflater
 	exit 0
 fi
 
+# Staged, so that build.sh builds the new pins rather than moving the checkouts back
+git -C "$ROOT" add Vendor/oxipng Vendor/zopfli Vendor/libdeflater
 say "Building and checking …"
 "$ROOT/Tools/build.sh" >/dev/null
 "$ROOT/Tools/test.sh" -q >/dev/null 2>&1 || { say "Unit tests failed (Tools/test.sh). The new pins stay uncommitted."; exit 1; }
