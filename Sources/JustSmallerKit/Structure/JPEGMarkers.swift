@@ -89,6 +89,26 @@ enum JPEGMarkers {
         return (guid, segments)
     }
 
+    /// Frame headers (SOFn): every marker from C0 to CF but DHT, JPG and DAC.
+    static func isFrame(_ marker: UInt8) -> Bool { (0xC0...0xCF).contains(marker) && ![0xC4, 0xC8, 0xCC].contains(marker) }
+    static let arithmetic: Set<UInt8> = [0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF]
+    static let lossless: Set<UInt8> = [0xC3, 0xC7, 0xCB, 0xCF]
+
+    /// An image's frame header: its type, sample precision and number of
+    /// components (nil where the segment is too short to say).
+    struct Frame {
+        let marker: UInt8
+        let precision: Int?
+        let components: Int?
+    }
+
+    /// The first frame header among an image's segments up to its first
+    /// scan (`headers`), read leniently.
+    static func frame(_ segments: [Segment]) -> Frame? {
+        guard let s = segments.first(where: { isFrame($0.marker) }) else { return nil }
+        return Frame(marker: s.marker, precision: try? s.payload.u8(0), components: try? s.payload.u8(5))
+    }
+
     /// The quantization tables of a DQT payload: id and 64 steps (8 or 16
     /// bit). Leniently, the tables before a truncated one.
     static func quantTables(_ p: ByteView, strict: Bool = true) throws -> [(id: Int, precision: Int, steps: [Int])] {

@@ -94,6 +94,36 @@ final class HEICTests {
         #expect(AuxiliaryImages.all(source) == [kCGImageAuxiliaryDataTypeHDRGainMap])
     }
 
+    /// A HEIC another program wrote with tiles of its own size (Photoshop:
+    /// 384) keeps them when re-encoded at every level that filters: ImageIO
+    /// shows the grid's tile size as metadata, and one of its own choosing
+    /// would read as changed metadata.
+    @Test(arguments: [MetadataHandling.removePrivate, .copyrightOnly, .removeAll])
+    func lossyReencodeKeepsTheTileSize(level: MetadataHandling) async throws {
+        let url = dir.appending(path: "tiles-\(level.rawValue).heic")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.heic.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, TestImages.pattern(width: 1024, height: 1024), [
+            kCGImageDestinationLossyCompressionQuality: 1.0,
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFTileWidth: 384, kCGImagePropertyTIFFTileLength: 384,
+                                             kCGImagePropertyTIFFArtist: "Jane Doe"],
+            kCGImagePropertyGPSDictionary: gps,
+        ] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        func tiles(_ url: URL) throws -> [Int?] {
+            let tiff = props(try Data(contentsOf: url))[kCGImagePropertyTIFFDictionary] as? [CFString: Any]
+            return [tiff?[kCGImagePropertyTIFFTileWidth] as? Int, tiff?[kCGImagePropertyTIFFTileLength] as? Int]
+        }
+        #expect(try tiles(url) == [384, 384])
+        settings.metadata = level
+        settings.lossy = true
+        settings.quality = 50
+        settings.outputLossy = .replace
+        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(tools.contains("ImageIO") && !identical)
+        #expect(try tiles(url) == [384, 384])
+        #expect(props(try Data(contentsOf: url))[kCGImagePropertyGPSDictionary] == nil)
+    }
+
     /// The maker note's identifier alone is enough to filter a photo.
     @Test func heicWithOnlyAnIdentifierToRemove() async throws {
         let url = photo("no-location.heic", location: false)

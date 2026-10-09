@@ -79,12 +79,15 @@ struct JPEGLayout: Sendable {
     private let imagesListed: Bool
     /// Every directory of Google's container, for the structure check.
     private let directories: [[GoogleXMP.Item]]
+    /// The photo is coded in a way the lossy encoder reads (`readsForEncoding`).
+    private let photoReadsForEncoding: Bool
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
     static func read(_ b: ByteView, firstEnd: Int? = nil) -> JPEGLayout? {
         guard let headers = try? JPEGMarkers.headers(b).segments,
               let firstEnd = firstEnd ?? (try? JPEGMarkers.imageEnd(from: 0, in: b)) else { return nil }
         var images = [0..<firstEnd], index = Index.none, indexFits = true
+        let encodable = readsForEncoding(JPEGMarkers.frame(headers))
         switch MultiPictureIndex.read(b, headers: headers) {
         case nil: break
         case let entries? where entries.count == 1: break // lists only the image itself
@@ -103,7 +106,8 @@ struct JPEGLayout: Sendable {
         // Nothing follows a plain JPEG's photo: whatever its XMP says counts nothing.
         if images.count == 1, afterPhoto.isPadding {
             return JPEGLayout(images: images, gaps: gaps(images), index: index, problem: indexFits ? nil : .unfittingIndex,
-                              isPlain: true, containerEntries: [], keptData: [], kept: [0..<0], imagesListed: false, directories: [])
+                              isPlain: true, containerEntries: [], keptData: [], kept: [0..<0], imagesListed: false, directories: [],
+                              photoReadsForEncoding: encodable)
         }
         let xmp = GoogleXMP.read(headers)
         // Google's container lays the parts out after the photo (`placed`,
@@ -144,7 +148,8 @@ struct JPEGLayout: Sendable {
                           problem: problem(index: index, indexFits: indexFits, xmp: xmp, trailer: trailer, video: video,
                                            jpegInLeftover: jpegInLeftover),
                           isPlain: false, containerEntries: entries, keptData: keptData, kept: kept,
-                          imagesListed: xmp?.listing != nil, directories: xmp?.directories ?? [])
+                          imagesListed: xmp?.listing != nil, directories: xmp?.directories ?? [],
+                          photoReadsForEncoding: encodable)
     }
 
     /// Which part of each gap must stay (see `kept`). Without Google's
@@ -226,10 +231,21 @@ struct JPEGLayout: Sendable {
     /// the metadata step below "keep everything"), unless a multi-picture
     /// index lists them as well. With loss (encoded anew), only a plain
     /// JPEG's photo for now: a gain map or a depth image is made for its
-    /// photo, and neither may simply change with it.
+    /// photo, and neither may simply change with it. And only a photo the
+    /// encoder can read (`readsForEncoding`); any other stays as it is, and
+    /// is optimized without loss.
     func mayChange(image n: Int, withLoss lossy: Bool = false, writingLengths: Bool = false) -> Bool {
-        if lossy { return isPlain && n == 0 }
+        if lossy { return isPlain && n == 0 && photoReadsForEncoding }
         return n == 0 || !imagesListed || index == .container && writingLengths
+    }
+
+    /// Whether jpegli (cjpegli, through libjpeg-turbo) can read an image
+    /// with this frame header to encode it anew: Huffman-coded, baseline,
+    /// extended, progressive or lossless, 8 bits, grey or three components.
+    /// Not arithmetic coding, 12 bits, CMYK, or hierarchical frames.
+    static func readsForEncoding(_ frame: JPEGMarkers.Frame?) -> Bool {
+        guard let frame, [0xC0, 0xC1, 0xC2, 0xC3].contains(frame.marker), frame.precision == 8 else { return false }
+        return frame.components == 1 || frame.components == 3
     }
 
     /// Whether a step at `level` writes the new lengths of the images

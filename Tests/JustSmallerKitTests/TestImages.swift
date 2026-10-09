@@ -60,6 +60,23 @@ enum TestImages {
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)?.contentHeadroom
     }
 
+    /// A 32 × 24 JPEG with arithmetic coding (SOF9), quality 97: libjpeg-turbo's
+    /// cjpeg, then jpegtran -arithmetic.
+    static let arithmeticJPEG = Data(base64Encoded: """
+        /9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAEBAQEBAQEBAQEBAQEBAQICAQEBAQMCAgICAwMEBAMDAwMEBAYFBAQFBAMDBQcFBQYG
+        BgYGBAUHBwcGBwYGBgb/2wBDAQEBAQEBAQMCAgMGBAMEBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYGBgYG
+        BgYGBgYGBgb/yQARCAAYACADASIAAhEBAxEB/8wACgAQEAUBEBEF/9oADAMBAAIRAxEAPwD/APcQSBU6BN0PepVzrA1xYcWttCFc
+        ds+gXiCsn/Ys7QgAxAUKZl6Jh4CWNDrnbRAlS3sScmnDqez0JXaVc+299poJEEHGsH/YmygBj2HWeugzAZc995AQxHEFnPPZReFw
+        1TXfgdgyeabb8TsToS43a+nq2dxA8ijl6aOgcSEcr1if4I2VVAwIhOfPy6eaqir7spi7pKTTolBWo3KwSyUpMwIPizbPRQMYbENM
+        XiG5x+rvPpilbvkuuE95ygWqF8An7+3eFu54LyaTPo6l+e4dnfouGDmWAmvVg3pZXf3wAMrcAMrcwmniNzJR+UpZZt5eSEV8SBzS
+        PTP8y53RsN19Au7zo7FrQD4QvHzpu76hDxcuG57x+EECUX3V+gMSNTLCeWJY3/R0/du2GAMGl/y3zpsPfxgALz1Z+bOI0aFlnRaK
+        NTlfi1X7+p2wCpVvYEp6IUET1U1j9WkcjDzhCu6qA61Eu9iyhFrc3CJZfnn1ZtyLCv1o0rWSKt9tfZjwFIAQm2W+jyQyWiqkwWb2
+        JbUaFdu/f6/qapLsGbRXwfjWVnQEaAWMnAatNQuHD3gNxdMwptu4bxkSDqN+uJk+6Y4+dExG/YxnUGOq1JwMV3E6GjT5LZ1HKN2+
+        GV43IvcdpAB5uN+/MkK+3zW5IAzp08iTm14+OSBoXfslri+rX+9vtS+CSXMHU4CwoIx6ApMUikMB28//AGJrVIcAfcDT7Wmg4dIX
+        rdIa0kLbJWjzm41hw9k63Rd5vymQ/NjNynA4AtNX7FZdtAfbk0rkXtjhoXUianzPXmHO3VB/w8KY+d+emgNnlylXpc3Q+itYUuW3
+        ahx/2b7kKiAgY0qyKwDTvE44MecgP3CeG8u0LTFPeYlC2I8X/CvH7OImMeJ4QeqdPhW+0gwhP68l/wCMx8BHTL24ox5x8bP/2Q==
+        """, options: .ignoreUnknownCharacters)!
+
     /// The standard sRGB profile from HP and Microsoft (sRGB IEC61966-2.1,
     /// 3 144 bytes, no profile ID), as image editors embed it.
     static let standardSRGBProfile = Data(base64Encoded: """

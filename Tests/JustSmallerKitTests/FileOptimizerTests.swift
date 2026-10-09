@@ -743,6 +743,42 @@ final class FileOptimizerTests {
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
     }
 
+    /// cjpegli can't read arithmetic coding, 12 bits or CMYK. The lossy step
+    /// is left out for such a JPEG, decided by its frame header: the file is
+    /// optimized without loss or stays as it is, never an error.
+    @Test func lossyJPEGLeavesOutJpegliWhereItCantRead() async throws {
+        let url = dir.appending(path: "arithmetic.jpg")
+        try TestImages.arithmeticJPEG.write(to: url)
+        let layout = try #require(JPEGLayout.read(ByteView(TestImages.arithmeticJPEG)))
+        #expect(layout.isPlain && !layout.mayChangeWithLoss)
+        var settings = self.settings
+        settings.lossy = true
+        settings.quality = 70
+        settings.outputLossy = .replace
+        let facts = FileFacts(byteSize: 1, jpegQuality: 97, jpegLayout: layout)
+        let lossy = Pipeline.stages(for: .jpeg, facts: facts, settings: settings).joined().filter(\.isLossy)
+        #expect(lossy.isEmpty)
+        switch try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) {
+        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
+        case .alreadyOptimal, .unchanged:
+            let after = try Data(contentsOf: url)
+            #expect(after == TestImages.arithmeticJPEG)
+        case let outcome: Issue.record("\(outcome)")
+        }
+    }
+
+    /// Which frames the lossy encoder reads: Huffman-coded 8-bit images in
+    /// grey or colour, lossless ones too.
+    @Test func framesTheLossyEncoderReads() {
+        func reads(_ marker: UInt8, _ precision: Int = 8, _ components: Int = 3) -> Bool {
+            JPEGLayout.readsForEncoding(JPEGMarkers.Frame(marker: marker, precision: precision, components: components))
+        }
+        #expect(reads(0xC0) && reads(0xC1) && reads(0xC2) && reads(0xC3) && reads(0xC0, 8, 1))
+        #expect(!reads(0xC9) && !reads(0xCA) && !reads(0xCB) && !reads(0xC5) && !reads(0xCD))
+        #expect(!reads(0xC1, 12) && !reads(0xC0, 8, 4) && !reads(0xC0, 8, 2))
+        #expect(!JPEGLayout.readsForEncoding(nil) && !JPEGLayout.readsForEncoding(JPEGMarkers.Frame(marker: 0xC0, precision: nil, components: nil)))
+    }
+
     @Test func lossyPNGIsQuantizedWithoutLosingItsProfile() async throws {
         settings.lossy = true
         // Photo-like: gradients with grain, which a palette stores in a third of the bytes

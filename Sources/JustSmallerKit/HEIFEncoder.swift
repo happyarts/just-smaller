@@ -18,9 +18,18 @@ enum HEIFEncoder {
             // The image goes in without metadata; what the level keeps of the
             // original's EXIF and XMP is put in afterwards. The orientation
             // is carried over; the colour profile is part of the image itself.
+            // The tile size is carried over too, as the copy with all
+            // metadata does: ImageIO shows the grid's as the TIFF tile size,
+            // whatever the EXIF says, and with a size of its own choosing the
+            // result would show values the original never had.
             guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return false }
             let original = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
             if let orientation = original?[kCGImagePropertyOrientation] { properties[kCGImagePropertyOrientation] = orientation }
+            if let tiff = original?[kCGImagePropertyTIFFDictionary] as? [CFString: Any],
+               let width = tiff[kCGImagePropertyTIFFTileWidth] as? Int, let length = tiff[kCGImagePropertyTIFFTileLength] as? Int,
+               width > 0, length > 0 {
+                properties[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFTileWidth: width, kCGImagePropertyTIFFTileLength: length]
+            }
             CGImageDestinationAddImageAndMetadata(destination, image, CGImageMetadataCreateMutable(), properties as CFDictionary)
         }
         // HDR gain maps, depth and portrait mattes: dropping them would lose

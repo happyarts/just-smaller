@@ -26,7 +26,7 @@ enum JPEGCheck {
 
         init(_ a: ByteView, level: MetadataHandling = .keep) {
             let lenient = (try? JPEGMarkers.headers(a))?.segments ?? []
-            let frame = lenient.first { JPEGCheck.isFrame($0.marker) }?.marker
+            let frame = JPEGMarkers.frame(lenient)?.marker
             self.frame = frame
             let strict = try? JPEGCheck.parse(a, allowing: frame)
             complete = strict?.complete
@@ -60,9 +60,6 @@ enum JPEGCheck {
         var id: Int, h: Int, v: Int, table: Int
     }
 
-    static let arithmetic: Set<UInt8> = [0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF]
-    static let lossless: Set<UInt8> = [0xC3, 0xC7, 0xCB, 0xCF]
-    static func isFrame(_ marker: UInt8) -> Bool { (0xC0...0xCF).contains(marker) && ![0xC4, 0xC8, 0xCC].contains(marker) }
     /// APPn and COM: metadata, not image data.
     static func isMetadata(_ marker: UInt8) -> Bool { (0xE0...0xEF).contains(marker) || marker == 0xFE }
 
@@ -155,12 +152,12 @@ enum JPEGCheck {
                 guard s.count == 2 else { throw Invalid("DRI") }
                 restartInterval = try s.be(0, 2)
             case 0xCC: // DAC, arithmetic coding only: class/table, then DC bounds L ≤ U or AC Kx 1–63
-                guard let originalFrame, arithmetic.contains(originalFrame), s.count % 2 == 0 else { throw Invalid("DAC") }
+                guard let originalFrame, JPEGMarkers.arithmetic.contains(originalFrame), s.count % 2 == 0 else { throw Invalid("DAC") }
                 for k in stride(from: 0, to: s.count, by: 2) {
                     let tc = try s.u8(k) >> 4, tb = try s.u8(k) & 15, value = try s.u8(k + 1)
                     guard tc <= 1, tb <= 3, tc == 0 ? value & 15 <= value >> 4 : (1...63).contains(value) else { throw Invalid("DAC") }
                 }
-            case _ where isFrame(marker):
+            case _ where JPEGMarkers.isFrame(marker):
                 guard image.frame == 0 else { throw Invalid("second frame") }
                 guard [0xC0, 0xC1, 0xC2].contains(marker) || marker == originalFrame else {
                     throw Invalid(String(format: "frame type %02X", marker))
@@ -171,8 +168,8 @@ enum JPEGCheck {
                 let n = try s.u8(5)
                 guard (1...4).contains(n), s.count == 6 + 3 * n, width > 0, height > 0 else { throw Invalid("SOF") }
                 // 8 or 12 bits for DCT, 2–16 lossless; anything but 8 only where the original had it.
-                let precisions = lossless.contains(marker) ? 2...16 : 8...12
-                guard precisions.contains(precision), lossless.contains(marker) || precision % 4 == 0,
+                let precisions = JPEGMarkers.lossless.contains(marker) ? 2...16 : 8...12
+                guard precisions.contains(precision), JPEGMarkers.lossless.contains(marker) || precision % 4 == 0,
                       precision == 8 || marker == originalFrame
                 else { throw Invalid("SOF precision") }
                 for c in 0..<n {
@@ -206,7 +203,7 @@ enum JPEGCheck {
                 guard data.restarts == 0 || restartInterval > 0, data.inSequence else { throw Invalid("restart marker out of sequence") }
                 let restarts = data.restarts
                 i = data.end
-                if restartInterval > 0, !lossless.contains(image.frame) {
+                if restartInterval > 0, !JPEGMarkers.lossless.contains(image.frame) {
                     let hMax = components.map(\.h).max() ?? 1, vMax = components.map(\.v).max() ?? 1
                     let mcus: Int
                     if ns == 1 {
