@@ -104,7 +104,13 @@ cc -O2 -mcpu=apple-m1 -mmacosx-version-min=26.0 -I"$TURBO/install/include" \
 
 log "jpegli"
 JPEGLI=$WORK/jpegli
-run jpegli-configure cmake -S "$ROOT/Vendor/jpegli" -B "$JPEGLI" $CMAKE_COMMON -DBUILD_TESTING=OFF \
+# Highway's code only for NEON, which every Apple Silicon Mac runs: without the
+# NEON_BF16 copy (M2 and later would pick it) the same code runs everywhere.
+# The SVE targets are named for clarity; Highway leaves them out on macOS.
+JPEGLI_HWY="-DJPEGLI_ENABLE_HWY_NEON_BF16=OFF -DJPEGLI_ENABLE_HWY_NEON_WITHOUT_AES=OFF
+	-DJPEGLI_ENABLE_HWY_SVE=OFF -DJPEGLI_ENABLE_HWY_SVE2=OFF -DJPEGLI_ENABLE_HWY_SVE2_128=OFF
+	-DJPEGLI_ENABLE_HWY_SVE_256=OFF"
+run jpegli-configure cmake -S "$ROOT/Vendor/jpegli" -B "$JPEGLI" $CMAKE_COMMON $JPEGLI_HWY -DBUILD_TESTING=OFF \
 	-DJPEGLI_BUNDLE_LIBPNG=ON -DJPEGLI_ENABLE_SJPEG=OFF -DJPEGLI_ENABLE_SKCMS=ON \
 	-DJPEG_INCLUDE_DIR="$TURBO/install/include" -DJPEG_LIBRARY="$TURBO/install/lib/libjpeg.a"
 run jpegli cmake --build "$JPEGLI" -j "$JOBS" --target cjpegli
