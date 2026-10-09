@@ -181,6 +181,16 @@
         }
       }
     },
+    "it would be shown at another size": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "es würde in anderer Größe angezeigt"
+          }
+        }
+      }
+    },
     "it would be shown in other colours": {
       "localizations": {
         "de": {
@@ -297,6 +307,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nur JPEGs lassen sich in JPEG XL umwandeln"
+          }
+        }
+      }
+    },
+    "resolution changed": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Auflösung geändert"
           }
         }
       }

@@ -47,6 +47,9 @@ enum Verifier {
         guard pa.orientation == pb.orientation else {
             throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
         }
+        guard pa.resolution == pb.resolution, format != .jpeg || pa.browserSize == pb.browserSize else {
+            throw VerificationError(reason: String(localized: "resolution changed", bundle: .module))
+        }
         // Also in lossy mode: an animation must stay one, and no image of a
         // multi-image file (e.g. MPO) may go missing. Merging identical frames
         // is allowed and checked frame by frame below.
@@ -185,6 +188,12 @@ enum Verifier {
         guard pa.iccProfile == pb.iccProfile else {
             throw VerificationError(reason: String(localized: "it would be shown in other colours", bundle: .module))
         }
+        // A JPEG whose resolution only JFIF states (JPEG XL has no JFIF), or
+        // that browsers show at the size its EXIF resolution gives (they
+        // don't for JPEG XL), is shown at another size as JPEG XL.
+        guard pa.resolution == pb.resolution, pa.browserSize == [pa.width, pa.height] else {
+            throw VerificationError(reason: String(localized: "it would be shown at another size", bundle: .module))
+        }
     }
 
     /// A JPEG XL made from a JPEG, stored anew: both rebuild into JPEGs with
@@ -215,6 +224,9 @@ enum Verifier {
         }
         guard px.iccProfile == py.iccProfile else {
             throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
+        }
+        guard px.resolution == py.resolution else {
+            throw VerificationError(reason: String(localized: "resolution changed", bundle: .module))
         }
     }
 
@@ -359,6 +371,14 @@ enum Verifier {
     private struct Properties {
         var width = 0, height = 0, orientation = 1
         var iccProfile: Data?
+        /// The resolution ImageIO reads (72 dpi without one): apps that size
+        /// images by it (AppKit) show and print the image at that size.
+        var resolution = [72.0, 72.0]
+        /// The size browsers show a JPEG at: one whose EXIF states a
+        /// resolution and the pixel size that matches it at 72 dpi is shown
+        /// at that size (HTML's density-corrected natural size). Safari and
+        /// Chrome do so for JPEG only.
+        var browserSize: [Int] = []
     }
 
     /// `image`: the first image, when it is decoded already.
@@ -368,6 +388,15 @@ enum Verifier {
         p.width = dict[kCGImagePropertyPixelWidth] as? Int ?? 0
         p.height = dict[kCGImagePropertyPixelHeight] as? Int ?? 0
         p.orientation = dict[kCGImagePropertyOrientation] as? Int ?? 1
+        p.resolution = [dict[kCGImagePropertyDPIWidth] as? Double ?? 72, dict[kCGImagePropertyDPIHeight] as? Double ?? 72]
+        p.browserSize = [p.width, p.height]
+        let tiff = dict[kCGImagePropertyTIFFDictionary] as? [CFString: Any], exif = dict[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        if let x = tiff?[kCGImagePropertyTIFFXResolution] as? Double, let y = tiff?[kCGImagePropertyTIFFYResolution] as? Double,
+           x > 0, y > 0, tiff?[kCGImagePropertyTIFFResolutionUnit] as? Int ?? 2 == 2,
+           let w = exif?[kCGImagePropertyExifPixelXDimension] as? Int, let h = exif?[kCGImagePropertyExifPixelYDimension] as? Int,
+           w > 0, h > 0, Double(p.width) * 72 / x == Double(w), Double(p.height) * 72 / y == Double(h) {
+            p.browserSize = [w, h]
+        }
         if let image = decoded ?? CGImageSourceCreateImageAtIndex(source, 0, nil),
            let space = image.colorSpace, let icc = space.copyICCData() {
             p.iccProfile = icc as Data

@@ -187,7 +187,7 @@ final class MetadataTests {
     /// Preview and Pages take it from the resolution (a Retina screenshot at
     /// half its pixels), browsers from EXIF's resolution and pixel size.
     @Test(arguments: [MetadataHandling.copyrightOnly, .removeAll])
-    func resolutionStaysAtEveryLevel(level: MetadataHandling) throws {
+    func resolutionStaysAtEveryLevel(level: MetadataHandling) async throws {
         func rational(_ n: Int) -> [UInt8] { [24, 16, 8, 0].map { UInt8(n >> $0 & 0xFF) } + [0, 0, 0, 1] }
         func long(_ n: Int) -> [UInt8] { [24, 16, 8, 0].map { UInt8(n >> $0 & 0xFF) } }
         func size(_ url: URL) -> NSSize? { NSImage(contentsOf: url)?.size }
@@ -234,6 +234,21 @@ final class MetadataTests {
         let resolutionInfo: [UInt8] = [0, 144, 0, 0, 0, 1, 0, 1, 0, 144, 0, 0, 0, 1, 0, 1]
         let resources = Array("8BIM".utf8) + [0x03, 0xED, 0, 0, 0, 0, 0, 16] + resolutionInfo
         #expect(IPTCFilter.filter(resources, level: level).resources == resources)
+    }
+
+    /// A result shown at another size is thrown away, whatever made it.
+    @Test func verifierRejectsALostResolution() async throws {
+        func rational(_ n: Int) -> [UInt8] { [24, 16, 8, 0].map { UInt8(n >> $0 & 0xFF) } + [0, 0, 0, 1] }
+        let pixelSize: [(UInt16, UInt16, [UInt8])] = [(0xA002, 4, [0, 0, 0, 32]), (0xA003, 4, [0, 0, 0, 24])]
+        let hiDPI = try jpeg("verify-hidpi.jpg", exif: exifBlock(
+            main: [(0x011A, 5, rational(144)), (0x011B, 5, rational(144)), (0x0128, 3, [0, 2])], exif: pixelSize, interop: []))
+        let noResolution = try jpeg("verify-plain.jpg", exif: exifBlock(main: [(0x0112, 3, [0, 1])], exif: pixelSize, interop: []))
+        // The same coefficients, as the same image is encoded the same way.
+        try await Verifier.verify(original: noResolution, result: noResolution, format: .jpeg, pixelsMustMatch: true)
+        let error = await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: hiDPI, result: noResolution, format: .jpeg, pixelsMustMatch: true)
+        }
+        #expect(["resolution changed", "Auflösung geändert"].contains(error?.reason ?? ""))
     }
 
     // MARK: - XMP

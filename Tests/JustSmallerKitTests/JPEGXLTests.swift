@@ -189,6 +189,20 @@ final class JPEGXLTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "hdr.jxl").path))
     }
 
+    /// JPEG XL has no JFIF: a JPEG whose resolution only JFIF states would
+    /// be shown at another size (apps size images by their resolution).
+    @Test func aJPEGWithItsResolutionOnlyInJFIFStaysJPEG() async throws {
+        let url = jpeg("jfif-300dpi.jpg")
+        var data = try Data(contentsOf: url)
+        let jfif = try #require(data.range(of: Data("JFIF\0".utf8)))
+        data.replaceSubrange(jfif.upperBound + 2..<jfif.upperBound + 7, with: [1, 0x01, 0x2C, 0x01, 0x2C]) // dpi, 300 × 300
+        try data.write(to: url)
+        let properties = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil) as? [CFString: Any]
+        try #require(properties?[kCGImagePropertyDPIWidth] as? Int == 300)
+        #expect(reason(try await convert(url, to: .jxl))?.contains("at another size") == true)
+        #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "jfif-300dpi.jxl").path))
+    }
+
     @Test func aTinyJPEGStaysWhenJPEGXLIsLarger() async throws {
         settings.metadata = .keep
         let tiny = jpeg("tiny.jpg", width: 1, height: 1)
