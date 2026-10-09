@@ -115,8 +115,11 @@ public struct FileOptimizer: Sendable {
         var rejected: VerificationError?
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
-        var pixelIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
-        var lossyResult = false
+        let canBeIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
+        var pixelIdentical = canBeIdentical
+        // The best result before the first lossy step: what stays when a
+        // chosen encoding fails its last check.
+        var beforeLoss: (best: URL, size: Int64, used: [String])?
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
@@ -187,12 +190,25 @@ public struct FileOptimizer: Sendable {
                     }
                     continue
                 }
+                if candidate.isLossy, beforeLoss == nil { beforeLoss = (best, bestSize, used) }
                 best = output; bestSize = outSize; used.append(candidate.name)
-                if candidate.isLossy { pixelIdentical = false; lossyResult = true }
+                if candidate.isLossy { pixelIdentical = false }
                 break
             }
         }
 
+        // A chosen encoding is measured once more, as the finished file. If
+        // it fails, the result without loss stays.
+        if let beforeLoss, let chooser {
+            do {
+                try await chooser.verify(original: source, result: best, format: format, work: work)
+            } catch {
+                try Task.checkCancellation()
+                log.fault("The chosen encoding of \(url.lastPathComponent, privacy: .private) failed its check: \(error.localizedDescription, privacy: .public)")
+                (best, bestSize, used) = beforeLoss
+                pixelIdentical = canBeIdentical
+            }
+        }
         // The whole chain against the original, not just the metadata stage:
         // no later tool may have dropped the rights or brought back what went.
         if best != source, format != .svg, format != .gif {
@@ -200,17 +216,6 @@ public struct FileOptimizer: Sendable {
                 try MetadataCheck.verify(original: source, result: best, level: settings.metadata)
             } catch {
                 metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
-                best = source
-            }
-        }
-        // A chosen encoding is measured once more, as the finished file.
-        if best != source, lossyResult, let chooser {
-            do {
-                try await chooser.verify(original: source, result: best, format: format, work: work)
-            } catch {
-                try Task.checkCancellation()
-                log.fault("The chosen encoding of \(url.lastPathComponent, privacy: .private) failed its check: \(error.localizedDescription, privacy: .public)")
-                rejected = VerificationError(reason: error.localizedDescription)
                 best = source
             }
         }

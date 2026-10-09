@@ -35,11 +35,18 @@ final class QualityChooserTests {
         var verified: [Int] = []
         var formats: Set<ImageFormat> { [.jpeg] }
 
-        init(_ qualities: [Int], passes: Bool = true) { self.qualities = qualities; self.passes = passes }
+        let fails: Bool
+
+        init(_ qualities: [Int], passes: Bool = true, fails: Bool = false) {
+            self.qualities = qualities
+            self.passes = passes
+            self.fails = fails
+        }
 
         func choose(image: URL, output: URL, work: URL,
                     encode: @escaping @Sendable (Int, URL) async throws -> Void) async throws -> Bool {
             guard !qualities.isEmpty else { return false }
+            if fails { throw Different() }
             for quality in qualities {
                 lock.withLock { tried.append(quality) }
                 try await encode(quality, output)
@@ -76,14 +83,18 @@ final class QualityChooserTests {
         #expect(chooser.verified == [Int(after)])
     }
 
-    @Test func aFinishedFileThatFailsTheCheckIsThrownAway() async throws {
+    /// A finished file that fails the check, or a search that fails, leaves
+    /// the result without loss.
+    @Test(arguments: [false, true])
+    func aFailedCheckLeavesTheLosslessResult(searchFails: Bool) async throws {
         let url = jpeg("photo.jpg", quality: 0.98)
-        let original = try Data(contentsOf: url)
-        let chooser = Chooser([75], passes: false)
-        let outcome = try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
-        guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(outcome)"); return }
-        #expect(reason.contains("looks different"))
-        #expect(try Data(contentsOf: url) == original)
+        let chooser = Chooser([75], passes: false, fails: searchFails)
+        switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
+        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
+        case .alreadyOptimal: break
+        case let outcome: Issue.record("\(outcome)")
+        }
+        #expect(chooser.verified.count == (searchFails ? 0 : 1))
     }
 
     /// Nothing passes: the JPEG is optimized as without loss.
@@ -114,8 +125,10 @@ final class QualityChooserTests {
     /// format the chooser doesn't handle goes without loss.
     @Test func theChooserIsTheOnlyLossyStep() async throws {
         let chooser = Chooser([80])
+        // After the lossless steps, then the scans of the encoding.
         let jpeg = Pipeline.stages(for: .jpeg, facts: FileFacts(byteSize: 1, jpegQuality: 98), settings: settings, chooser: chooser)
         #expect(jpeg.joined().filter(\.isLossy).count == 1)
+        #expect(jpeg.map { $0.map(\.isLossy) }.suffix(2) == [[true], [false]] && jpeg.count > 2)
         for format in [ImageFormat.png, .heic, .svg, .webp] {
             let facts = FileFacts(byteSize: 1, isLosslessWebP: true)
             #expect(Pipeline.stages(for: format, facts: facts, settings: settings, chooser: chooser).joined()

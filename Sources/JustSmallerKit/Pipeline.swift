@@ -1,5 +1,8 @@
 import Foundation
 import ImageIO
+import OSLog
+
+private let log = Logger(subsystem: "JustSmallerKit", category: "pipeline")
 
 /// One way of producing a smaller version of a file. Writes `output` and
 /// returns true, or returns false when it has nothing better to offer.
@@ -64,13 +67,16 @@ enum Pipeline {
     static func stages(for format: ImageFormat, facts: FileFacts, settings s: OptimizationSettings,
                        chooser: (any QualityChooser)? = nil) -> [[Candidate]] {
         // With a chooser its encodings are the only lossy step; everything
-        // else runs as without loss.
+        // else runs as without loss. It comes after the lossless steps, so
+        // an encoding has to beat what they reached; its scans are then
+        // optimized like any JPEG's.
         if s.lossy, let chooser {
             var lossless = s
             lossless.lossy = false
             var stages = stages(for: format, facts: facts, settings: lossless)
             if format == .jpeg, chooser.formats.contains(.jpeg), facts.jpegLayout?.mayChangeWithLoss ?? true {
-                stages.insert([jpegli(chosenBy: chooser, layout: facts.jpegLayout)], at: 0)
+                stages.append([jpegli(chosenBy: chooser, layout: facts.jpegLayout)])
+                stages.append([jpegScan(effort: s.effort, layout: facts.jpegLayout)])
             }
             return stages
         }
@@ -285,18 +291,23 @@ enum Pipeline {
         }
     }
 
-    /// jpegli at the quality `chooser` picks, image by image.
+    /// jpegli at the quality `chooser` picks, image by image. A search that
+    /// fails (its measuring tool, say) leaves the image as it is.
     static func jpegli(chosenBy chooser: any QualityChooser, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
             try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
-                let size = try from.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
                 let own = work.appending(path: "chooser-\(UUID().uuidString)")
                 try FileManager.default.createDirectory(at: own, withIntermediateDirectories: false)
                 defer { try? FileManager.default.removeItem(at: own) }
-                guard try await chooser.choose(image: from, output: to, work: own, encode: { quality, encoded in
-                    try await jpegli(from, quality: quality, to: encoded, work: own)
-                }) else { return false }
-                return (try to.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? .max) < size
+                do {
+                    return try await chooser.choose(image: from, output: to, work: own) { quality, encoded in
+                        try await jpegli(from, quality: quality, to: encoded, work: own)
+                    }
+                } catch {
+                    try Task.checkCancellation()
+                    log.error("Choosing a quality failed: \(error.localizedDescription, privacy: .public)")
+                    return false
+                }
             }
         }
     }
