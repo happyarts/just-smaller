@@ -237,6 +237,21 @@ struct JPEGLayout: Sendable {
     /// below "keep everything", where it rewrites the XMP anyway.
     static func writesLengths(at level: MetadataHandling) -> Bool { level != .keep }
 
+    /// Why the file can't become a JPEG XL that shows all of it. A JPEG XL
+    /// made from a JPEG keeps whatever follows the photo, so the JPEG can be
+    /// rebuilt from it byte for byte; but a JPEG XL viewer shows only the
+    /// photo. So only a plain JPEG is converted: without a gain map, depth
+    /// map or second view, without a motion photo's video, without data
+    /// after the image.
+    enum JXLObstacle: Sendable { case moreImages, video, otherData }
+
+    var jxlObstacle: JXLObstacle? {
+        if isPlain, problem == nil { return nil }
+        if problem == .video || keptData.contains(where: { $0.kind == .video }) { return .video }
+        if images.count > 1 || problem == .unlistedImages { return .moreImages }
+        return .otherData
+    }
+
     /// Whether any image may change with loss: a lossy step is worth trying.
     /// (Kept general for the rule by role still to come.)
     var mayChangeWithLoss: Bool { images.indices.contains { mayChange(image: $0, withLoss: true) } }

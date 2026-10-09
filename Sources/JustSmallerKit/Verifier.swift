@@ -94,6 +94,95 @@ enum Verifier {
         }
     }
 
+    // MARK: - JPEG XL
+
+    /// How far what a JPEG XL decoder shows may lie from what a JPEG decoder
+    /// shows of the same coefficients, in 8-bit steps: on average, in the
+    /// worst 8×8 block, at the worst pixel. JPEG XL decodes with more
+    /// precision than JPEG decoders do; the limits only let that through.
+    struct DecodeTolerance: Sendable {
+        let mean: Double, block: Double, max: Int
+        /// Our own conversions (chroma from luma off).
+        static let converted = DecodeTolerance(mean: 1.5, block: 4, max: 40)
+        /// JPEG XL files from elsewhere, possibly with chroma from luma.
+        static let foreign = DecodeTolerance(mean: 3, block: 12, max: 64)
+    }
+
+    /// A JPEG and a JPEG XL holding it (made from it, or rebuilt into it)
+    /// show the same picture: the JPEG XL is sound and rebuilds into exactly
+    /// `jpeg`; jxl-rs — the decoder of Chrome and Firefox, written apart from
+    /// libjxl — shows what libjpeg shows of the JPEG, within `tolerance`,
+    /// with the same orientation; ImageIO shows both alike (size,
+    /// orientation, colour profile, one image).
+    /// `rebuilt`: the JPEG was just rebuilt from the JPEG XL (going back),
+    /// so it is not rebuilt again to compare.
+    static func verifyConversion(jpeg: URL, jxl: URL, tolerance: DecodeTolerance, rebuilt isRebuilt: Bool = false) async throws {
+        let work = jxl.deletingLastPathComponent()
+        let file: JXLContainer.File
+        do {
+            file = try JXLContainer.read(ByteView(Data(contentsOf: jxl, options: .alwaysMapped)))
+        } catch let error as FormatError {
+            throw VerificationError(reason: String(localized: "invalid file structure (\(error.detail))", bundle: .module))
+        }
+        guard file.hasReconstructionData else {
+            throw VerificationError(reason: String(localized: "the JPEG can’t be rebuilt from it", bundle: .module))
+        }
+
+        let rebuilt = work.appending(path: "rebuilt-\(UUID().uuidString).jpg")
+        let pixels = work.appending(path: "pixels-\(UUID().uuidString).ppm")
+        let output = work.appending(path: "pixels-\(UUID().uuidString).txt")
+        defer { for url in [rebuilt, pixels, output] { try? FileManager.default.removeItem(at: url) } }
+        if !isRebuilt {
+            do {
+                try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
+            } catch is ToolError {
+                throw VerificationError(reason: String(localized: "the JPEG can’t be rebuilt from it", bundle: .module))
+            }
+            guard try Data(contentsOf: rebuilt, options: .alwaysMapped) == Data(contentsOf: jpeg, options: .alwaysMapped) else {
+                throw VerificationError(reason: String(localized: "the rebuilt JPEG differs", bundle: .module))
+            }
+        }
+
+        do {
+            try await ToolRunner.run("jxl-pixels", [jxl.path, pixels.path], stdout: output, in: work)
+        } catch is ToolError {
+            throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
+        }
+        let stated = (try? String(contentsOf: output, encoding: .utf8))?.firstMatch(of: /orientation (\d)/).flatMap { Int($0.1) }
+        guard stated == FileFacts.orientation(of: try Data(contentsOf: jpeg, options: .alwaysMapped)) else {
+            throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
+        }
+        do {
+            try await ToolRunner.run("jpegcmp", ["--pixels", jpeg.path, pixels.path], stdout: output, in: work)
+        } catch let error as ToolError where error.status == 1 {
+            throw VerificationError(reason: String(localized: "different dimensions", bundle: .module))
+        } catch is ToolError {
+            throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
+        }
+        let report = (try? String(contentsOf: output, encoding: .utf8)) ?? ""
+        guard let m = report.firstMatch(of: /mean ([0-9.]+) block ([0-9.]+) max (\d+)/),
+              let mean = Double(m.1), let block = Double(m.2), let max = Int(m.3),
+              mean <= tolerance.mean, block <= tolerance.block, max <= tolerance.max
+        else { throw VerificationError(reason: String(localized: "a JPEG XL viewer would show it differently", bundle: .module)) }
+
+        // What Finder, Preview and Safari show.
+        guard let a = CGImageSourceCreateWithURL(jpeg as CFURL, nil), let b = CGImageSourceCreateWithURL(jxl as CFURL, nil),
+              CGImageSourceGetCount(b) == 1, let image = CGImageSourceCreateImageAtIndex(b, 0, nil)
+        else { throw VerificationError(reason: String(localized: "unreadable", bundle: .module)) }
+        let pa = properties(a), pb = properties(b, image: image)
+        guard pa.width == pb.width, pa.height == pb.height else {
+            throw VerificationError(reason: String(localized: "different dimensions", bundle: .module))
+        }
+        guard pa.orientation == pb.orientation else {
+            throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
+        }
+        // A JPEG whose colour space only its EXIF names (Adobe RGB), or a grey
+        // one without a profile, is shown in other colours as JPEG XL.
+        guard pa.iccProfile == pb.iccProfile else {
+            throw VerificationError(reason: String(localized: "it would be shown in other colours", bundle: .module))
+        }
+    }
+
     // MARK: - JPEG
 
     /// Without an original, only reads the result. A JPEG that holds several
@@ -237,13 +326,14 @@ enum Verifier {
         var iccProfile: Data?
     }
 
-    private static func properties(_ source: CGImageSource) -> Properties {
+    /// `image`: the first image, when it is decoded already.
+    private static func properties(_ source: CGImageSource, image decoded: CGImage? = nil) -> Properties {
         var p = Properties()
         guard let dict = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else { return p }
         p.width = dict[kCGImagePropertyPixelWidth] as? Int ?? 0
         p.height = dict[kCGImagePropertyPixelHeight] as? Int ?? 0
         p.orientation = dict[kCGImagePropertyOrientation] as? Int ?? 1
-        if let image = CGImageSourceCreateImageAtIndex(source, 0, nil),
+        if let image = decoded ?? CGImageSourceCreateImageAtIndex(source, 0, nil),
            let space = image.colorSpace, let icc = space.copyICCData() {
             p.iccProfile = icc as Data
         }

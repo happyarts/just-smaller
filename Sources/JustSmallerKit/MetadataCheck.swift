@@ -82,13 +82,34 @@ enum MetadataCheck {
         }
     }
 
-    private static func verify(_ original: Data, _ result: Data, level: MetadataHandling) throws {
+    /// A JPEG XL made from a JPEG (`converted` true; the level was applied
+    /// to the JPEG before): what readers of the JPEG XL see is the JPEG's
+    /// metadata, no value changed and nothing new — and every rights field is
+    /// still visible. (IPTC-IIM has no place in JPEG XL: it is kept only for
+    /// rebuilding the JPEG, so rights stated only there would be hidden.)
+    static func verifyConverted(jpeg: URL, jxl: URL) throws {
+        try verify(Data(contentsOf: jpeg, options: .alwaysMapped), Data(contentsOf: jxl, options: .alwaysMapped),
+                   level: .keep, converted: true)
+    }
+
+    private static func verify(_ original: Data, _ result: Data, level: MetadataHandling, converted: Bool = false) throws {
         if level != .keep, hasMakerNotesToRemove(result, level: level) { throw leftover }
         let merged = fields(original), after = fields(result)
         var sources: [[Key: Value]]?, regions: [Data]?
         for (key, value) in after {
             if level != .keep, removes(key, at: level) {
                 throw leftover
+            }
+            if converted {
+                // ImageIO derives these from a JPEG XL's own header; the
+                // orientation is checked against the JPEG's with the pixels.
+                if key.ns == tiffNamespace && ["Orientation", "TileWidth", "TileLength"].contains(key.name)
+                    || key.ns == exifNamespace && ["PixelXDimension", "PixelYDimension"].contains(key.name) { continue }
+                // A date ImageIO completed from IPTC-IIM in the JPEG (time
+                // zone, fractions of a second) shows without that in the
+                // JPEG XL: the same date.
+                if let before = merged[key]?.text, value.text.wholeMatch(of: /\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?/) != nil,
+                   before.hasPrefix(value.text), let next = before.dropFirst(value.text.count).first, ".+-Z".contains(next) { continue }
             }
             // The IIM digest is updated together with the IIM block; the
             // lengths in Google's container directory with the images it
@@ -106,7 +127,11 @@ enum MetadataCheck {
         }
         for (key, _) in merged where after[key] == nil {
             let group = MetadataPolicy.group(xmpNamespace: key.ns, name: key.name)
-            if level == .keep || level != .removeAll && group == .rights {
+            if converted {
+                if group == .rights {
+                    throw VerificationError(reason: String(localized: "copyright or creator information would be hidden", bundle: .module))
+                }
+            } else if level == .keep || level != .removeAll && group == .rights {
                 throw VerificationError(reason: String(localized: "copyright or creator information lost", bundle: .module))
             }
         }
@@ -147,6 +172,9 @@ enum MetadataCheck {
             removes($0, at: level)
         } || hasMakerNotesToRemove(data, level: level)
     }
+
+    private static let tiffNamespace = "http://ns.adobe.com/tiff/1.0/"
+    private static let exifNamespace = "http://ns.adobe.com/exif/1.0/"
 
     /// ImageIO's own bookkeeping (e.g. whether the file had IIM data).
     private static let imageIONamespace = "http://ns.apple.com/ImageIO/1.0/"

@@ -8,6 +8,8 @@ and a command-line tool built on it:
 just-smaller photo.jpg screenshots/        # lossless, in place, originals to the Trash
 just-smaller --lossy --suffix=-web *.png    # lossy, next to the originals
 just-smaller --output ~/Desktop/small --json shoot/
+just-smaller --to jxl photos/                # JPEG → JPEG XL without loss
+just-smaller --to jpeg photo.jxl              # … and back, byte for byte
 ```
 
 By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
@@ -22,7 +24,13 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
   rendered and compared. A result that fails is thrown away.
 - **Lossless by default.** Lossless results are pixel-identical to the
   original and marked as such.
-- **The format never changes behind your back.** A PNG stays a PNG.
+- **The format never changes behind your back.** A PNG stays a PNG. Only
+  when asked (`--to jxl`), a JPEG becomes a JPEG XL: smaller, yet
+  holding the very same DCT coefficients, and the JPEG can be rebuilt from it
+  byte for byte (`--to jpeg`). It counts only when that rebuilding gives
+  exactly the JPEG and a second, independent JPEG XL decoder shows the same
+  picture. A JPEG XL viewer shows one image only, so HDR photos with a gain
+  map, portraits with a depth map and motion photos stay JPEG.
 - **Private metadata is removed** (location, camera serial numbers, editing
   history) — never the colour profile or the orientation, which would change
   how the image looks. Files with Content Credentials (C2PA) are left alone,
@@ -41,6 +49,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
 | HEIC | own metadata filter: EXIF and XMP rewritten in their items, the coded image, HDR gain maps and depth data stay byte for byte | re-encoded with Apple ImageIO, the original's metadata put back; HDR gain maps, depth data and HDR brightness kept |
 | GIF | comes in a later version | |
+| JPEG → JPEG XL (on request) | own metadata filter, then `Tools/jxl-transcode` ([libjxl](https://github.com/libjxl/libjxl)): the JPEG's coefficients coded anew, with what it takes to rebuild the JPEG; proven by rebuilding it, and by decoding with [jxl-rs](https://github.com/libjxl/jxl-rs) (`Tools/jxl-pixels`) | — |
 
 ## Building
 
@@ -75,12 +84,15 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Vendor/zopfli` | The zopfli crate OxiPNG uses with `--zopfli`, from our fork `happyarts/zopfli` (its `main`): the matches of the first pass are kept for later iterations (identical output); optional binary tree match finder, more Huffman code length choices for each dynamic block, parse passes with the real code lengths, the 1 MB chunks compressed on several threads (identical output), and blocks joined across those chunks where one block is smaller than two; buffers are allocated once and reused (identical output); minimum Rust version 1.88, as OxiPNG's |
 | `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |
 | `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
-| `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients (C, libjpeg-turbo) |
+| `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients, or a JPEG's pixels with another decoder's (C, libjpeg-turbo) |
+| `Tools/jxl-transcode` | JPEG to JPEG XL without loss and back, with libjxl (C++) |
+| `Tools/jxl-pixels` | Decodes JPEG XL with jxl-rs, the decoder of Chrome and Firefox, for checking (Rust) |
+| `Vendor/libjxl` | libjxl at a release tag, built as a small library: only Highway's NEON code paths, skcms |
 | `Tests/corpus` | Builds a local test corpus and runs the tool over it, checking every result |
 
 ## Licence
 
 Just Smaller's own code is under the [Mozilla Public License 2.0](LICENSE).
 The bundled optimizers keep their own licences: OxiPNG, OXVG, quantizr
-(MIT); libwebp, jpegli and libjpeg-turbo (BSD-style). They run as
+(MIT); libwebp, jpegli, libjpeg-turbo, libjxl and jxl-rs (BSD-style). They run as
 separate programs.

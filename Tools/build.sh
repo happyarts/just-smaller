@@ -34,13 +34,17 @@ fi
 
 # Fetch missing sources on first use (a checkout that is already there is left
 # as it is); jpegli only needs a few of its submodules.
-for dep in oxipng oxvg libwebp libjpeg-turbo jpegli libdeflater zopfli; do
+for dep in oxipng oxvg libwebp libjpeg-turbo jpegli libdeflater zopfli libjxl; do
 	[ -n "$(ls -A "$ROOT/Vendor/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT" submodule update --init --depth 1 "Vendor/$dep"
 done
 for dep in highway skcms libpng zlib lcms libjpeg-turbo; do
 	[ -n "$(ls -A "$ROOT/Vendor/jpegli/third_party/$dep" 2>/dev/null)" ] ||
 		git -C "$ROOT/Vendor/jpegli" submodule update --init --depth 1 "third_party/$dep"
+done
+for dep in brotli highway skcms; do
+	[ -n "$(ls -A "$ROOT/Vendor/libjxl/third_party/$dep" 2>/dev/null)" ] ||
+		git -C "$ROOT/Vendor/libjxl" submodule update --init --depth 1 "third_party/$dep"
 done
 [ -n "$(ls -A "$ROOT/Vendor/libdeflater/libdeflate-sys/libdeflate" 2>/dev/null)" ] ||
 	git -C "$ROOT/Vendor/libdeflater" submodule update --init --depth 1 libdeflate-sys/libdeflate
@@ -50,7 +54,7 @@ done
 # libdeflate sits inside libdeflater. sync first: a pin may also have moved
 # to another repository (our forks).
 stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/libdeflater Vendor/zopfli | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+	Vendor/jpegli Vendor/libdeflater Vendor/zopfli Vendor/libjxl | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
 if [ -n "$stale" ]; then
 	echo "Not at the pinned commit: $stale" >&2
 	echo "Update with: git submodule sync && git submodule update --depth 1 $stale" >&2
@@ -105,6 +109,28 @@ cp "$JPEGLI/tools/cjpegli" "$OUT/cjpegli"
 # zlib's CMake renames zconf.h in its source tree; put it back so the submodule stays clean
 git -C "$ROOT/Vendor/jpegli/third_party/zlib" checkout -- zconf.h 2>/dev/null || true
 
+# JPEG XL: libjxl only as a library, for our jxl-transcode (JPEG to JPEG XL
+# and back, without loss). Small: only Highway's NEON code paths (Apple
+# Silicon has no SVE), skcms for colour, built for size.
+log "libjxl"
+JXL=$WORK/libjxl
+run libjxl-configure cmake -S "$ROOT/Vendor/libjxl" -B "$JXL" $CMAKE_COMMON \
+	-DCMAKE_C_FLAGS_RELEASE="-Os -DNDEBUG" -DCMAKE_CXX_FLAGS_RELEASE="-Os -DNDEBUG" -DJPEGXL_ENABLE_LTO=ON \
+	-DBUILD_TESTING=OFF -DJPEGXL_STATIC=OFF -DJPEGXL_ENABLE_TOOLS=OFF -DJPEGXL_ENABLE_BENCHMARK=OFF \
+	-DJPEGXL_ENABLE_EXAMPLES=OFF -DJPEGXL_ENABLE_SJPEG=OFF -DJPEGXL_ENABLE_OPENEXR=OFF -DJPEGXL_ENABLE_SKCMS=ON \
+	-DJPEGXL_ENABLE_JNI=OFF -DJPEGXL_ENABLE_MANPAGES=OFF -DJPEGXL_ENABLE_DOXYGEN=OFF -DJPEGXL_ENABLE_DEVTOOLS=OFF \
+	-DJPEGXL_ENABLE_FUZZERS=OFF -DJPEGXL_ENABLE_VIEWERS=OFF -DJPEGXL_ENABLE_PLUGINS=OFF -DJPEGXL_ENABLE_TCMALLOC=OFF \
+	-DJPEGXL_ENABLE_TRANSCODE_JPEG=ON -DJPEGXL_ENABLE_BOXES=ON \
+	-DJPEGXL_ENABLE_HWY_SVE=OFF -DJPEGXL_ENABLE_HWY_SVE2=OFF -DJPEGXL_ENABLE_HWY_SVE2_128=OFF \
+	-DJPEGXL_ENABLE_HWY_SVE_256=OFF -DJPEGXL_ENABLE_HWY_NEON_BF16=OFF -DJPEGXL_ENABLE_HWY_NEON_WITHOUT_AES=OFF
+run libjxl cmake --build "$JXL" -j "$JOBS" --target jxl jxl_cms
+log "jxl-transcode"
+c++ -std=c++17 -Os -flto -DNDEBUG -mcpu=apple-m1 -mmacosx-version-min=26.0 -DJXL_STATIC_DEFINE -DJXL_CMS_STATIC_DEFINE \
+	-I"$ROOT/Vendor/libjxl/lib/include" -I"$JXL/lib/include" "$ROOT/Tools/jxl-transcode/main.cc" \
+	"$JXL/lib/libjxl.a" "$JXL/lib/libjxl_cms.a" "$JXL/third_party/brotli/libbrotlienc.a" \
+	"$JXL/third_party/brotli/libbrotlidec.a" "$JXL/third_party/brotli/libbrotlicommon.a" \
+	"$JXL/third_party/highway/libhwy.a" -Wl,-dead_strip -o "$OUT/jxl-transcode"
+
 log "libwebp"
 WEBP=$WORK/libwebp
 run libwebp-configure cmake -S "$ROOT/Vendor/libwebp" -B "$WEBP" $CMAKE_COMMON \
@@ -148,12 +174,15 @@ cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng \
 # also carries a JSX compiler, a linter and a language server.
 cargo_tool svg-tool "$ROOT/Tools/svg-tool/Cargo.toml" --locked
 cargo_tool png-quantize "$ROOT/Tools/png-quantize/Cargo.toml" --locked
+# jxl-rs, the JPEG XL decoder of Chrome and Firefox: checks a converted image
+# independently of libjxl.
+cargo_tool jxl-pixels "$ROOT/Tools/jxl-pixels/Cargo.toml" --locked
 
 # The C tools come with their symbol tables, which nothing needs; the Rust
 # tools are stripped by their release profiles.
-strip "$OUT/jpeg-scan" "$OUT/jpegcmp" "$OUT/cjpegli" "$OUT/cwebp"
+strip "$OUT/jpeg-scan" "$OUT/jpegcmp" "$OUT/cjpegli" "$OUT/cwebp" "$OUT/jxl-transcode"
 # Signed with the hardened runtime: none of them loads code at run time.
-for tool in jpeg-scan jpegcmp cjpegli cwebp oxipng svg-tool png-quantize; do
+for tool in jpeg-scan jpegcmp cjpegli cwebp jxl-transcode oxipng svg-tool png-quantize jxl-pixels; do
 	if [ -n "$ENTITLEMENTS" ]; then
 		codesign --force --sign "$IDENTITY" --timestamp=none --options runtime --entitlements "$ENTITLEMENTS" "$OUT/$tool" 2>/dev/null
 	else

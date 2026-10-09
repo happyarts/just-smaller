@@ -1,0 +1,21 @@
+[package]
+name = "jxl-pixels"
+version = "1.0.0"
+edition = "2024"
+license = "MPL-2.0"
+description = "Decodes a JPEG XL image to pixels with jxl-rs, the decoder of Chrome and Firefox, for checking a converted image independently of libjxl."
+publish = false
+
+[dependencies]
+jxl = { version = "=0.7.4", default-features = false, features = ["neon"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# Stripping would also strip the proc-macro libraries the build loads.
+[profile.release.build-override]
+strip = false

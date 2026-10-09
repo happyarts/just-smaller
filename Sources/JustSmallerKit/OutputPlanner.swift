@@ -78,6 +78,21 @@ public enum OutputPlanner {
         }
     }
 
+    /// Where a converted file goes: a new file in every case, named after the
+    /// original with the target's extension — next to it (replacing it: the
+    /// original goes once the new file is there), with the suffix, or in the
+    /// output folder. Lossless settings apply: converting keeps the picture.
+    public static func conversion(for file: URL, root: URL?, settings: OptimizationSettings,
+                                  to target: ConversionTarget) -> (target: URL, replacesOriginal: Bool) {
+        var lossless = settings
+        lossless.lossy = false
+        let renamed = file.deletingPathExtension().appendingPathExtension(target.pathExtension)
+        switch destination(for: renamed, root: root, settings: lossless) {
+        case .replace: return (renamed, true)
+        case .newFile(let url, _): return (url, false)
+        }
+    }
+
     /// Whether a file found while scanning a folder is one of Just Smaller's own
     /// results, which must not be optimized a second time.
     public static func isOwnOutput(_ file: URL, settings: OptimizationSettings) -> Bool {

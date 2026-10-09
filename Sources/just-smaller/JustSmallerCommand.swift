@@ -11,6 +11,9 @@ struct JustSmallerCommand: AsyncParsableCommand {
             PNG, JPEG, WebP, SVG and HEIC files are optimized in place; folders are \
             searched for images. Lossless results are proven identical before they \
             replace anything, and replaced originals go to the Trash.
+
+            With --to jxl, JPEGs are converted to JPEG XL instead, without loss: the \
+            JPEG can be rebuilt from it byte for byte, which --to jpeg does.
             """,
         version: "2.0")
 
@@ -32,6 +35,12 @@ struct JustSmallerCommand: AsyncParsableCommand {
 
     @Option(help: "How long to search for the smallest file: fast, balanced, thorough, maximum.")
     var effort = "balanced"
+
+    @Option(help: """
+        Convert instead of optimizing: jxl turns JPEGs into JPEG XL without loss (photo.jpg → photo.jxl); \
+        jpeg turns such a JPEG XL back into the JPEG it was made from.
+        """)
+    var to: String?
 
     @Option(help: "Write results next to the originals, with this suffix added to the name.")
     var suffix: String?
@@ -55,6 +64,8 @@ struct JustSmallerCommand: AsyncParsableCommand {
         guard (1...100).contains(quality) else { throw ValidationError("--quality must be between 1 and 100.") }
         guard Effort(rawValue: effort) != nil else { throw ValidationError("--effort must be fast, balanced, thorough or maximum.") }
         guard MetadataHandling(rawValue: metadata) != nil else { throw ValidationError("--metadata must be keep, private, copyright or none.") }
+        guard to.map({ ConversionTarget(rawValue: $0) != nil }) ?? true else { throw ValidationError("--to must be jxl or jpeg.") }
+        guard to == nil || !lossy else { throw ValidationError("--to converts without loss; it can't be combined with --lossy.") }
         guard suffix == nil || output == nil else { throw ValidationError("Use either --suffix or --output.") }
         if let suffix {
             // An empty suffix would make "next to the original" mean "over it".
@@ -86,13 +97,16 @@ struct JustSmallerCommand: AsyncParsableCommand {
         // A file given twice, or given and also inside a given folder, is
         // optimized once.
         var seen = Set<String>()
-        let found = await FolderScanner.imageFiles(in: paths.map { URL(fileURLWithPath: $0) }) {
+        let conversion = to.flatMap(ConversionTarget.init(rawValue:))
+        let found = await FolderScanner.imageFiles(in: paths.map { URL(fileURLWithPath: $0) },
+                                                   extensions: conversion?.sourceExtensions ?? FolderScanner.extensions) {
             OutputPlanner.isOwnOutput($0, settings: fixed)
         }.filter { seen.insert($0.file.standardizedFileURL.path.lowercased()).inserted }
         // As in the app: twice the cores, but at most one file per GB of memory.
         let gigabytes = Int(ProcessInfo.processInfo.physicalMemory >> 30)
         let limit = max(1, jobs ?? min(2 * ProcessInfo.processInfo.activeProcessorCount, max(2, gigabytes)))
         let optimizer = FileOptimizer(settings: fixed)
+        let converter = FileConverter(settings: fixed)
         let asJSON = json
 
         var failed = 0, skipped = 0, saved: Int64 = 0, total: Int64 = 0
@@ -101,8 +115,13 @@ struct JustSmallerCommand: AsyncParsableCommand {
             func startNext() {
                 guard let entry = pending.popFirst() else { return }
                 group.addTask {
-                    let destination = OutputPlanner.destination(for: entry.file, root: entry.root, settings: fixed)
                     do {
+                        if let conversion {
+                            let (target, replaces) = OutputPlanner.conversion(for: entry.file, root: entry.root, settings: fixed, to: conversion)
+                            return Report(file: entry.file, outcome: try await converter.convert(entry.file, to: conversion, destination: target,
+                                                                                                replacesOriginal: replaces) { _ in })
+                        }
+                        let destination = OutputPlanner.destination(for: entry.file, root: entry.root, settings: fixed)
                         return Report(file: entry.file, outcome: try await optimizer.optimize(entry.file, to: destination) { _ in })
                     } catch {
                         return Report(file: entry.file, error: error.localizedDescription)

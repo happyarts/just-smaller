@@ -168,7 +168,7 @@ enum FileReplacer {
     /// The creation date stays the original's; the modification date is
     /// "now" — the content did change, which backup and sync tools need to
     /// see — unless the user wants to keep it.
-    private static func restoreDates(_ dates: URLResourceValues, on url: URL, keepModificationDate: Bool) {
+    static func restoreDates(_ dates: URLResourceValues, on url: URL, keepModificationDate: Bool) {
         var restored = URLResourceValues()
         restored.creationDate = dates.creationDate
         restored.contentModificationDate = keepModificationDate ? dates.contentModificationDate : Date()
@@ -179,7 +179,7 @@ enum FileReplacer {
     /// replaceItemAt would reset the permissions to the replacement's (0600
     /// for a temporary file), so the original's are copied first and the swap
     /// keeps the replacement's metadata.
-    private static func copyMetadata(from original: URL, to replacement: URL) throws {
+    static func copyMetadata(from original: URL, to replacement: URL) throws {
         if copyfile(original.path, replacement.path, nil, copyfile_flags_t(COPYFILE_ACL | COPYFILE_STAT | COPYFILE_XATTR)) != 0 {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
@@ -283,7 +283,7 @@ enum FileReplacer {
     }
 
     /// "name 2.ext", "name 3.ext" … — the first that doesn't exist.
-    private static func freeName(for url: URL) -> URL {
+    static func freeName(for url: URL) -> URL {
         let stem = url.deletingPathExtension().lastPathComponent
         let ext = url.pathExtension.isEmpty ? "" : "." + url.pathExtension
         var n = 2

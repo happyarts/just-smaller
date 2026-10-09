@@ -26,3 +26,6 @@
 	path = Vendor/zopfli
 	url = https://github.com/happyarts/zopfli.git
 	shallow = true
+[submodule "Vendor/libjxl"]
+	path = Vendor/libjxl
+	url = https://github.com/libjxl/libjxl.git

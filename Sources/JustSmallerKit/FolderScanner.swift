@@ -2,7 +2,7 @@ import Foundation
 
 /// Expands dropped folders into the image files they contain.
 public enum FolderScanner {
-    private static let extensions: Set<String> = ["png", "jpg", "jpeg", "jpe", "mpo", "gif", "webp", "svg", "heic", "heif"]
+    public static let extensions: Set<String> = ["png", "jpg", "jpeg", "jpe", "mpo", "gif", "webp", "svg", "heic", "heif"]
 
     /// Whether a file found in a folder looks like an image Just Smaller handles:
     /// an image extension, not hidden, not inside a package.
@@ -22,13 +22,15 @@ public enum FolderScanner {
 
     /// Files given directly are kept whatever their name (the optimizer checks
     /// their contents); inside folders only files with an image extension are
-    /// picked up, and `skip` can exclude more (Just Smaller's own results). Hidden
-    /// files and package contents are skipped.
-    public static func imageFiles(in urls: [URL], skip: @escaping @Sendable (URL) -> Bool = { _ in false }) async -> [Found] {
-        await Task.detached(priority: .userInitiated) { scan(urls, skip: skip) }.value
+    /// picked up (`extensions`: others, e.g. for a conversion), and `skip` can
+    /// exclude more (Just Smaller's own results). Hidden files and package
+    /// contents are skipped.
+    public static func imageFiles(in urls: [URL], extensions: Set<String> = FolderScanner.extensions,
+                                  skip: @escaping @Sendable (URL) -> Bool = { _ in false }) async -> [Found] {
+        await Task.detached(priority: .userInitiated) { scan(urls, extensions: extensions, skip: skip) }.value
     }
 
-    private static func scan(_ urls: [URL], skip: (URL) -> Bool) -> [Found] {
+    private static func scan(_ urls: [URL], extensions: Set<String>, skip: (URL) -> Bool) -> [Found] {
         var result: [Found] = []
         let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .isPackageKey]
         for url in urls {
