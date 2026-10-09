@@ -71,29 +71,42 @@ final class AnimatedPNGTests {
             + be32(Int(f.delay.0) << 16 | Int(f.delay.1)) + [f.dispose, f.blend]
     }
 
-    /// A frame's image data: each row with filter 0, deflated.
-    static func imageData(_ k: Int, _ f: Frame) -> [UInt8] {
-        let rgba = pixels(k, f), row = f.width * 4
-        let rows = (0..<f.height).flatMap { [0] + rgba[$0 * row..<($0 + 1) * row] }
+    /// The colours of a palette APNG, some half and some fully transparent.
+    static let palette: [[UInt8]] = (0..<16).map { (i: Int) -> [UInt8] in
+        let alpha: UInt8 = i % 5 == 0 ? 0 : i % 3 == 0 ? 128 : 255
+        return [UInt8(i * 16), UInt8(255 - i * 16), UInt8(i * 53 & 255), alpha]
+    }
+
+    /// A frame's image data: each row with filter 0, deflated. RGBA, or
+    /// indices into `palette`, different in every frame.
+    static func imageData(_ k: Int, _ f: Frame, palette: Bool = false) -> [UInt8] {
+        let values = palette ? (0..<f.width * f.height).map { UInt8(($0 % f.width / 4 + $0 / f.width / 4 + 5 * k) % 16) } : pixels(k, f)
+        let row = f.width * (palette ? 1 : 4)
+        let rows = (0..<f.height).flatMap { [0] + values[$0 * row..<($0 + 1) * row] }
         return [UInt8](Zlib.deflate(Data(rows))!)
     }
 
-    /// An APNG of `frames` (RGBA, 8 bits), played `plays` times (0: for
-    /// ever), with `chunks` before the image data. The first frame is the
-    /// image (IDAT), the others follow in fdAT chunks.
-    static func apng(_ frames: [Frame] = frames, plays: Int = 0, chunks: [Data] = []) -> Data {
+    /// An APNG of `frames` (RGBA, or with `palette` a palette image; 8 bits),
+    /// played `plays` times (0: for ever), with `chunks` before the image
+    /// data. The first frame is the image (IDAT), the others follow in fdAT
+    /// chunks.
+    static func apng(_ frames: [Frame] = frames, plays: Int = 0, chunks: [Data] = [], palette: Bool = false) -> Data {
         var png = Data(PNGChunks.signature)
-        png += PNGChunks.write("IHDR", be32(frames[0].width) + be32(frames[0].height) + [8, 6, 0, 0, 0])
+        png += PNGChunks.write("IHDR", be32(frames[0].width) + be32(frames[0].height) + [8, palette ? 3 : 6, 0, 0, 0])
         png += PNGChunks.write("acTL", be32(frames.count) + be32(plays))
         for chunk in chunks { png += chunk }
+        if palette {
+            png += PNGChunks.write("PLTE", Self.palette.flatMap { $0.prefix(3) })
+            png += PNGChunks.write("tRNS", Self.palette.map { $0[3] })
+        }
         var sequence = 0
         for (k, f) in frames.enumerated() {
             png += PNGChunks.write("fcTL", fcTL(sequence, f))
             sequence += 1
             if k == 0 {
-                png += PNGChunks.write("IDAT", imageData(k, f))
+                png += PNGChunks.write("IDAT", imageData(k, f, palette: palette))
             } else {
-                png += PNGChunks.write("fdAT", be32(sequence) + imageData(k, f))
+                png += PNGChunks.write("fdAT", be32(sequence) + imageData(k, f, palette: palette))
                 sequence += 1
             }
         }
@@ -180,18 +193,19 @@ final class AnimatedPNGTests {
 
     // MARK: - Tests
 
-    /// Optimized at each effort and in lossy mode: the animation chunks
-    /// keep every frame's region, timing, disposal and blending and the
-    /// number of plays; every frame shows the same pixels for as long as
-    /// before; the metadata filter removed what the level removes and
-    /// nothing of the animation.
-    @Test(arguments: [(Effort.fast, false), (.balanced, false), (.maximum, false), (.balanced, true)])
-    func staysAnimatedWithEveryFrame(effort: Effort, lossy: Bool) async throws {
+    /// Optimized at each effort, in lossy mode and as a palette image: the
+    /// animation chunks keep every frame's region, timing, disposal and
+    /// blending and the number of plays; every frame shows the same pixels
+    /// for as long as before; the metadata filter removed what the level
+    /// removes and nothing of the animation.
+    @Test(arguments: [(Effort.fast, false, false), (.balanced, false, false), (.maximum, false, false), (.balanced, true, false),
+                      (.balanced, false, true)])
+    func staysAnimatedWithEveryFrame(effort: Effort, lossy: Bool, palette: Bool) async throws {
         settings.effort = effort
         settings.lossy = lossy
         settings.outputLossy = .replace
         settings.metadata = .removePrivate
-        let original = Self.apng(plays: 3, chunks: [PNGChunks.write("tEXt", Array("Software\0SecretApp".utf8))])
+        let original = Self.apng(plays: 3, chunks: [PNGChunks.write("tEXt", Array("Software\0SecretApp".utf8))], palette: palette)
         let url = try saved(original, "animated-\(effort)-\(lossy).png")
         let reference = try saved(original, "reference-\(effort)-\(lossy).png")
 
