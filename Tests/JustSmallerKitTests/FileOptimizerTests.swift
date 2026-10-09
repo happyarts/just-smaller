@@ -171,23 +171,6 @@ final class FileOptimizerTests {
         try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
     }
 
-    @Test func animatedPNGGoesToOxiPNG() async throws {
-        let url = dir.appending(path: "animated.png")
-        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 3, nil)!
-        for _ in 0..<3 {
-            CGImageDestinationAddImage(dest, image(), [kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.2]] as CFDictionary)
-        }
-        #expect(CGImageDestinationFinalize(dest))
-        let reference = dir.appending(path: "reference-animated.png")
-        try FileManager.default.copyItem(at: url, to: reference)
-
-        guard case .optimized(_, _, let tools, _, _, _) = try await optimize(url) else {
-            Issue.record("not optimized, nothing checked"); return
-        }
-        #expect(!tools.contains("ECT"))
-        try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
-    }
-
     @Test func svgGetsSmallerAndLooksTheSame() async throws {
         let url = dir.appending(path: "editor.svg")
         let svg = """
@@ -413,10 +396,13 @@ final class FileOptimizerTests {
             + Data([0xFF, 0xDA, 0x00, 0x02]) + Data("in the image".utf8) + Data([0xFF, 0xD9])
         let png = Data(PNGChunks.signature) + PNGChunks.write("IHDR", [UInt8](repeating: 1, count: 13))
             + PNGChunks.write("tEXt", Array("in a comment".utf8)) + PNGChunks.write("IDAT", Array("in the image".utf8)) + PNGChunks.write("IEND", [])
-        for data in [jpeg, png] {
+        // An APNG's later frames are image data too.
+        let apng = png.dropLast(12) + PNGChunks.write("fdAT", [0, 0, 0, 1] + Array("in a frame".utf8)) + PNGChunks.write("IEND", [])
+        for data in [jpeg, png, apng] {
             let regions = MetadataRegions.of(data)
             #expect(regions.contains { $0.range(of: Data("in a comment".utf8)) != nil })
             #expect(!regions.contains { $0.range(of: Data("in the image".utf8)) != nil })
+            #expect(!regions.contains { $0.range(of: Data("in a frame".utf8)) != nil })
         }
         // HEIC keeps EXIF as an item in mdat, next to the image data: the item counts, the image doesn't.
         let heic = try Data(contentsOf: TestImages.gainMapPhoto(at: dir.appending(path: "regions.heic"), type: .heic))
@@ -460,21 +446,6 @@ final class FileOptimizerTests {
         }
         guard case .skipped = outcome else { Issue.record("replaced a changed file: \(outcome)"); return }
         #expect(try Data(contentsOf: url) == edited)
-    }
-
-    @Test func lossyAnimatedPNGStaysAnimated() async throws {
-        var settings = self.settings
-        settings.lossy = true
-        settings.outputLossy = .replace
-        let url = dir.appending(path: "animated-lossy.png")
-        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 3, nil)!
-        for _ in 0..<3 {
-            CGImageDestinationAddImage(dest, image(), [kCGImagePropertyPNGDictionary: [kCGImagePropertyAPNGDelayTime: 0.2]] as CFDictionary)
-        }
-        #expect(CGImageDestinationFinalize(dest))
-        _ = try await FileOptimizer(settings: settings).optimize(url) { _ in }
-        let source = try #require(CGImageSourceCreateWithURL(url as CFURL, nil))
-        #expect(CGImageSourceGetCount(source) == 3)
     }
 
     /// Sprites: symbols nothing in the file refers to are used by other files

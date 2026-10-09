@@ -144,6 +144,10 @@ struct PipelineTests {
         #expect(CGImageDestinationFinalize(dest))
         let facts = FileOptimizer.facts(about: url, format: .png, size: 1)
         #expect(!facts.isAnimated && facts.bitsPerComponent == 8)
+        // An APNG is read as an animation (the stages above for animations apply).
+        let animated = dir.appending(path: "animated.png")
+        try AnimatedPNGTests.apng().write(to: animated)
+        #expect(FileOptimizer.facts(about: animated, format: .png, size: 1).isAnimated)
     }
 
     private func temporaryDirectory() throws -> URL {
