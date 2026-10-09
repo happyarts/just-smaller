@@ -1,10 +1,9 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
 # Vendor/ (git submodules pinned to released versions; oxvg to a main commit
-# with path and transform fixes that aren't released yet; OxiPNG and zopfli
-# to our forks, happyarts/oxipng and happyarts/zopfli) and Tools/. libdeflate
-# (through the libdeflater crate) is built from a copy with our patches
-# (Tools/libdeflater/patches) applied.
+# with path and transform fixes that aren't released yet; OxiPNG, zopfli and
+# libdeflater to our forks, happyarts/oxipng, happyarts/zopfli and
+# happyarts/libdeflater, whose libdeflate is happyarts/libdeflate) and Tools/.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -61,26 +60,6 @@ run() { # name, command… — output goes to build/work/NAME.log, shown on fail
 	name=$1; shift
 	"$@" >"$WORK/$name.log" 2>&1 || { tail -40 "$WORK/$name.log" >&2; log "error: building $name failed"; exit 1; }
 }
-
-# A copy of a pinned checkout with our patches applied, so the checkout stays
-# at its pin. Renewed, in a fresh folder swapped in whole, only when the pin, a
-# local change or a patch changes: builds stay incremental.
-patched_copy() { # checkout dest patches-dir
-	pc_stamp=$( { git -C "$1" rev-parse HEAD; git -C "$1" status --porcelain; git -C "$1" diff HEAD;
-		git -C "$1" submodule status --recursive; git -C "$1" submodule --quiet foreach --recursive git diff HEAD;
-		cat "$3"/*.patch; } | shasum | cut -c1-40)
-	[ "$(cat "$2.stamp" 2>/dev/null)" = "$pc_stamp" ] && return
-	pc_fresh=$(mktemp -d "$2.XXXXXX")
-	rsync -a --exclude .git --exclude target --exclude tests/files "$1/" "$pc_fresh"
-	for pc_patch in "$3"/*.patch; do
-		run "$(basename "$2")-patch" patch -p1 --forward -d "$pc_fresh" -i "$pc_patch"
-	done
-	rm -rf "$2" "$2.stamp"
-	mv "$pc_fresh" "$2"
-	echo "$pc_stamp" > "$2.stamp"
-	renewed="$renewed $(basename "$2")"
-}
-renewed=
 
 # System libraries from Homebrew must not leak into the tools.
 CMAKE_COMMON="-DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=26.0
@@ -143,16 +122,19 @@ cargo_tool() { # name manifest [cargo args…]
 }
 # OxiPNG from our fork as it is checked out (Vendor/oxipng), with libdeflate
 # levels 13-14 and a faster zopfli instead of the ones from crates.io:
-# libdeflater (which brings libdeflate) from our patched copy, zopfli from our
-# fork as it is checked out (Vendor/zopfli).
-patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
-# Cargo rebuilds libdeflate's C files only when it sees a file of the crate
-# change, and it doesn't look into folders git ignores (build/): a new copy
-# of libdeflater starts OxiPNG's build afresh.
-case $renewed in *libdeflater-src*) rm -rf "$WORK/cargo-oxipng" ;; esac
+# libdeflater (which brings libdeflate) and zopfli from our forks as they are
+# checked out (Vendor/libdeflater, Vendor/zopfli).
+# Cargo may miss a change inside libdeflate's own submodule: a new libdeflater
+# or libdeflate commit starts OxiPNG's build afresh.
+ld_stamp=$(git -C "$ROOT/Vendor/libdeflater" rev-parse HEAD
+	git -C "$ROOT/Vendor/libdeflater/libdeflate-sys/libdeflate" rev-parse HEAD)
+if [ "$(cat "$WORK/libdeflater.stamp" 2>/dev/null)" != "$ld_stamp" ]; then
+	rm -rf "$WORK/cargo-oxipng"
+	echo "$ld_stamp" > "$WORK/libdeflater.stamp"
+fi
 cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng \
-	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
-	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\"" \
+	--config "patch.crates-io.libdeflater.path=\"$ROOT/Vendor/libdeflater\"" \
+	--config "patch.crates-io.libdeflate-sys.path=\"$ROOT/Vendor/libdeflater/libdeflate-sys\"" \
 	--config "patch.crates-io.zopfli.path=\"$ROOT/Vendor/zopfli\""
 # Only the OXVG optimiser and resvg, through our svg-tool: the oxvg command
 # also carries a JSX compiler, a linter and a language server.

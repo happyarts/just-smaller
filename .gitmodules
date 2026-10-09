@@ -20,7 +20,7 @@
 	shallow = true
 [submodule "Vendor/libdeflater"]
 	path = Vendor/libdeflater
-	url = https://github.com/libdeflater/libdeflater.git
+	url = https://github.com/happyarts/libdeflater.git
 	shallow = true
 [submodule "Vendor/zopfli"]
 	path = Vendor/zopfli
