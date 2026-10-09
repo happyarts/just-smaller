@@ -10,7 +10,8 @@ import Foundation
 /// "remove private data" keeps only what is known to be harmless.
 enum MetadataPolicy {
     enum Group: Int, Comparable {
-        /// Needed to show the image correctly, and whether it was made or
+        /// Needed to show the image correctly (orientation, colours, the
+        /// size it is shown and printed at), and whether it was made or
         /// changed by AI (IPTC digital source type). Kept in every level.
         case display
         /// Who made the image and the rights. Kept unless everything goes.
@@ -109,8 +110,10 @@ enum MetadataPolicy {
             case "Orientation", "ImageWidth", "ImageLength", "TileWidth", "TileLength", "BitsPerSample",
                  "Compression", "PhotometricInterpretation", "SamplesPerPixel", "PlanarConfiguration",
                  "YCbCrSubSampling", "YCbCrPositioning": return .display
-            // The colours, as EXIF's IFD0 states them (`group(exifTag:)`).
-            case "TransferFunction", "WhitePoint", "PrimaryChromaticities": return .display
+            // The colours and the resolution, as EXIF's IFD0 states them
+            // (`group(exifTag:)`).
+            case "TransferFunction", "WhitePoint", "PrimaryChromaticities",
+                 "XResolution", "YResolution", "ResolutionUnit": return .display
             case "Artist", "Copyright": return .rights
             case "Software", "NativeDigest": return nil
             default: return .imageInfo
@@ -230,9 +233,14 @@ enum MetadataPolicy {
                 // ICC profile, and ImageIO shows the photo in Adobe RGB from
                 // the white point, the primaries and EXIF's Gamma.
                 return .display
+            case 0x011A, 0x011B, 0x0128:
+                // XResolution, YResolution, ResolutionUnit: the size the image
+                // is shown at by apps that size images by their resolution
+                // (AppKit's NSImage), and printed at. In ImageIO, EXIF's
+                // resolution wins over JFIF's.
+                return .display
             case 0x013B, 0x8298, 0x9C9D: return .rights // Artist, Copyright, Windows author
             case 0x010E, 0x010F, 0x0110, // ImageDescription, Make, Model
-                 0x011A, 0x011B, 0x0128, // resolution
                  0x0132, 0x0213, // DateTime, YCbCrPositioning
                  0x4746, 0x4749, // Rating
                  0x9C9B, 0x9C9C, 0x9C9E, 0x9C9F: // Windows title, comment, keywords, subject
@@ -243,13 +251,18 @@ enum MetadataPolicy {
             switch tag {
             case 0xA001, 0xA500: return .display // ColorSpace, Gamma
             case 0x9000: return .display // ExifVersion: required in an EXIF IFD
+            case 0xA002, 0xA003:
+                // PixelXDimension, PixelYDimension: with a resolution other
+                // than 72 dpi, browsers show a JPEG at that size (HTML's
+                // density-corrected natural size).
+                return .display
             case 0x927C, 0x9286, 0xA004, 0xA420, 0xA430, 0xA431, 0xA435:
                 // MakerNote, UserComment, RelatedSoundFile, ImageUniqueID,
                 // CameraOwnerName, BodySerialNumber, LensSerialNumber
                 return nil
             case 0x829A, 0x829D, 0x8822, 0x8824, 0x8827, 0x8830...0x8835,
                  0x9003, 0x9004, 0x9010...0x9012, 0x9101, 0x9102, 0x9201...0x920A, 0x9214,
-                 0x9290...0x9292, 0x9400...0x9405, 0xA000, 0xA002, 0xA003,
+                 0x9290...0x9292, 0x9400...0x9405, 0xA000,
                  0xA20B, 0xA20E...0xA210, 0xA214, 0xA215, 0xA217, 0xA300...0xA302,
                  0xA401...0xA40C, 0xA432...0xA434, 0xA460...0xA462:
                 // exposure, dates and time zones, lens and camera settings
@@ -288,7 +301,7 @@ enum MetadataPolicy {
         case 0x0404, 0x0425: return .rights // IIM and its digest (filtered, updated)
         case 0x040A, 0x040B: return .rights // copyright flag, rights URL
         case 0x07D0...0x0BB7: return .rights // clipping paths for print
-        case 0x03ED: return .imageInfo // print resolution
+        case 0x03ED: return .display // resolution, as Photoshop keeps it
         default: return nil // thumbnails, print settings, slices, copies of EXIF/XMP
         }
     }

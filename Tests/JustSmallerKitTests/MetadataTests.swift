@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import CryptoKit
 import Foundation
@@ -157,18 +158,7 @@ final class MetadataTests {
                              exif: [(0xA001, 3, [0xFF, 0xFF]), (0xA500, 5, rationals([(22, 10)])),
                                     (0xA431, 2, Array("SN12345\0".utf8))],
                              interop: [(0x0001, 2, Array("R03\0".utf8)), (0x0002, 7, Array("0100".utf8))])
-        // The image data of a JPEG ImageIO writes, with only this EXIF before it.
-        let plain = dir.appending(path: "plain.jpg")
-        let dest = CGImageDestinationCreateWithURL(plain as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
-        CGImageDestinationAddImage(dest, image(), [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
-        #expect(CGImageDestinationFinalize(dest))
-        let data = try Data(contentsOf: plain)
-        let (segments, scan) = try JPEGMarkers.headers(ByteView(data))
-        var jpeg = Data([0xFF, 0xD8]) + JPEGMarkers.write(0xE1, JPEGMarkers.exifHeader + tiff)
-        for s in segments where !(0xE0...0xEF).contains(s.marker) { jpeg += s.whole.bytes }
-        jpeg += data[scan...]
-        let url = dir.appending(path: "adobe-rgb-\(level.rawValue).jpg")
-        try jpeg.write(to: url)
+        let url = try jpeg("adobe-rgb-\(level.rawValue).jpg", exif: tiff)
 
         func colourSpace(_ url: URL) -> String? {
             CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }?
@@ -191,6 +181,59 @@ final class MetadataTests {
         let raw = try Data(contentsOf: url)
         #expect(raw.contains(Data("R03".utf8)))
         #expect(raw.contains(Data("SecretEditor".utf8)) == (level == .keep))
+    }
+
+    /// The size an image is shown at stays at every level: apps such as
+    /// Preview and Pages take it from the resolution (a Retina screenshot at
+    /// half its pixels), browsers from EXIF's resolution and pixel size.
+    @Test(arguments: [MetadataHandling.copyrightOnly, .removeAll])
+    func resolutionStaysAtEveryLevel(level: MetadataHandling) throws {
+        func rational(_ n: Int) -> [UInt8] { [24, 16, 8, 0].map { UInt8(n >> $0 & 0xFF) } + [0, 0, 0, 1] }
+        func long(_ n: Int) -> [UInt8] { [24, 16, 8, 0].map { UInt8(n >> $0 & 0xFF) } }
+        func size(_ url: URL) -> NSSize? { NSImage(contentsOf: url)?.size }
+        func block(dpi: Int) -> [UInt8] {
+            exifBlock(main: [(0x010F, 2, Array("Canon\0".utf8)), (0x011A, 5, rational(dpi)), (0x011B, 5, rational(dpi)),
+                             (0x0128, 3, [0, 2])],
+                      exif: [(0xA001, 3, [0, 1]), (0xA002, 4, long(64 * 72 / dpi)), (0xA003, 4, long(48 * 72 / dpi)),
+                             (0xA431, 2, Array("SN12345\0".utf8))],
+                      interop: [])
+        }
+
+        // A JPEG without JFIF: the size comes from EXIF alone.
+        let hiDPI = try jpeg("hidpi-\(level.rawValue).jpg", exif: block(dpi: 144))
+        try #require(size(hiDPI) == NSSize(width: 32, height: 24))
+        let result = try filtered(hiDPI, level)
+        #expect(size(result) == NSSize(width: 32, height: 24))
+        let exif = props(result)[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        #expect(exif?[kCGImagePropertyExifPixelXDimension] as? Int == 32)
+        #expect(exif?[kCGImagePropertyExifBodySerialNumber] == nil)
+
+        // At 72 dpi the pixel size says nothing more: no EXIF IFD for it alone.
+        let plain = try filtered(try jpeg("72dpi-\(level.rawValue).jpg", exif: block(dpi: 72)), level)
+        #expect(props(plain)[kCGImagePropertyDPIWidth] as? Int == 72)
+        #expect((props(plain)[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifPixelXDimension] == nil)
+
+        // A PNG's physical size (pHYs).
+        let png = dir.appending(path: "retina-\(level.rawValue).png")
+        let dest = CGImageDestinationCreateWithURL(png as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), [kCGImagePropertyDPIWidth: 144, kCGImagePropertyDPIHeight: 144] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        let out = dir.appending(path: "\(level.rawValue)-filtered.png")
+        try PNGMetadataFilter.filter(Data(contentsOf: png), level: level, orientation: 1).write(to: out)
+        try MetadataCheck.verify(original: png, result: out, level: level)
+        #expect(try PNGChunks.read(ByteView(Data(contentsOf: out)), strict: true).contains { $0.type == "pHYs" })
+        #expect(size(out) == NSSize(width: 32, height: 24))
+
+        // XMP's copy of the resolution, and Photoshop's.
+        let packet = Array(GoogleXMPSamples.packet("""
+            <rdf:Description xmlns:tiff="\(MetadataPolicy.NS.tiff)" tiff:XResolution="144/1" tiff:ResolutionUnit="2" \
+            tiff:Make="Canon"/>
+            """).utf8)
+        let xmp = String(decoding: try #require(XMPFilter.filter(packet, level: level)), as: UTF8.self)
+        #expect(xmp.contains("XResolution") && xmp.contains("ResolutionUnit") && !xmp.contains("Canon"))
+        let resolutionInfo: [UInt8] = [0, 144, 0, 0, 0, 1, 0, 1, 0, 144, 0, 0, 0, 1, 0, 1]
+        let resources = Array("8BIM".utf8) + [0x03, 0xED, 0, 0, 0, 0, 0, 16] + resolutionInfo
+        #expect(IPTCFilter.filter(resources, level: level).resources == resources)
     }
 
     // MARK: - XMP
@@ -630,6 +673,23 @@ final class MetadataTests {
     }
 
     // MARK: -
+
+    /// The image data of a JPEG ImageIO writes, with only this EXIF before
+    /// it: no JFIF, no ICC profile.
+    private func jpeg(_ name: String, exif tiff: [UInt8]) throws -> URL {
+        let plain = dir.appending(path: "plain-\(name)")
+        let dest = CGImageDestinationCreateWithURL(plain as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        let data = try Data(contentsOf: plain)
+        let (segments, scan) = try JPEGMarkers.headers(ByteView(data))
+        var jpeg = Data([0xFF, 0xD8]) + JPEGMarkers.write(0xE1, JPEGMarkers.exifHeader + tiff)
+        for s in segments where !(0xE0...0xEF).contains(s.marker) { jpeg += s.whole.bytes }
+        jpeg += data[scan...]
+        let url = dir.appending(path: name)
+        try jpeg.write(to: url)
+        return url
+    }
 
     /// A big-endian TIFF block with IFD0, an EXIF IFD and an Interop IFD.
     private func exifBlock(main: [(UInt16, UInt16, [UInt8])], exif: [(UInt16, UInt16, [UInt8])],

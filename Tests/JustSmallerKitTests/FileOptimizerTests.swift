@@ -828,15 +828,15 @@ final class FileOptimizerTests {
                   chunk("tIME", [0]), chunk("IEND")] { png.append(c) }
         // Read strictly: the filter's CRCs must be right too.
         func types(_ data: Data) throws -> [String] { try PNGChunks.read(ByteView(data), strict: true).map(\.type) }
-        #expect(try types(PNGMetadataFilter.filter(png, level: .removeAll, orientation: 1)) == ["IHDR", "iCCP", "cICP", "IDAT", "IEND"])
+        #expect(try types(PNGMetadataFilter.filter(png, level: .removeAll, orientation: 1)) == ["IHDR", "iCCP", "pHYs", "cICP", "IDAT", "IEND"])
         #expect(try types(PNGMetadataFilter.filter(png, level: .removeAll, orientation: 6))
-                == ["IHDR", "eXIf", "iCCP", "cICP", "IDAT", "IEND"])
-        // The author stays with the rights, the physical size with the image
-        // info; the time goes, and so does unreadable EXIF.
+                == ["IHDR", "eXIf", "iCCP", "pHYs", "cICP", "IDAT", "IEND"])
+        // The author stays with the rights, the physical size at every level;
+        // the time goes, and so does unreadable EXIF.
         #expect(try types(PNGMetadataFilter.filter(png, level: .removePrivate, orientation: 1))
                 == ["IHDR", "iCCP", "tEXt", "pHYs", "cICP", "IDAT", "IEND"])
         #expect(try types(PNGMetadataFilter.filter(png, level: .copyrightOnly, orientation: 1))
-                == ["IHDR", "iCCP", "tEXt", "cICP", "IDAT", "IEND"])
+                == ["IHDR", "iCCP", "tEXt", "pHYs", "cICP", "IDAT", "IEND"])
         #expect(try PNGMetadataFilter.filter(png, level: .keep, orientation: 6) == png)
         // Readable EXIF stays where it stands, once.
         var rotated = Data(PNGChunks.signature)

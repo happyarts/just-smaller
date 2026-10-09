@@ -32,9 +32,10 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
   picture. A JPEG XL viewer shows one image only, so HDR photos with a gain
   map, portraits with a depth map and motion photos stay JPEG.
 - **Private metadata is removed** (location, camera serial numbers, editing
-  history) — never the colour profile or the orientation, which would change
-  how the image looks. Files with Content Credentials (C2PA) are left alone,
-  because any change would break their signature.
+  history) — never the colour profile, the orientation or the resolution,
+  which would change how the image looks or the size it is shown at. Files
+  with Content Credentials (C2PA) are left alone, because any change would
+  break their signature.
 - **Originals go to the Trash**; permissions, tags and the creation date carry
   over, and files are swapped atomically.
 - **No network access.** Nothing leaves the Mac.

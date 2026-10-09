@@ -6,11 +6,12 @@ import Foundation
 /// Always kept: the chunks a decoder needs (including unknown critical ones),
 /// the animation chunks of an APNG, and everything that changes how the image
 /// looks — transparency, colour profile, gamma, chromaticities, significant
-/// bits, CICP and the HDR mastering data. A standard sRGB profile becomes the
-/// `sRGB` chunk, which says the same (at every level: the profile's own
-/// texts say nothing about the image); any other profile stays byte for byte,
-/// recompressed where that is smaller. EXIF (eXIf), XMP and text chunks
-/// are filtered field by field; the physical size stays with the image info;
+/// bits, CICP, the HDR mastering data and the physical size (`pHYs`: apps
+/// that size images by their resolution show a Retina screenshot at half its
+/// pixels). A standard sRGB profile becomes the `sRGB` chunk, which says the
+/// same (at every level: the profile's own texts say nothing about the
+/// image); any other profile stays byte for byte, recompressed where that is
+/// smaller. EXIF (eXIf), XMP and text chunks are filtered field by field;
 /// time and every other ancillary chunk go. At `.keep` only the XMP padding
 /// and the sRGB profile go. EXIF stays where it stands: readers disagree
 /// about an eXIf after the image data (some skip it, some apply its
@@ -22,7 +23,7 @@ enum PNGMetadataFilter {
     struct Malformed: Error {}
 
     /// Ancillary chunks that are always kept.
-    static let kept: Set<String> = ["tRNS", "iCCP", "sRGB", "gAMA", "cHRM", "sBIT", "cICP", "mDCV", "cLLI",
+    static let kept: Set<String> = ["tRNS", "iCCP", "sRGB", "gAMA", "cHRM", "sBIT", "cICP", "mDCV", "cLLI", "pHYs",
                                     "acTL", "fcTL", "fdAT"]
 
     static func filter(_ data: Data, level: MetadataHandling, orientation: Int) throws -> Data {
@@ -64,7 +65,7 @@ enum PNGMetadataFilter {
                 }
             } else if c.type == "iCCP", let profile = colourProfile(c, hasSRGB: hasSRGB) {
                 out.append(profile)
-            } else if PNGChunks.isCritical(c) || kept.contains(c.type) || c.type == "pHYs" && MetadataPolicy.keeps(.imageInfo, at: level) {
+            } else if PNGChunks.isCritical(c) || kept.contains(c.type) {
                 out.append(c.whole.bytes)
             }
         }

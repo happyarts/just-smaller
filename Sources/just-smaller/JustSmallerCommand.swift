@@ -29,7 +29,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
     @Option(help: """
         Which metadata stays: keep (everything), private (default: removes location, serial numbers, \
         persons shown, editing history), copyright (only creator and rights) or none. \
-        Colour profile, orientation and size always stay.
+        Colour profile, orientation and resolution always stay.
         """)
     var metadata = MetadataHandling.removePrivate.rawValue
 

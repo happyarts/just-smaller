@@ -16,9 +16,9 @@ public enum Effort: String, CaseIterable, Codable, Sendable, Identifiable {
     public var id: Self { self }
 }
 
-/// Which metadata stays, named by what is kept. Orientation, colour profile
-/// and colour space always stay in every level: removing them changes how the
-/// image looks.
+/// Which metadata stays, named by what is kept. Orientation, colour profile,
+/// colour space and resolution always stay in every level: removing them
+/// changes how the image looks, or the size it is shown at.
 public enum MetadataHandling: String, CaseIterable, Codable, Sendable, Identifiable {
     /// All information stays; only what carries none (XMP padding) goes.
     case keep

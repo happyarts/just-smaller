@@ -49,9 +49,23 @@ enum EXIFFilter {
            let note = exif.first(where: { $0.tag == AppleMakerNote.tag })?.value.flatMap({ AppleMakerNote.filter($0, level: level) }) {
             exifOut.append(Entry(tag: UInt16(AppleMakerNote.tag), type: 7, count: UInt32(note.count), value: note))
         }
-        // ExifVersion alone says nothing; neither does sRGB, the default.
-        let meaningful = exifOut.count > keptExif.count
-            || keptExif.contains { !($0.tag == 0x9000 || $0.tag == 0xA001 && reader.number($0) == 1) }
+        // ExifVersion alone says nothing; neither does sRGB, the default, nor
+        // the pixel size next to 72 dpi (browsers only scale by another).
+        let scaled = !keptMain.allSatisfy { e in
+            switch e.tag {
+            case 0x011A, 0x011B: is72(e, reader)
+            case 0x0128: reader.number(e) == 2 // inches
+            default: true
+            }
+        }
+        let meaningful = exifOut.count > keptExif.count || keptExif.contains { e in
+            switch e.tag {
+            case 0x9000: false
+            case 0xA001: reader.number(e) != 1
+            case 0xA002, 0xA003: scaled
+            default: true
+            }
+        }
         if !meaningful && keptInterop.isEmpty { exifOut = [] }
         if keptMain.isEmpty && exifOut.isEmpty { return nil }
         if keptMain.count == 1, keptMain[0].tag == 0x0112, reader.number(keptMain[0]) == 1, exifOut.isEmpty { return nil }
@@ -64,6 +78,13 @@ enum EXIFFilter {
     /// read, so a loop of IFDs can't run forever.
     private static func entries(_ reader: TIFFReader, at offset: Int) -> [TIFFReader.Entry]? {
         (try? reader.ifd(at: offset))?.entries.filter { $0.value != nil }
+    }
+
+    /// Whether a resolution is 72, the default: one RATIONAL n/d with n = 72·d.
+    private static func is72(_ entry: TIFFReader.Entry, _ reader: TIFFReader) -> Bool {
+        guard entry.type == 5, entry.count == 1, let at = entry.valueOffset,
+              let n = try? reader.read(at, 4), let d = try? reader.read(at + 4, 4) else { return false }
+        return d > 0 && n == 72 * d
     }
 
     /// Lays out IFD0, the EXIF IFD and the Interop IFD one after another,
