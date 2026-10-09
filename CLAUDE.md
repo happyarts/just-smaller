@@ -2,7 +2,7 @@
 
 - `Tools/build.sh` builds all optimizers into `build/tools` (Rust via rustup,
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
-  tags (oxvg: a main commit); build.sh only fetches missing ones and never moves
+  tags, or to a branch commit (oxvg, our forks); build.sh only fetches missing ones and never moves
   a checkout — it stops when one isn't at its pinned commit (after a pull).
   OxiPNG, zopfli and libdeflater are our forks: `Vendor/oxipng`
   (happyarts/oxipng, branch `master`), `Vendor/zopfli` (happyarts/zopfli,
@@ -15,7 +15,9 @@
   `--zopfli`, used at Maximum). Our OxiPNG lock file names libdeflater (the
   version of our fork) and zopfli without a registry source, since the build
   replaces them. A commit that went upstream drops out when we move onto
-  upstream.
+  upstream; before such a rebase, tag the commit the engine pins
+  (`pin-YYYY-MM-DD`) so older engine commits still build. Files a fork
+  changes carry a one-line notice at the top (Apache-2.0 asks for it).
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
   when `xcode-select` points at the Command Line Tools.

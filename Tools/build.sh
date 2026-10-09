@@ -54,13 +54,13 @@ done
 # libdeflate sits inside libdeflater. sync first: a pin may also have moved
 # to another repository (our forks).
 stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/libdeflater Vendor/zopfli Vendor/libjxl | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p')
+	Vendor/jpegli Vendor/libdeflater Vendor/zopfli Vendor/libjxl | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p' | tr '\n' ' ')
 if [ -n "$stale" ]; then
 	echo "Not at the pinned commit: $stale" >&2
 	echo "Update with: git submodule sync && git submodule update --depth 1 $stale" >&2
 	exit 1
 fi
-if git -C "$ROOT/Vendor/libdeflater" submodule status -- libdeflate-sys/libdeflate | grep -q '^+'; then
+if git -C "$ROOT/Vendor/libdeflater" submodule status -- libdeflate-sys/libdeflate | grep -q '^[-+U]'; then
 	echo "Not at the pinned commit: Vendor/libdeflater/libdeflate-sys/libdeflate" >&2
 	echo "Update with: git -C Vendor/libdeflater submodule sync &&" \
 		"git -C Vendor/libdeflater submodule update --depth 1 libdeflate-sys/libdeflate" >&2

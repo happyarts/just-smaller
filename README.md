@@ -43,7 +43,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 
 | Format | Lossless | Lossy |
 |---|---|---|
-| PNG | own metadata filter + [OxiPNG](https://github.com/oxipng/oxipng) (with our patches); at Maximum effort also OxiPNG with [Zopfli](https://github.com/zopfli-rs/zopfli) (our fork), not for animated PNGs | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
+| PNG | own metadata filter + [OxiPNG](https://github.com/oxipng/oxipng) (our fork, [happyarts/oxipng](https://github.com/happyarts/oxipng)); at Maximum effort also OxiPNG with [Zopfli](https://github.com/zopfli-rs/zopfli) (our fork, [happyarts/zopfli](https://github.com/happyarts/zopfli)), not for animated PNGs | palette reduction with [quantizr](https://github.com/DarthSim/quantizr) (`Tools/png-quantize`), then the same |
 | JPEG | own metadata filter + own scan optimizer (`Tools/jpeg-scan`: finds the progressive scan split that codes each image smallest, written with [libjpeg-turbo](https://libjpeg-turbo.org)), proven by comparing DCT coefficients (`Tools/jpegcmp`) | [jpegli](https://github.com/google/jpegli), only when the original is of higher quality than the target |
 | WebP | cwebp ([libwebp](https://chromium.googlesource.com/webm/libwebp)), lossless files only | — |
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
@@ -93,6 +93,6 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 ## Licence
 
 Just Smaller's own code is under the [Mozilla Public License 2.0](LICENSE).
-The bundled optimizers keep their own licences: OxiPNG, OXVG, quantizr
-(MIT); libwebp, jpegli, libjpeg-turbo, libjxl and jxl-rs (BSD-style). They run as
+The bundled optimizers keep their own licences: OxiPNG, OXVG, quantizr,
+libdeflate (MIT); libdeflater and Zopfli (Apache-2.0); libwebp, jpegli, libjpeg-turbo, libjxl and jxl-rs (BSD-style). They run as
 separate programs.
