@@ -67,10 +67,11 @@ enum Pipeline {
     static func stages(for format: ImageFormat, facts: FileFacts, settings s: OptimizationSettings,
                        chooser: (any QualityChooser)? = nil) -> [[Candidate]] {
         // With a chooser its encodings are the only lossy step; everything
-        // else runs as without loss. It comes after the lossless steps, so
-        // an encoding has to beat what they reached; its scans are then
+        // else runs as without loss, unless the chooser leaves the other
+        // formats to the settings. It comes after the lossless steps, so an
+        // encoding has to beat what they reached; its scans are then
         // optimized like any JPEG's.
-        if s.lossy, let chooser {
+        if s.lossy, let chooser, chooser.formats.contains(format) || chooser.otherFormatsLossless {
             var lossless = s
             lossless.lossy = false
             var stages = stages(for: format, facts: facts, settings: lossless)

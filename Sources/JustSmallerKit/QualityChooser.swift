@@ -5,15 +5,19 @@ import Foundation
 /// passes its own measure. Given to `FileOptimizer`, and used in lossy mode
 /// only.
 ///
-/// With a chooser, its encodings are the only lossy step: the formats it
-/// doesn't handle are optimized without loss. It gets the image as the
-/// lossless steps left it, so an encoding has to beat their result. Every
-/// lossy result has passed the chooser's `verify` as a finished file against
-/// the original; when one doesn't, or the search fails, the file is
-/// optimized without loss.
+/// For the formats it handles, its encodings are the only lossy step. It gets
+/// the image as the lossless steps left it, so an encoding has to beat their
+/// result. Every such result has passed the chooser's `verify` as a finished
+/// file against the original; when one doesn't, or the search fails, the
+/// file is optimized without loss. The other formats are optimized without
+/// loss too, or, if `otherFormatsLossless` is false, with the settings'
+/// lossy steps.
 public protocol QualityChooser: Sendable {
     /// The formats it chooses for. JPEG is the only one so far.
     var formats: Set<ImageFormat> { get }
+
+    /// Whether the formats it doesn't handle stay without loss.
+    var otherFormatsLossless: Bool { get }
 
     /// Writes the encoding of `image` it chooses to `output` and returns
     /// true, or returns false when none passes. `image` shows exactly what the
@@ -27,4 +31,8 @@ public protocol QualityChooser: Sendable {
     /// Checks the finished file against the original, after every step:
     /// throws when it doesn't pass; the error's description says why.
     func verify(original: URL, result: URL, format: ImageFormat, work: URL) async throws
+}
+
+extension QualityChooser {
+    public var otherFormatsLossless: Bool { true }
 }

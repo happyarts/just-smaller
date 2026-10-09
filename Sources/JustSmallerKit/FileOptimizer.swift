@@ -199,7 +199,7 @@ public struct FileOptimizer: Sendable {
 
         // A chosen encoding is measured once more, as the finished file. If
         // it fails, the result without loss stays.
-        if let beforeLoss, let chooser {
+        if let beforeLoss, let chooser, chooser.formats.contains(format) {
             do {
                 try await chooser.verify(original: source, result: best, format: format, work: work)
             } catch {

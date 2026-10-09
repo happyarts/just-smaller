@@ -29,6 +29,7 @@ final class QualityChooserTests {
     final class Chooser: QualityChooser, @unchecked Sendable {
         let qualities: [Int]
         let passes: Bool
+        var otherFormatsLossless = true
         let lock = NSLock()
         var tried: [Int] = []
         /// The size of each finished file checked.
@@ -119,6 +120,37 @@ final class QualityChooserTests {
         case let outcome: Issue.record("\(outcome)")
         }
         #expect(chooser.tried == [100] && chooser.verified.isEmpty)
+    }
+
+    /// A chooser may leave the other formats to the settings' lossy steps;
+    /// its check is then only for its own.
+    @Test func otherFormatsCanKeepTheirLossySteps() async throws {
+        let chooser = Chooser([80])
+        chooser.otherFormatsLossless = false
+        let png = Pipeline.stages(for: .png, facts: FileFacts(byteSize: 1), settings: settings, chooser: chooser)
+        #expect(!png.joined().filter(\.isLossy).isEmpty)
+        let jpeg = Pipeline.stages(for: .jpeg, facts: FileFacts(byteSize: 1, jpegQuality: 98), settings: settings, chooser: chooser)
+        #expect(jpeg.joined().filter(\.isLossy).count == 1)
+        let url = dir.appending(path: "photo.png")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        // Gradients with grain, many colours: quantizing pays.
+        let ctx = CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
+                            space: CGColorSpace(name: CGColorSpace.displayP3)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        for y in 0..<256 {
+            for x in 0..<256 {
+                let grain = CGFloat(Int.random(in: -6...6)) / 255
+                ctx.setFillColor(red: CGFloat(x) / 256 + grain, green: 0.4 + grain, blue: CGFloat(y) / 256 + grain, alpha: 1)
+                ctx.fill(CGRect(x: x, y: y, width: 1, height: 1))
+            }
+        }
+        CGImageDestinationAddImage(dest, ctx.makeImage()!, nil)
+        #expect(CGImageDestinationFinalize(dest))
+        var settings = self.settings
+        settings.quality = 85
+        guard case .optimized(_, _, let tools, _, _, let identical) =
+            try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
+        else { Issue.record("not optimized"); return }
+        #expect(tools.contains("quantizr") && !identical && chooser.verified.isEmpty, "\(tools) \(identical)")
     }
 
     /// The settings' fixed quality and every other lossy tool stay off; a
