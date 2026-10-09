@@ -2,8 +2,10 @@
 
 - `Tools/build.sh` builds all optimizers into `build/tools` (Rust via rustup,
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
-  tags, or to a branch commit (oxvg, our forks); build.sh only fetches missing ones and never moves
-  a checkout — it stops when one isn't at its pinned commit (after a pull).
+  tags, or to a branch commit (oxvg, our forks); build.sh fetches missing ones and moves a checkout
+  to its pin (after a pull) when nothing in it would be lost — no changes, no
+  commits that are only local; otherwise it stops. `Tools/update-forks.sh`
+  moves the pins of our forks to their latest commits.
   OxiPNG, zopfli and libdeflater are our forks: `Vendor/oxipng`
   (happyarts/oxipng, branch `master`), `Vendor/zopfli` (happyarts/zopfli,
   `main`) and `Vendor/libdeflater` (happyarts/libdeflater, `master`, whose

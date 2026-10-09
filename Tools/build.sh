@@ -49,23 +49,31 @@ done
 [ -n "$(ls -A "$ROOT/Vendor/libdeflater/libdeflate-sys/libdeflate" 2>/dev/null)" ] ||
 	git -C "$ROOT/Vendor/libdeflater" submodule update --init --depth 1 libdeflate-sys/libdeflate
 # A checkout that isn't at the commit this repository pins (a pull moved the
-# pin) would build the old version or fail on a lockfile. It is left as it
-# is — it may hold local work — so stop and say how to update it.
-# libdeflate sits inside libdeflater. sync first: a pin may also have moved
-# to another repository (our forks).
-stale=$(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
-	Vendor/jpegli Vendor/libdeflater Vendor/zopfli Vendor/libjxl | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p' | tr '\n' ' ')
-if [ -n "$stale" ]; then
-	echo "Not at the pinned commit: $stale" >&2
-	echo "Update with: git submodule sync && git submodule update --depth 1 $stale" >&2
+# pin) would build the old version or fail on a lockfile. It moves to its pin
+# when nothing in it would be lost — no changes, and the commit it is at lies
+# on its remote or a tag (other local branches stay as they are); one holding
+# local work, or someone's unpushed commits, is left as it is, and the build
+# stops and says how to update it. sync first: a pin may also have moved to
+# another repository (our forks). libdeflate sits inside libdeflater.
+movable() { # checkout
+	[ -z "$(git -C "$1" status --porcelain --ignore-submodules=all)" ] &&
+		[ -z "$(git -C "$1" log --oneline -1 HEAD --not --remotes --tags 2>/dev/null)" ]
+}
+to_pin() { # repository path — moves a stale submodule of it to its pin, or names it
+	if movable "$1/$2"; then
+		echo "Moving $2 to its pinned commit" >&2
+		git -C "$1" submodule sync -q -- "$2" && git -C "$1" submodule update -q --init --depth 1 -- "$2" && return
+	fi
+	echo "Not at the pinned commit, and it holds local work: $1/$2" >&2
+	echo "Update with: git -C $1 submodule sync && git -C $1 submodule update --depth 1 $2" >&2
 	exit 1
-fi
-if git -C "$ROOT/Vendor/libdeflater" submodule status -- libdeflate-sys/libdeflate | grep -q '^[-+U]'; then
-	echo "Not at the pinned commit: Vendor/libdeflater/libdeflate-sys/libdeflate" >&2
-	echo "Update with: git -C Vendor/libdeflater submodule sync &&" \
-		"git -C Vendor/libdeflater submodule update --depth 1 libdeflate-sys/libdeflate" >&2
-	exit 1
-fi
+}
+for path in $(git -C "$ROOT" submodule status -- Vendor/oxipng Vendor/oxvg Vendor/libwebp Vendor/libjpeg-turbo \
+	Vendor/jpegli Vendor/libdeflater Vendor/zopfli Vendor/libjxl | sed -n 's/^+[0-9a-f]* \([^ ]*\).*/\1/p'); do
+	to_pin "$ROOT" "$path"
+done
+git -C "$ROOT/Vendor/libdeflater" submodule status -- libdeflate-sys/libdeflate | grep -q '^[-+U]' &&
+	to_pin "$ROOT/Vendor/libdeflater" libdeflate-sys/libdeflate
 
 log() { printf '%s\n' "$*" >&2; }
 run() { # name, command… — output goes to build/work/NAME.log, shown on failure
