@@ -161,14 +161,17 @@ enum Pipeline {
     /// (`--zc`, our fork); with both fixed, its -o presets give the same
     /// result. Maximum also runs OxiPNG with Zopfli next to Thorough's
     /// OxiPNG and keeps the smaller result, so it is never larger than
-    /// Thorough. Animated PNGs get one OxiPNG run.
+    /// Thorough. Animated PNGs get only the libdeflate run.
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
-        if facts.isAnimated { return [oxipng(["-o", effort == .fast ? "2" : "4"], lossy: lossy)] }
-        let libdeflate = oxipng(oxipngOptions(effort), lossy: lossy)
-        return effort == .maximum ? [oxipng(oxipngZopfliOptions, lossy: lossy), libdeflate] : [libdeflate]
+        oxipngRuns(effort, animated: facts.isAnimated).map { oxipng($0, lossy: lossy) }
     }
 
-    /// OxiPNG's options for still PNGs at each effort.
+    /// The OxiPNG runs for a PNG, each with its options.
+    static func oxipngRuns(_ effort: Effort, animated: Bool) -> [[String]] {
+        effort == .maximum && !animated ? [oxipngZopfliOptions, oxipngOptions(effort)] : [oxipngOptions(effort)]
+    }
+
+    /// OxiPNG's options at each effort, for still and animated PNGs.
     static func oxipngOptions(_ effort: Effort) -> [String] {
         switch effort {
         case .fast: ["-o", "2"]
