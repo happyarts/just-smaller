@@ -14,6 +14,16 @@ public enum ConversionTarget: String, CaseIterable, Codable, Sendable {
 
     /// The file name extensions of what can be converted to this target.
     public var sourceExtensions: Set<String> { self == .jxl ? ["jpg", "jpeg", "jpe"] : ["jxl"] }
+
+    /// Where a file goes by its contents: a JPEG to JPEG XL, a JPEG XL back
+    /// to JPEG; nil for anything else. Whether it can is up to `FileConverter`.
+    public static func direction(for url: URL) -> ConversionTarget? {
+        if ImageFormat.detect(at: url) == .jpeg { return .jxl }
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let head = (try? handle.read(upToCount: 16)) ?? Data()
+        return JXLContainer.isJXL(ByteView(head)) ? .jpeg : nil
+    }
 }
 
 private let log = Logger(subsystem: "JustSmallerKit", category: "converter")

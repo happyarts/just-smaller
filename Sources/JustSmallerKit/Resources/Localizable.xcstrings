@@ -21,6 +21,16 @@
         }
       }
     },
+    "a JPEG XL viewer would show it differently": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ein JPEG-XL-Programm würde es anders zeigen"
+          }
+        }
+      }
+    },
     "Animated WebP is not supported yet": {
       "localizations": {
         "de": {
@@ -41,12 +51,32 @@
         }
       }
     },
+    "Checking": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prüfen"
+          }
+        }
+      }
+    },
     "copyright or creator information lost": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
             "value": "Urheber- oder Copyright-Angaben gingen verloren"
+          }
+        }
+      }
+    },
+    "copyright or creator information would be hidden": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Urheber- oder Rechteangaben wären nicht mehr sichtbar"
           }
         }
       }
@@ -67,6 +97,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "GIF-Optimierung kommt in einer späteren Version"
+          }
+        }
+      }
+    },
+    "Has Content Credentials (C2PA). Converting would invalidate them.": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hat Content Credentials (C2PA). Umwandeln würde sie ungültig machen."
           }
         }
       }
@@ -97,6 +137,46 @@
           "stringUnit": {
             "state": "translated",
             "value": "Enthält einen Herkunftsnachweis (C2PA). Eine Optimierung würde ihn ungültig machen."
+          }
+        }
+      }
+    },
+    "Holds data after the image that a JPEG XL viewer wouldn’t know": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält Daten nach dem Bild, die ein JPEG-XL-Programm nicht kennen würde"
+          }
+        }
+      }
+    },
+    "Holds more than one image (HDR gain map, depth map or a second view) – a JPEG XL viewer would show only the photo": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält mehr als ein Bild (HDR-Gain-Map, Tiefenkarte oder zweite Ansicht) – ein JPEG-XL-Programm würde nur das Foto zeigen"
+          }
+        }
+      }
+    },
+    "invalid file structure (JPEG)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ungültiger Dateiaufbau (JPEG)"
+          }
+        }
+      }
+    },
+    "it would be shown in other colours": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "es würde in anderen Farben angezeigt"
           }
         }
       }
@@ -141,12 +221,32 @@
         }
       }
     },
+    "Motion photo – a JPEG XL viewer would show only the photo, not the video": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Motion Photo – ein JPEG-XL-Programm würde nur das Foto zeigen, nicht das Video"
+          }
+        }
+      }
+    },
     "Not a supported image": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
             "value": "Kein unterstütztes Bildformat"
+          }
+        }
+      }
+    },
+    "Not converted – result rejected: %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht umgewandelt – Ergebnis verworfen: %@"
           }
         }
       }
@@ -161,12 +261,42 @@
         }
       }
     },
+    "Only JPEG XL files can be converted back to JPEG": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur JPEG-XL-Dateien lassen sich zurück in JPEG umwandeln"
+          }
+        }
+      }
+    },
+    "Only JPEGs can be converted to JPEG XL": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur JPEGs lassen sich in JPEG XL umwandeln"
+          }
+        }
+      }
+    },
     "Result rejected: %@": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
             "value": "Ergebnis verworfen: %@"
+          }
+        }
+      }
+    },
+    "The file changed while it was being converted": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Datei hat sich während des Umwandelns geändert"
           }
         }
       }
@@ -197,6 +327,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "Die Datei oder ihr Ordner ist schreibgeschützt"
+          }
+        }
+      }
+    },
+    "The folder for the new file is read-only": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Der Ordner für die neue Datei ist schreibgeschützt"
+          }
+        }
+      }
+    },
+    "the JPEG can’t be rebuilt from it": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "das JPEG lässt sich daraus nicht zurückgewinnen"
+          }
+        }
+      }
+    },
+    "The metadata couldn’t be filtered safely: %@": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Metadaten ließen sich nicht sicher filtern: %@"
           }
         }
       }
@@ -297,6 +457,36 @@
           "stringUnit": {
             "state": "translated",
             "value": "SVG ließ sich nicht darstellen"
+          }
+        }
+      }
+    },
+    "the rebuilt JPEG differs": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "das zurückgewonnene JPEG weicht ab"
+          }
+        }
+      }
+    },
+    "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses JPEG lässt sich nicht verlustfrei als JPEG XL speichern (CMYK, arithmetische Kodierung, 12 Bit oder zu viele Daten nach dem Bild)"
+          }
+        }
+      }
+    },
+    "This JPEG XL wasn’t made from a JPEG, so there is no JPEG to go back to": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses JPEG XL ist nicht aus einem JPEG entstanden – es gibt kein JPEG, zu dem es zurück könnte"
           }
         }
       }
