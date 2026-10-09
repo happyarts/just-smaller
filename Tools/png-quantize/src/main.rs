@@ -98,7 +98,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     info.pixel_dims = source.pixel_dims;
 
     let mut encoded = Vec::new();
-    let mut writer = png::Encoder::with_info(&mut encoded, info)?.write_header()?;
+    let mut encoder = png::Encoder::with_info(&mut encoded, info)?;
+    // Compressed well enough to be measured against the input (the pipeline
+    // keeps a step only when it is smaller); OxiPNG compresses it again.
+    encoder.set_compression(png::Compression::Best);
+    encoder.set_filter(png::FilterType::NoFilter);
+    let mut writer = encoder.write_header()?;
     // The metadata on the side of the image data it stood on in the input.
     let copy = |writer: &mut png::Writer<_>, after_image_data: bool| -> Result<(), png::EncodingError> {
         for (kind, range, past_image_data) in chunks(&raw) {
