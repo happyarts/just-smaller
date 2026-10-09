@@ -20,6 +20,10 @@ enum Verifier {
     static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
                        exactUnderAlpha: Bool = true, structure: StructureCheck.Reference? = nil) async throws {
         try StructureCheck.verify(result: result, against: structure ?? StructureCheck.Reference(original: original, format: format))
+        if format == .jxl {
+            try await verifyRecompressedJXL(original: original, result: result)
+            return
+        }
         if format == .svg {
             // UTF-16 → UTF-8 is proven on the text itself; the renderer reads UTF-8 only.
             if let a = try? Data(contentsOf: original), SVGText.encoding(a) != .utf8 {
@@ -180,6 +184,37 @@ enum Verifier {
         // one without a profile, is shown in other colours as JPEG XL.
         guard pa.iccProfile == pb.iccProfile else {
             throw VerificationError(reason: String(localized: "it would be shown in other colours", bundle: .module))
+        }
+    }
+
+    /// A JPEG XL made from a JPEG, stored anew: both rebuild into JPEGs with
+    /// the same coefficients; the new one passes every check of a
+    /// conversion; and ImageIO shows the old and the new alike.
+    private static func verifyRecompressedJXL(original: URL, result: URL) async throws {
+        let work = result.deletingLastPathComponent(), id = UUID().uuidString
+        let a = work.appending(path: "before-\(id).jpg"), b = work.appending(path: "after-\(id).jpg")
+        defer { for url in [a, b] { try? FileManager.default.removeItem(at: url) } }
+        for (jxl, jpeg) in [(original, a), (result, b)] {
+            do {
+                try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, jpeg.path], in: work)
+            } catch is ToolError {
+                throw VerificationError(reason: String(localized: "the JPEG can’t be rebuilt from it", bundle: .module))
+            }
+        }
+        try await jpegcmp(a, b)
+        try await verifyConversion(jpeg: b, jxl: result, tolerance: .converted, rebuilt: true)
+        guard let x = CGImageSourceCreateWithURL(original as CFURL, nil), let y = CGImageSourceCreateWithURL(result as CFURL, nil) else {
+            throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
+        }
+        let px = properties(x), py = properties(y)
+        guard px.width == py.width, px.height == py.height else {
+            throw VerificationError(reason: String(localized: "different dimensions", bundle: .module))
+        }
+        guard px.orientation == py.orientation else {
+            throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
+        }
+        guard px.iccProfile == py.iccProfile else {
+            throw VerificationError(reason: String(localized: "color profile lost", bundle: .module))
         }
     }
 

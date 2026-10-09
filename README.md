@@ -49,6 +49,7 @@ By [Markus Kämmerer](https://markus-kaemmerer.de). Inspired by
 | SVG | [OXVG](https://github.com/noahbald/oxvg) with exact geometry, checked by rendering with [resvg](https://github.com/linebender/resvg); files with scripts, animation or embedded HTML are left alone | OXVG with its default approximations |
 | HEIC | own metadata filter: EXIF and XMP rewritten in their items, the coded image, HDR gain maps and depth data stay byte for byte | re-encoded with Apple ImageIO, the original's metadata put back; HDR gain maps, depth data and HDR brightness kept |
 | GIF | comes in a later version | |
+| JPEG XL | made from a JPEG: the JPEG rebuilt, filtered and stored anew (`Tools/jxl-transcode`), proven by the rebuilt JPEGs' coefficients and by decoding with jxl-rs; other JPEG XL files are left as they are for now | — |
 | JPEG → JPEG XL (on request) | own metadata filter, then `Tools/jxl-transcode` ([libjxl](https://github.com/libjxl/libjxl)): the JPEG's coefficients coded anew, with what it takes to rebuild the JPEG; proven by rebuilding it, and by decoding with [jxl-rs](https://github.com/libjxl/jxl-rs) (`Tools/jxl-pixels`) | — |
 
 ## Building

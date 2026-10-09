@@ -123,6 +123,9 @@ if [ -d "$CORPUS/full/real-svg" ]; then
 	done
 fi
 
+# --- JPEG XL, made from the JPEGs above (needs build/tools/jxl-transcode)
+"$HERE/make-jxl.sh" "$CORPUS"
+
 # --- fewer of a kind: files of the same kind (same encoder settings, same
 # chunks, similar size) test the same thing; a few of each are enough.
 "$PY" "$HERE/dedup.py" "$CORPUS/full"

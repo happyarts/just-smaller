@@ -8,7 +8,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
         commandName: "just-smaller",
         abstract: "Makes images smaller without making them worse.",
         discussion: """
-            PNG, JPEG, WebP, SVG and HEIC files are optimized in place; folders are \
+            PNG, JPEG, WebP, SVG, HEIC and JPEG XL files are optimized in place; folders are \
             searched for images. Lossless results are proven identical before they \
             replace anything, and replaced originals go to the Trash.
 
@@ -29,7 +29,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
     @Option(help: """
         Which metadata stays: keep (everything), private (default: removes location, serial numbers, \
         persons shown, editing history), copyright (only creator and rights) or none. \
-        Colour profile and orientation always stay.
+        Colour profile, orientation and size always stay.
         """)
     var metadata = MetadataHandling.removePrivate.rawValue
 

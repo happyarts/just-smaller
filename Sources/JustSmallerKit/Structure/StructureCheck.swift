@@ -37,6 +37,7 @@ enum StructureCheck {
             case .heic: summary = .heif(HEIFCheck.Reference(a))
             case .svg: summary = .svg(SVGCheck.Reference(a))
             case .gif: summary = .none // no step writes GIF yet
+            case .jxl: summary = .none // read strictly by Verifier.verifyConversion
             }
         }
     }

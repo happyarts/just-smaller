@@ -212,6 +212,16 @@ for n in names:
             # An original it can't decode (Skia's edge cases) gives no opinion.
             if (da := decoded(a)) is None: uhdr_checked -= 1
             elif decoded(b) != da: fails.append((n, "ULTRA HDR DECODES DIFFERENTLY (libultrahdr)"))
+    elif kind == ".jxl":
+        # A JPEG XL made from a JPEG: both rebuild into JPEGs with the same
+        # coefficients (the engine changes only those it can rebuild).
+        ra, rb = os.path.join(work, "rebuilt-a.jpg"), os.path.join(work, "rebuilt-b.jpg")
+        transcode = os.path.join(os.path.dirname(jpegcmp), "jxl-transcode")
+        if any(subprocess.run([transcode, "decode", x, y], capture_output=True).returncode for x, y in ((a, ra), (b, rb))):
+            fails.append((n, "JPEG XL CHANGED, BUT CAN'T BE REBUILT"))
+        else:
+            r = subprocess.run([jpegcmp, ra, rb], capture_output=True, text=True)
+            if r.returncode != 0: fails.append((n, "REBUILT COEFFICIENTS: " + (r.stdout + r.stderr).strip()))
     elif kind in raster:
         r = subprocess.run([imgcmp, a, b], capture_output=True, text=True)
         if r.returncode != 0: fails.append((n, "PIXELS: " + r.stdout.strip()))

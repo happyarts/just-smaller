@@ -159,31 +159,13 @@ public struct FileConverter: Sendable {
             }
         }
 
-        // Maximum also tries effort 9 and keeps the smaller result.
         progress("jxl-transcode")
-        let efforts = settings.effort == .maximum ? [9, 7] : [7]
-        let input = jpeg
-        let candidates = try await withThrowingTaskGroup(of: (URL, Int64)?.self) { group in
-            for effort in efforts {
-                group.addTask {
-                    let jxl = work.appending(path: "e\(effort).jxl")
-                    do {
-                        try await ToolRunner.run("jxl-transcode", ["encode", "--effort", "\(effort)", input.path, jxl.path], in: work)
-                    } catch is ToolError {
-                        return nil // a JPEG libjxl can't take without loss, or can't read
-                    }
-                    return (jxl, Int64((try? jxl.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0))
-                }
-            }
-            var all: [(URL, Int64)] = []
-            for try await candidate in group { if let candidate { all.append(candidate) } }
-            return all.sorted { $0.1 < $1.1 }
-        }
+        let candidates = try await Self.encodings(of: jpeg, effort: settings.effort, work: work)
         guard !candidates.isEmpty else {
             return .refused(String(localized: "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)",
                                    bundle: .module))
         }
-        let smaller = candidates.filter { $0.1 < limit }
+        let smaller = candidates.filter { $0.size < limit }
         guard !smaller.isEmpty else {
             return .refused(String(localized: "As JPEG XL it wouldn’t be smaller", bundle: .module))
         }
@@ -200,6 +182,51 @@ public struct FileConverter: Sendable {
             }
         }
         return .rejected(rejected)
+    }
+
+    /// `jpeg` as JPEG XL, smallest first: effort 7, at Maximum also 9.
+    /// Empty when libjxl can't take this JPEG without loss.
+    static func encodings(of jpeg: URL, effort: Effort, work: URL) async throws -> [(url: URL, size: Int64)] {
+        try await withThrowingTaskGroup(of: (url: URL, size: Int64)?.self) { group in
+            for e in effort == .maximum ? [9, 7] : [7] {
+                group.addTask {
+                    let jxl = work.appending(path: "e\(e)-\(UUID().uuidString).jxl")
+                    do {
+                        try await ToolRunner.run("jxl-transcode", ["encode", "--effort", "\(e)", jpeg.path, jxl.path], in: work)
+                    } catch is ToolError {
+                        return nil // a JPEG libjxl can't take without loss, or can't read
+                    }
+                    return (jxl, Int64((try? jxl.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0))
+                }
+            }
+            var all: [(url: URL, size: Int64)] = []
+            for try await candidate in group { if let candidate { all.append(candidate) } }
+            return all.sorted { $0.size < $1.size }
+        }
+    }
+
+    /// Why a JPEG XL made from a JPEG can't be stored anew, or nil: its
+    /// JPEG doesn't rebuild (edited since, damaged), holds more than the
+    /// photo, or has Content Credentials.
+    static func obstacleToRecompressing(_ jxl: URL) async -> String? {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
+        defer { try? fm.removeItem(at: work) }
+        let rebuilt = work.appending(path: "rebuilt.jpg")
+        do {
+            try fm.createDirectory(at: work, withIntermediateDirectories: true)
+            try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
+        } catch {
+            return String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module)
+        }
+        guard let data = try? Data(contentsOf: rebuilt, options: .alwaysMapped),
+              let layout = JPEGLayout.read(ByteView(data)), layout.jxlObstacle == nil else {
+            return String(localized: "The JPEG in this JPEG XL holds more than the photo (HDR gain map, depth map or video)", bundle: .module)
+        }
+        if FileOptimizer.hasContentCredentials(rebuilt, format: .jpeg) {
+            return String(localized: "Has Content Credentials (C2PA). Optimizing would invalidate them.", bundle: .module)
+        }
+        return nil
     }
 
     static let notFromJPEG = String(localized: "This JPEG XL wasn’t made from a JPEG, so there is no JPEG to go back to", bundle: .module)

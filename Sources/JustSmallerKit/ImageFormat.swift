@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// The image formats Just Smaller optimizes. Detection looks at the file's
 /// contents, so a PNG named `.jpg` is still treated as a PNG.
 public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
-    case png, jpeg, gif, webp, svg, heic
+    case png, jpeg, gif, webp, svg, heic, jxl
 
     public var id: Self { self }
 
@@ -15,6 +15,7 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         case .gif: "GIF"
         case .webp: "WebP"
         case .svg: "SVG"
+        case .jxl: "JPEG XL"
         case .heic: "HEIC"
         }
     }
@@ -26,6 +27,7 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         case .gif: .gif
         case .webp: .webP
         case .svg: .svg
+        case .jxl: UTType(importedAs: "public.jpeg-xl")
         case .heic: .heic
         }
     }
@@ -45,6 +47,7 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
         if b.has([0xFF, 0xD8, 0xFF]) { return .jpeg }
         if b.has("GIF87a") || b.has("GIF89a") { return .gif }
         if b.has("RIFF") && b.has("WEBP", at: 8) { return .webp }
+        if JXLContainer.isJXL(b) { return .jxl }
         if b.has("ftyp", at: 4), isHEIF(b) { return .heic }
         if pathExtension.lowercased() == "svg", looksLikeSVG(header) { return .svg }
         return nil

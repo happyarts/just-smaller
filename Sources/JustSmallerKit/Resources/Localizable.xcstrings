@@ -281,6 +281,16 @@
         }
       }
     },
+    "Only JPEG XL files made from a JPEG can be optimized so far": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bisher lassen sich nur JPEG-XL-Dateien optimieren, die aus einem JPEG entstanden sind"
+          }
+        }
+      }
+    },
     "Only JPEGs can be converted to JPEG XL": {
       "localizations": {
         "de": {
@@ -357,6 +367,26 @@
           "stringUnit": {
             "state": "translated",
             "value": "das JPEG lässt sich daraus nicht zurückgewinnen"
+          }
+        }
+      }
+    },
+    "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das JPEG in diesem JPEG XL lässt sich nicht zurückgewinnen (beschädigt oder seither verändert)"
+          }
+        }
+      }
+    },
+    "The JPEG in this JPEG XL holds more than the photo (HDR gain map, depth map or video)": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Das JPEG in diesem JPEG XL enthält mehr als das Foto (HDR-Gain-Map, Tiefenkarte oder Video)"
           }
         }
       }

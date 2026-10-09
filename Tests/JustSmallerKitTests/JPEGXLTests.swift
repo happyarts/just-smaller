@@ -132,6 +132,44 @@ final class JPEGXLTests {
         #expect(try FileManager.default.attributesOfItem(atPath: jxl.path)[.posixPermissions] as? Int == 0o600)
     }
 
+    // MARK: - Optimizing a JPEG XL
+
+    /// A JPEG XL made from a JPEG with everything kept: optimizing it at the
+    /// default level takes the location out, stays JPEG XL, and still holds
+    /// the very same image.
+    @Test func optimizingAJPEGXLRemovesPrivateData() async throws {
+        settings.metadata = .keep
+        settings.outputLossless = .suffix
+        let original = jpeg("located.jpg", properties: [kCGImagePropertyGPSDictionary: TestImages.gps,
+                                                       kCGImagePropertyOrientation: 6])
+        let jxl = try #require(result(try await convert(original, to: .jxl)))
+        #expect(gps(jxl) != nil)
+
+        var optimizing = OptimizationSettings()
+        optimizing.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: optimizing).optimize(jxl, to: .replace) { _ in }
+        guard case .optimized(_, _, let tools, _, _, true) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(tools == ["jxl-transcode"])
+        #expect(ImageFormat.detect(at: jxl) == .jxl)
+        #expect(gps(jxl) == nil)
+        let source = CGImageSourceCreateWithURL(jxl as CFURL, nil)!
+        #expect((CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])?[kCGImagePropertyOrientation] as? Int == 6)
+        let rebuilt = dir.appending(path: "rebuilt.jpg")
+        try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: dir)
+        try await ToolRunner.run("jpegcmp", [original.path, rebuilt.path], in: dir)
+    }
+
+    @Test func aJPEGXLWithNothingToGainIsAlreadyOptimal() async throws {
+        settings.outputLossless = .suffix
+        let jxl = try #require(result(try await convert(jpeg("plain.jpg"), to: .jxl)))
+        var optimizing = OptimizationSettings()
+        optimizing.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: optimizing).optimize(jxl, to: .replace) { _ in }
+        guard case .alreadyOptimal = outcome else {
+            Issue.record("expected already optimal"); return
+        }
+    }
+
     // MARK: - What stays as it is
 
     @Test func onlyJPEGsBecomeJPEGXL() async throws {

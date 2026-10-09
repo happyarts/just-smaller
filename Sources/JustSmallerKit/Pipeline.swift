@@ -53,6 +53,8 @@ struct FileFacts: Sendable {
     var isUTF16 = false
     /// SVG content the rendering comparison can't vouch for.
     var isUncheckableSVG = false
+    /// A JPEG XL that holds a JPEG (made from one, without loss).
+    var isJPEGInJXL = false
 }
 
 /// The optimizers for each format, as stages. The candidates within a stage
@@ -123,6 +125,11 @@ enum Pipeline {
             if s.metadata != .keep, !facts.isAnimated { stages.append([heifMetadata(s.metadata, required: !reencode)]) }
             if reencode { stages.append([heif(quality: s.jpegQuality, metadata: s.metadata)]) }
             return stages
+
+        case .jxl:
+            // Only one made from a JPEG for now: that JPEG is what can be
+            // filtered and stored anew, provably the same image.
+            return facts.isJPEGInJXL ? [[jxlRecompress(s.metadata, effort: s.effort)]] : []
         }
     }
 
@@ -134,6 +141,7 @@ enum Pipeline {
         case .gif: String(localized: "GIF optimization comes in a later version", bundle: .module)
         case .heic where !settings.lossy: String(localized: "HEIC can only be optimized in lossy mode", bundle: .module)
         case .heic: String(localized: "HDR HEIC images are left untouched", bundle: .module)
+        case .jxl: String(localized: "Only JPEG XL files made from a JPEG can be optimized so far", bundle: .module)
         default: String(localized: "Nothing to optimize", bundle: .module)
         }
     }
@@ -322,6 +330,32 @@ enum Pipeline {
         Candidate(name: String(localized: "Metadata", bundle: .module), isRequired: required) { input, output, _ in
             try HEIFMetadataFilter.filter(Data(contentsOf: input, options: .alwaysMapped), level: level).write(to: output)
             try MetadataCheck.verify(original: input, result: output, level: level)
+            return true
+        }
+    }
+
+    // MARK: - JPEG XL
+
+    /// A JPEG XL made from a JPEG, stored anew: the JPEG is rebuilt, filtered
+    /// at the metadata level and turned into JPEG XL again the way a
+    /// conversion does it (effort 7; Maximum also 9, the smaller wins). The
+    /// image is the same coefficients throughout; the check compares the two
+    /// rebuilt JPEGs.
+    static func jxlRecompress(_ level: MetadataHandling, effort: Effort) -> Candidate {
+        Candidate(name: "jxl-transcode", isRequired: level != .keep) { input, output, work in
+            let id = UUID().uuidString
+            let rebuilt = work.appending(path: "rebuilt-\(id).jpg"), filtered = work.appending(path: "filtered-\(id).jpg")
+            defer { for url in [rebuilt, filtered] { try? FileManager.default.removeItem(at: url) } }
+            // FileOptimizer checked that it rebuilds into a plain JPEG
+            // (FileConverter.obstacleToRecompressing).
+            try await ToolRunner.run("jxl-transcode", ["decode", input.path, rebuilt.path], in: work)
+            let data = try Data(contentsOf: rebuilt)
+            try JPEGMetadataFilter.filter(data, level: level, orientation: FileFacts.orientation(of: data), itemLengths: [:]).write(to: filtered)
+            try MetadataCheck.verify(original: rebuilt, result: filtered, level: level)
+            let encoded = try await FileConverter.encodings(of: filtered, effort: effort, work: work)
+            defer { for candidate in encoded { try? FileManager.default.removeItem(at: candidate.url) } }
+            guard let smallest = encoded.first else { return false }
+            try FileManager.default.moveItem(at: smallest.url, to: output)
             return true
         }
     }

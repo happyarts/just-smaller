@@ -78,6 +78,11 @@ public struct FileOptimizer: Sendable {
         }
         var facts = Self.facts(about: url, format: format, size: size)
         facts.jpegLayout = jpegLayout
+        // A JPEG XL is stored anew from the JPEG it holds: that JPEG must
+        // rebuild and be one a JPEG XL shows in full.
+        if format == .jxl, facts.isJPEGInJXL, let reason = await FileConverter.obstacleToRecompressing(url) {
+            return .skipped(reason: reason, size: size)
+        }
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
         // that step is proven on the text. Only when all metadata stays,
         // since filtering it needs the rendering check.
@@ -104,7 +109,7 @@ public struct FileOptimizer: Sendable {
         var rejected: VerificationError?
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
-        var pixelIdentical = [.png, .gif, .webp, .jpeg, .heic].contains(format)
+        var pixelIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
@@ -270,6 +275,12 @@ public struct FileOptimizer: Sendable {
         if format == .jpeg, let headers = try? JPEGMarkers.headers(ByteView(data)).segments {
             return headers.contains { $0.marker == 0xEB && holdsManifest($0.payload.bytes) }
         }
+        // A JPEG XL keeps it in a JUMBF box labelled "c2pa" (one made from a
+        // JPEG with Content Credentials keeps the JPEG's in its reconstruction
+        // data: the recompression looks at the rebuilt JPEG).
+        if format == .jxl {
+            return (try? JXLContainer.read(ByteView(data)))?.jumbf.contains { $0.range(of: Data("c2pa".utf8)) != nil } ?? false
+        }
         return MetadataRegions.of(data).contains(where: holdsManifest)
     }
 
@@ -297,7 +308,7 @@ public struct FileOptimizer: Sendable {
             guard data.count >= 12 else { return false }
             let size = data.subdata(in: 4..<8).withUnsafeBytes { Int($0.loadUnaligned(as: UInt32.self).littleEndian) }
             return data.count >= size + 8
-        case .svg, .heic:
+        case .svg, .heic, .jxl:
             return true
         }
     }
@@ -355,6 +366,9 @@ public struct FileOptimizer: Sendable {
         }
         if format == .svg, let data = try? Data(contentsOf: url, options: .alwaysMapped), SVGText.encoding(data) != .utf8 {
             facts.isUTF16 = true
+        }
+        if format == .jxl, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
+            facts.isJPEGInJXL = (try? JXLContainer.read(ByteView(data)))?.hasReconstructionData ?? false
         }
         if format == .webp, let data = try? Data(contentsOf: url, options: .alwaysMapped) {
             let chunks = Set(RIFFChunks.webp(ByteView(data)).chunks.map(\.type))
