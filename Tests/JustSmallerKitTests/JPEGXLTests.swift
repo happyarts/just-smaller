@@ -125,6 +125,20 @@ final class JPEGXLTests {
         #expect(try Data(contentsOf: other) == Data("another picture".utf8))
     }
 
+    @Test func keepsTheSpellingOfTheName() async throws {
+        // "ä" precomposed (NFC) on disk, as most names typed or downloaded
+        // are spelled; a URL spells it decomposed (NFD).
+        #expect(rename(jpeg("bear.jpg").path, dir.path + "/B\u{E4}r.jpg") == 0)
+        let original = dir.appending(path: "B\u{E4}r.jpg")
+        let spelled = { (name: String) in
+            try FileManager.default.contentsOfDirectory(atPath: self.dir.path).contains { $0.utf8.elementsEqual(name.utf8) }
+        }
+        let jxl = try #require(result(try await convert(original, to: .jxl)))
+        #expect(try spelled("B\u{E4}r.jxl"))
+        _ = try #require(result(try await convert(jxl, to: .jpeg)))
+        #expect(try spelled("B\u{E4}r.jpg"))
+    }
+
     @Test func keepsThePermissions() async throws {
         let original = jpeg("private.jpg")
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: original.path)

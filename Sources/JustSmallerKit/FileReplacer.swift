@@ -21,7 +21,7 @@ enum FileReplacer {
     static func replace(_ original: URL, with result: URL,
                         moveOriginalToTrash: Bool, keepModificationDate: Bool) throws -> URL? {
         let fm = FileManager.default
-        let dates = try FileOptimizer.freshValues(of: original, [.creationDateKey, .contentModificationDateKey])
+        let dates = try FileOptimizer.freshValues(of: original, [.creationDateKey, .contentModificationDateKey, .nameKey])
         // Decided up front, before anything is created next to the original:
         // in the sandbox a single dropped file's folder is off limits, and
         // replaceItemAt would swap the files first and only then fail to
@@ -58,7 +58,7 @@ enum FileReplacer {
                 return (backup, resulting)
             } catch let error as NSError {
                 backup?.releaseIfUnused()
-                switch recover(original, after: error, result: resultID, backup: backup) {
+                switch recover(original, named: dates.name, after: error, result: resultID, backup: backup) {
                 case .putBack:
                     throw error
                 case .keptAsBackup:
@@ -114,7 +114,7 @@ enum FileReplacer {
     /// backup couldn't be made). Puts it back or, failing that, next to the
     /// result under the backup name. Files are told apart by identity, never
     /// by path.
-    private static func recover(_ original: URL, after error: NSError, result: FileID?, backup: Backup?) -> Recovery {
+    private static func recover(_ original: URL, named name: String?, after error: NSError, result: FileID?, backup: Backup?) -> Recovery {
         let fm = FileManager.default
         guard let parked = error.userInfo["NSFileOriginalItemLocationKey"] as? URL,
               let parkedID = FileID(parked) else { return .putBack }
@@ -130,7 +130,7 @@ enum FileReplacer {
             return .putBack
         }
         if originalID == nil {
-            if (try? fm.moveItem(at: parked, to: original)) != nil { return .putBack }
+            if (try? move(parked, to: original, keepingSpellingOf: name)) != nil { return .putBack }
         } else if originalID == result, renamex_np(parked.path, original.path, UInt32(RENAME_SWAP)) == 0 {
             if FileID(parked) == result { try? fm.removeItem(at: parked) } // the result, swapped out again
             return .putBack
@@ -191,15 +191,16 @@ enum FileReplacer {
     /// comes back from the Trash.
     private static func replaceViaTrash(_ original: URL, with replacement: URL) throws -> URL? {
         let fm = FileManager.default
+        let name = try? FileOptimizer.freshValues(of: original, [.nameKey]).name
         let trashed = try Trash.move(original)
         do {
-            try fm.moveItem(at: replacement, to: original)
+            try move(replacement, to: original, keepingSpellingOf: name)
         } catch {
             guard let trashed else { throw error }
             // A move across volumes may have left a partial copy; it is ours.
             if fm.fileExists(atPath: original.path) { try? fm.removeItem(at: original) }
             do {
-                try fm.moveItem(at: trashed, to: original)
+                try move(trashed, to: original, keepingSpellingOf: name)
             } catch {
                 throw OriginalInTrash(name: trashed.lastPathComponent)
             }
@@ -242,6 +243,7 @@ enum FileReplacer {
                          moveAsideToTrash: Bool = true) throws -> URL {
         let fm = FileManager.default
         let folder = target.deletingLastPathComponent()
+        let name = try? FileOptimizer.freshValues(of: original, [.nameKey]).name
         try fm.createDirectory(at: folder, withIntermediateDirectories: true)
         // Staged on the target's volume, so the final step is a rename and a
         // half-written file never appears under the target's name.
@@ -254,19 +256,43 @@ enum FileReplacer {
             if isSameFile(target, original) { throw OutputIsOriginal() }
             if !moveAsideToTrash {
                 try fm.removeItem(at: target)
-                try fm.moveItem(at: staged, to: target)
-                return target
-            }
-            do {
-                try Trash.move(target)
-            } catch where Trash.isUnavailable(error) {
-                let free = freeName(for: target)
-                try fm.moveItem(at: staged, to: free)
-                return free
+            } else {
+                do {
+                    try Trash.move(target)
+                } catch where Trash.isUnavailable(error) {
+                    let free = freeName(for: target)
+                    try move(staged, to: free, keepingSpellingOf: name)
+                    return free
+                }
             }
         }
-        try fm.moveItem(at: staged, to: target)
+        try move(staged, to: target, keepingSpellingOf: name)
         return target
+    }
+
+    /// FileManager.moveItem, which writes names decomposed (NFD), but where
+    /// the new name begins with `originalName` (as on disk, mostly NFC), that
+    /// part keeps the original's spelling ("Bären.jpg" → "Bären.jxl"). APFS
+    /// only: exFAT then no longer lets FileManager delete the file. Never
+    /// overwrites; copies across volumes.
+    private static func move(_ file: URL, to target: URL, keepingSpellingOf originalName: String?) throws {
+        let name = target.lastPathComponent
+        let folder = target.deletingLastPathComponent()
+        guard let stem = originalName.map({ ($0 as NSString).deletingPathExtension }), !stem.isEmpty, name.hasPrefix(stem),
+              !stem.utf8.elementsEqual(stem.decomposedStringWithCanonicalMapping.utf8),
+              (try? folder.resourceValues(forKeys: [.volumeTypeNameKey]).volumeTypeName) == "apfs" else {
+            try FileManager.default.moveItem(at: file, to: target)
+            return
+        }
+        let path = folder.path + "/" + stem + name.dropFirst(stem.count)
+        if renamex_np(file.path, path, UInt32(RENAME_EXCL)) == 0 { return }
+        var failed = errno
+        if failed == EXDEV {
+            if copyfile(file.path, path, nil, copyfile_flags_t(COPYFILE_ALL | COPYFILE_EXCL | COPYFILE_MOVE)) == 0 { return }
+            failed = errno
+            if failed != EEXIST { unlink(path) }
+        }
+        throw POSIXError(POSIXErrorCode(rawValue: failed) ?? .EIO)
     }
 
     struct OutputIsOriginal: LocalizedError {
