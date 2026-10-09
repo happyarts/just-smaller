@@ -171,7 +171,8 @@ enum Pipeline {
     /// OxiPNG's options at each effort, for still and animated PNGs. From
     /// Balanced on it tries its filter strategies 0-9 (`-f 0-9`) and, on
     /// larger images, chooses among them section by section (our fork,
-    /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
+    /// oxipng/oxipng#883); only the candidates that evaluate best get the
+    /// final compression. It compresses with libdeflate's levels 13 and 14
     /// (`--zc`, our fork); with both fixed, its -o presets give the same
     /// result.
     static func oxipngOptions(_ effort: Effort) -> [String] {
