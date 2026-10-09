@@ -1,6 +1,6 @@
 [submodule "Vendor/oxipng"]
 	path = Vendor/oxipng
-	url = https://github.com/oxipng/oxipng.git
+	url = https://github.com/happyarts/oxipng.git
 	shallow = true
 [submodule "Vendor/oxvg"]
 	path = Vendor/oxvg

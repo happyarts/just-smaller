@@ -4,16 +4,18 @@
   CMake; first run ~4 min). Submodules in `Vendor/` are pinned to release
   tags (oxvg: a main commit); build.sh only fetches missing ones and never moves
   a checkout — it stops when one isn't at its pinned commit (after a pull).
-  OxiPNG and libdeflate are built from copies with
-  `Tools/{oxipng,libdeflater}/patches/*.patch` applied (the
-  checkouts stay pinned). libdeflate comes with the libdeflater crate
+  libdeflate is built from a copy with `Tools/libdeflater/patches/*.patch`
+  applied (the checkout stays pinned); it comes with the libdeflater crate
   (`Vendor/libdeflater`), pinned to the version OxiPNG's Cargo.lock names.
-  zopfli is `Vendor/zopfli`, our fork `happyarts/zopfli`: its `main` is
-  upstream plus our changes as commits (no patches); changes go there and
-  the submodule moves with them; branches for upstream PRs start from
-  upstream's `main`. build.sh points OxiPNG at both (libdeflate levels 13
-  and 14, `--zc`; a faster zopfli for `--zopfli`, used at Maximum). A patch
-  that went upstream is deleted when the pin moves past it.
+  OxiPNG and zopfli are our forks, `Vendor/oxipng` (happyarts/oxipng,
+  branch `master`) and `Vendor/zopfli` (happyarts/zopfli, `main`): that
+  branch is upstream's plus our changes as commits (no patches); changes
+  go there and the submodule moves with them; branches for upstream PRs
+  start from upstream's branch. build.sh builds OxiPNG as checked out and
+  points it at both (libdeflate levels 13 and 14, `--zc`; a faster zopfli
+  for `--zopfli`, used at Maximum). Our OxiPNG lock file names libdeflater
+  and zopfli without a registry source, since the build replaces them. A
+  patch or commit that went upstream drops out when we move onto upstream.
 - `Tools/test.sh` runs `swift test` (tests use `build/tools`); it and the
   corpus runner find a full Xcode themselves (`Tools/xcode-env.sh`), also
   when `xcode-select` points at the Command Line Tools.

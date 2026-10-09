@@ -1,10 +1,10 @@
 #!/bin/sh
 # Builds the command-line optimizers Just Smaller runs, from the sources in
 # Vendor/ (git submodules pinned to released versions; oxvg to a main commit
-# with path and transform fixes that aren't released yet; zopfli to our fork,
-# happyarts/zopfli) and Tools/. OxiPNG and libdeflate (through the
-# libdeflater crate) are built from copies with our patches (Tools/*/patches)
-# applied.
+# with path and transform fixes that aren't released yet; OxiPNG and zopfli
+# to our forks, happyarts/oxipng and happyarts/zopfli) and Tools/. libdeflate
+# (through the libdeflater crate) is built from a copy with our patches
+# (Tools/libdeflater/patches) applied.
 #
 #     Tools/build.sh [OUTPUT_DIR] [CODE_SIGN_IDENTITY] [ENTITLEMENTS]
 #
@@ -135,16 +135,16 @@ cargo_tool() { # name manifest [cargo args…]
 		--target-dir "$WORK/cargo-$name" "$@"
 	cp "$WORK/cargo-$name/aarch64-apple-darwin/release/$name" "$OUT/$name"
 }
-# OxiPNG with libdeflate levels 13-14 and a faster zopfli instead of the ones
-# from crates.io: libdeflater (which brings libdeflate) from our patched copy,
-# zopfli from our fork as it is checked out (Vendor/zopfli).
+# OxiPNG from our fork as it is checked out (Vendor/oxipng), with libdeflate
+# levels 13-14 and a faster zopfli instead of the ones from crates.io:
+# libdeflater (which brings libdeflate) from our patched copy, zopfli from our
+# fork as it is checked out (Vendor/zopfli).
 patched_copy "$ROOT/Vendor/libdeflater" "$WORK/libdeflater-src" "$ROOT/Tools/libdeflater/patches"
-patched_copy "$ROOT/Vendor/oxipng" "$WORK/oxipng-src" "$ROOT/Tools/oxipng/patches"
 # Cargo rebuilds libdeflate's C files only when it sees a file of the crate
 # change, and it doesn't look into folders git ignores (build/): a new copy
 # of libdeflater starts OxiPNG's build afresh.
 case $renewed in *libdeflater-src*) rm -rf "$WORK/cargo-oxipng" ;; esac
-cargo_tool oxipng "$WORK/oxipng-src/Cargo.toml" --locked --bin oxipng \
+cargo_tool oxipng "$ROOT/Vendor/oxipng/Cargo.toml" --locked --bin oxipng \
 	--config "patch.crates-io.libdeflater.path=\"$WORK/libdeflater-src\"" \
 	--config "patch.crates-io.libdeflate-sys.path=\"$WORK/libdeflater-src/libdeflate-sys\"" \
 	--config "patch.crates-io.zopfli.path=\"$ROOT/Vendor/zopfli\""
