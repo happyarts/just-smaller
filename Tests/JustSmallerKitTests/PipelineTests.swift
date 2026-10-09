@@ -100,7 +100,7 @@ struct PipelineTests {
         #expect(names(.thorough) == ["OxiPNG"])
         #expect(names(.maximum) == ["OxiPNG", "OxiPNG"])
         #expect(names(.maximum, animated: true) == ["OxiPNG"])
-        #expect(Pipeline.oxipngZopfliOptions == ["-o", "max", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"])
+        #expect(Pipeline.oxipngZopfliOptions == ["-o", "max", "-f", "0-10", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"])
         // Section-wise filters from Balanced on; libdeflate 13, then 14.
         #expect(Pipeline.oxipngOptions(.fast) == ["-o", "2"])
         #expect(Pipeline.oxipngOptions(.balanced) == ["-o", "2", "-f", "0-9", "--zc", "13"])

@@ -156,9 +156,9 @@ enum Pipeline {
     }
 
     /// OxiPNG from Balanced on tries all its filter strategies (`-f 0-9`) and,
-    /// on larger images, chooses among them section by section (our patch,
+    /// on larger images, chooses among them section by section (our fork,
     /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
-    /// (`--zc`, our patch); with both fixed, its -o presets give the same
+    /// (`--zc`, our fork); with both fixed, its -o presets give the same
     /// result. Maximum also runs OxiPNG with Zopfli next to Thorough's
     /// OxiPNG and keeps the smaller result, so it is never larger than
     /// Thorough. Animated PNGs get one OxiPNG run.
@@ -177,10 +177,12 @@ enum Pipeline {
         }
     }
 
-    /// OxiPNG with Zopfli at Maximum: every filter strategy is judged quickly
-    /// (`--fast`), then the best one is compressed once with Zopfli (our
-    /// faster fork), up to 60 iterations, stopping after 10 without gain.
-    static let oxipngZopfliOptions = ["-o", "max", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"]
+    /// OxiPNG with Zopfli at Maximum: every filter strategy, including
+    /// Incremental (`-f 10`, our fork: each line's filter by its cost in a
+    /// running deflate stream), is judged quickly (`--fast`), then the best
+    /// one is compressed once with Zopfli (our faster fork), up to 60
+    /// iterations, stopping after 10 without gain.
+    static let oxipngZopfliOptions = ["-o", "max", "-f", "0-10", "--fast", "--zopfli", "--zi", "60", "--ziwi", "10"]
 
     static func oxipng(_ options: [String], lossy: Bool) -> Candidate {
         Candidate(name: "OxiPNG", changesHiddenColour: lossy) { input, output, work in
