@@ -5,8 +5,14 @@
 //! Uses quantizr (MIT) for the palette and dithering. The colour metadata of
 //! the input — ICC profile, sRGB intent, gamma, chromaticities and physical
 //! pixel size — is written to the output, so the colours are interpreted the
-//! same way, including a cICP chunk. HDR images (PQ or HLG transfer, or mDCV
-//! and cLLI chunks) are left alone: a palette of 8-bit colours can't hold them.
+//! same way, including a cICP chunk. Every other ancillary chunk that stays
+//! true of the new image data — EXIF, XMP and text, the modification time,
+//! safe-to-copy chunks of other programs — is copied as it is, on its side of
+//! the image data; the metadata filter decides afterwards what stays. Chunks
+//! tied to the old pixels (background colour, significant bits, histogram,
+//! suggested palettes, unsafe-to-copy chunks) go. HDR images (PQ or HLG
+//! transfer, or mDCV and cLLI chunks) are left alone: a palette of 8-bit
+//! colours can't hold them.
 //! Exit status: 0 written, 1 error, 97 HDR image left alone, 98 input already
 //! has a palette.
 
@@ -92,7 +98,21 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     info.pixel_dims = source.pixel_dims;
 
     let mut encoded = Vec::new();
-    png::Encoder::with_info(&mut encoded, info)?.write_header()?.write_image_data(&indices)?;
+    let mut writer = png::Encoder::with_info(&mut encoded, info)?.write_header()?;
+    // The metadata on the side of the image data it stood on in the input.
+    let copy = |writer: &mut png::Writer<_>, after_image_data: bool| -> Result<(), png::EncodingError> {
+        for (kind, range, past_image_data) in chunks(&raw) {
+            if copied(kind) && past_image_data == after_image_data {
+                let kind = png::chunk::ChunkType([kind[0], kind[1], kind[2], kind[3]]);
+                writer.write_chunk(kind, &raw[range.start + 8..range.end - 4])?;
+            }
+        }
+        Ok(())
+    };
+    copy(&mut writer, false)?;
+    writer.write_image_data(&indices)?;
+    copy(&mut writer, true)?;
+    writer.finish()?;
     // The png crate can't write cICP; it belongs right after IHDR (signature 8 + IHDR 25 bytes).
     if let Some(cicp) = cicp {
         encoded.splice(33..33, cicp.iter().copied());
@@ -101,17 +121,36 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// Whether a chunk of the input is copied into the palette image: an
+/// ancillary chunk that is safe to copy when the image data changes
+/// (lowercase fourth letter) — EXIF, XMP, text, other programs' own data —
+/// and the modification time. pHYs is written with the colour metadata.
+fn copied(kind: &[u8]) -> bool {
+    let ancillary = kind[0].is_ascii_lowercase();
+    let safe_to_copy = kind[3].is_ascii_lowercase();
+    ancillary && (safe_to_copy && kind != b"pHYs" || kind == b"tIME")
+}
+
 /// The complete chunk (length, type, data, CRC) of the given type before the image data.
 fn chunk<'a>(data: &'a [u8], kind: &[u8; 4]) -> Option<&'a [u8]> {
-    let mut i = 8;
-    while i + 8 <= data.len() {
+    chunks(data).take_while(|c| c.0 != b"IDAT").find(|c| c.0 == kind).map(|c| &data[c.1])
+}
+
+/// The chunks up to IEND: type, where the complete chunk stands, and whether
+/// it comes after image data. Ends at the first one that doesn't fit.
+fn chunks(data: &[u8]) -> impl Iterator<Item = (&[u8], std::ops::Range<usize>, bool)> {
+    let (mut i, mut past_image_data, mut done) = (8, false, false);
+    std::iter::from_fn(move || {
+        if done || i + 12 > data.len() {
+            return None;
+        }
         let length = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
         let end = i.checked_add(12 + length).filter(|&e| e <= data.len())?;
-        match &data[i + 4..i + 8] {
-            t if t == kind => return Some(&data[i..end]),
-            b"IDAT" | b"IEND" => return None,
-            _ => i = end,
-        }
-    }
-    None
+        let kind = &data[i + 4..i + 8];
+        done = kind == b"IEND";
+        let item = (kind, i..end, past_image_data);
+        past_image_data |= kind == b"IDAT";
+        i = end;
+        Some(item)
+    })
 }

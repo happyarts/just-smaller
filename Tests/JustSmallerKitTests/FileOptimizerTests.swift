@@ -779,9 +779,8 @@ final class FileOptimizerTests {
         #expect(!JPEGLayout.readsForEncoding(nil) && !JPEGLayout.readsForEncoding(JPEGMarkers.Frame(marker: 0xC0, precision: nil, components: nil)))
     }
 
-    @Test func lossyPNGIsQuantizedWithoutLosingItsProfile() async throws {
-        settings.lossy = true
-        // Photo-like: gradients with grain, which a palette stores in a third of the bytes
+    /// Photo-like: gradients with grain, which a palette stores in a third of the bytes.
+    private func grainyImage() -> CGImage {
         let cs = CGColorSpace(name: CGColorSpace.displayP3)!
         let ctx = CGContext(data: nil, width: 256, height: 256, bitsPerComponent: 8, bytesPerRow: 0,
                             space: cs, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
@@ -793,13 +792,69 @@ final class FileOptimizerTests {
                 ctx.fill(CGRect(x: x, y: y, width: 1, height: 1))
             }
         }
-        let url = write(ctx.makeImage()!, "quantize.png", type: .png)
+        return ctx.makeImage()!
+    }
+
+    @Test func lossyPNGIsQuantizedWithoutLosingItsProfile() async throws {
+        settings.lossy = true
+        let url = write(grainyImage(), "quantize.png", type: .png)
         let before = try Data(contentsOf: url).count
         let outcome = try await optimize(url)
         guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(tools.contains("quantizr"), "\(tools)")
         #expect(try Data(contentsOf: url).count < before)
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
+    }
+
+    /// The palette image keeps the metadata: EXIF, XMP and text on their side
+    /// of the image data, and the time. What describes the old pixels goes
+    /// (background colour, significant bits, unsafe-to-copy chunks of other
+    /// programs). At "keep everything" nothing may be missing.
+    @Test(arguments: [MetadataHandling.keep, .removePrivate])
+    func lossyPNGKeepsItsMetadata(level: MetadataHandling) async throws {
+        settings.lossy = true
+        settings.metadata = level
+        let written = write(grainyImage(), "quantize-metadata.png", type: .png, properties: [
+            kCGImagePropertyTIFFDictionary: [kCGImagePropertyTIFFArtist: "Jane Doe", kCGImagePropertyTIFFCopyright: "Public domain"],
+            kCGImagePropertyExifDictionary: [kCGImagePropertyExifUserComment: "Diary"],
+        ])
+        var png = Data(PNGChunks.signature), inFront = true
+        for chunk in try PNGChunks.read(ByteView(Data(contentsOf: written)), strict: true) {
+            if chunk.type == "IDAT", inFront {
+                inFront = false
+                png.append(PNGChunks.write("bKGD", [0, 255, 0, 255, 0, 255]))
+                png.append(PNGChunks.write("sBIT", [8, 8, 8]))
+                png.append(PNGChunks.write("prVT", [1, 2, 3]))
+            }
+            if chunk.type == "IEND" {
+                png.append(PNGChunks.write("tEXt", Array("Disclaimer\0After the image data".utf8)))
+                png.append(PNGChunks.write("tIME", [0x07, 0x6A, 1, 2, 3, 4, 5]))
+            }
+            png.append(chunk.whole.bytes)
+        }
+        let url = dir.appending(path: "quantize-metadata-\(level).png")
+        try png.write(to: url)
+        let original = dir.appending(path: "quantize-metadata-\(level)-original.png")
+        try png.write(to: original)
+        func types(_ url: URL) throws -> [String] { try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true).map(\.type) }
+        let before = try types(url)
+        #expect(before.contains("eXIf") && before.contains("iTXt"), "ImageIO wrote no EXIF or XMP: \(before)")
+
+        let outcome = try await optimize(url)
+        guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(tools.contains("quantizr"), "\(tools)")
+        try MetadataCheck.verify(original: original, result: url, level: level)
+        let after = try types(url), image = try #require(after.firstIndex(of: "IDAT"))
+        #expect(!after.contains("bKGD") && !after.contains("sBIT") && !after.contains("prVT"), "\(after)")
+        #expect(after.firstIndex(of: "eXIf").map { $0 < image } == true, "\(after)")
+        #expect(after.firstIndex(of: "tEXt").map { $0 > image } == true, "\(after)")
+        if level == .keep {
+            #expect(MetadataCheck.fields(try Data(contentsOf: url)) == MetadataCheck.fields(png))
+            #expect(after.contains("tIME") && after.contains("iTXt"), "\(after)")
+        }
+        let fields = MetadataCheck.fields(try Data(contentsOf: url))
+        #expect(fields.values.contains { $0.text.contains("Jane Doe") }, "\(fields)")
+        #expect(fields.values.contains { $0.text.contains("Public domain") }, "\(fields)")
     }
 
     @Test func lowQualityJPEGIsNotReencoded() async throws {

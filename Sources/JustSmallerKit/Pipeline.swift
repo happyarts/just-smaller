@@ -226,7 +226,7 @@ enum Pipeline {
     }
 
     /// Palette reduction with quantizr (MIT) through our png-quantize, which
-    /// keeps the colour metadata.
+    /// keeps the colour metadata and copies the rest for the metadata filter.
     static func pngQuantize() -> Candidate {
         Candidate(name: "quantizr", isLossy: true) { input, output, work in
             do {

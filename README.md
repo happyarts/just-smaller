@@ -85,7 +85,7 @@ The command looks for the optimizers in `--tools`, `$JUST_SMALLER_TOOLS`, a
 | `Vendor/libdeflater` | The libdeflater crate OxiPNG compresses with, from our fork `happyarts/libdeflater` (its `master`), with libdeflate from our fork `happyarts/libdeflate`: compression levels 13 and 14 beyond libdeflate's 12 (costs with fractional bits, blocks split by the cost of the chosen items, matches searched near both ends of long matches, Huffman codes smoothed for run-length coding) |
 | `Vendor/zopfli` | The zopfli crate OxiPNG uses with `--zopfli`, from our fork `happyarts/zopfli` (its `main`): the matches of the first pass are kept for later iterations (identical output); optional binary tree match finder, more Huffman code length choices for each dynamic block, parse passes with the real code lengths, the 1 MB chunks compressed on several threads (identical output), and blocks joined across those chunks where one block is smaller than two; buffers are allocated once and reused (identical output); minimum Rust version 1.88, as OxiPNG's |
 | `Tools/svg-tool` | The OXVG optimiser and the resvg renderer, without the rest of either command (Rust) |
-| `Tools/png-quantize` | Palette reduction with quantizr, keeping colour metadata (Rust) |
+| `Tools/png-quantize` | Palette reduction with quantizr, keeping the metadata (Rust) |
 | `Tools/jpegcmp` | Compares two JPEGs' DCT coefficients, or a JPEG's pixels with another decoder's (C, libjpeg-turbo) |
 | `Tools/jxl-transcode` | JPEG to JPEG XL without loss and back, with libjxl (C++) |
 | `Tools/jxl-pixels` | Decodes JPEG XL with jxl-rs, the decoder of Chrome and Firefox, for checking (Rust) |
