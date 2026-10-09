@@ -189,9 +189,9 @@ final class JPEGXLTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "hdr.jxl").path))
     }
 
-    /// JPEG XL has no JFIF: a JPEG whose resolution only JFIF states would
-    /// be shown at another size (apps size images by their resolution).
-    @Test func aJPEGWithItsResolutionOnlyInJFIFStaysJPEG() async throws {
+    /// JPEG XL has no JFIF: a resolution only JFIF states is lost. It only
+    /// sets the size apps print at by default, so the JPEG still converts.
+    @Test func aJPEGWithItsResolutionOnlyInJFIFConverts() async throws {
         let url = jpeg("jfif-300dpi.jpg")
         var data = try Data(contentsOf: url)
         let jfif = try #require(data.range(of: Data("JFIF\0".utf8)))
@@ -199,8 +199,55 @@ final class JPEGXLTests {
         try data.write(to: url)
         let properties = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil) as? [CFString: Any]
         try #require(properties?[kCGImagePropertyDPIWidth] as? Int == 300)
+        #expect(result(try await convert(url, to: .jxl)) != nil)
+    }
+
+    /// Browsers show a JPEG at the size its EXIF resolution and pixel size
+    /// give, but not a JPEG XL: it would be shown larger, so it stays JPEG.
+    @Test func aJPEGBrowsersShowSmallerStaysJPEG() async throws {
+        let url = try densityJPEG("density.jpg")
         #expect(reason(try await convert(url, to: .jxl))?.contains("at another size") == true)
-        #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "jfif-300dpi.jxl").path))
+        #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "density.jxl").path))
+    }
+
+    /// A JPEG XL another program made from such a JPEG may be stored anew:
+    /// it shows as it did before.
+    @Test func aJPEGXLMadeElsewhereFromSuchAJPEGIsOptimized() async throws {
+        let url = try densityJPEG("density-located.jpg", properties: [kCGImagePropertyGPSDictionary: TestImages.gps])
+        let jxl = dir.appending(path: "density-located.jxl")
+        try await ToolRunner.run("jxl-transcode", ["encode", url.path, jxl.path], in: dir)
+        var optimizing = OptimizationSettings()
+        optimizing.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: optimizing).optimize(jxl, to: .replace) { _ in }
+        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(gps(jxl) == nil)
+    }
+
+    /// A JPEG that browsers show at half its pixels: 144 dpi in EXIF and the
+    /// pixel size that matches it at 72 dpi.
+    private func densityJPEG(_ name: String, properties: [CFString: Any] = [:]) throws -> URL {
+        var all = properties
+        all[kCGImagePropertyDPIWidth] = 144
+        all[kCGImagePropertyDPIHeight] = 144
+        let url = jpeg(name, properties: all)
+        // ImageIO writes the real pixel size; at 144 dpi browsers show half of it.
+        var data = try Data(contentsOf: url)
+        let app1 = try #require(try JPEGMarkers.headers(ByteView(data)).segments.first {
+            $0.marker == 0xE1 && $0.payload.has(JPEGMarkers.exifHeader)
+        })
+        let base = app1.offset + 4 + JPEGMarkers.exifHeader.count
+        let reader = try TIFFReader(ByteView(data[base...]))
+        let exifIFD = try #require(try reader.ifd(at: reader.firstIFD).entries.first { $0.tag == TIFFReader.exifPointer }.flatMap(reader.pointer))
+        for entry in try reader.ifd(at: exifIFD).entries where [0xA002, 0xA003].contains(entry.tag) {
+            let size = try #require(TIFFReader.sizes[entry.type]), at = base + (try #require(entry.valueOffset))
+            let value = entry.tag == 0xA002 ? 48 : 32
+            let bytes = (0..<size).map { UInt8(value >> (8 * (reader.bigEndian ? size - 1 - $0 : $0)) & 0xFF) }
+            data.replaceSubrange(at..<at + size, with: bytes)
+        }
+        try data.write(to: url)
+        let written = CGImageSourceCopyPropertiesAtIndex(CGImageSourceCreateWithURL(url as CFURL, nil)!, 0, nil) as? [CFString: Any]
+        try #require((written?[kCGImagePropertyExifDictionary] as? [CFString: Any])?[kCGImagePropertyExifPixelXDimension] as? Int == 48)
+        return url
     }
 
     @Test func aTinyJPEGStaysWhenJPEGXLIsLarger() async throws {

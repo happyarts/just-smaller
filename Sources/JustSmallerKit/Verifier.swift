@@ -183,22 +183,28 @@ enum Verifier {
         guard pa.orientation == pb.orientation else {
             throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
         }
+        // How the JPEG would look as JPEG XL. A JPEG XL stored anew is
+        // compared with the old one instead (verifyRecompressedJXL): it may
+        // show as its JPEG would not, as long as it shows as it did.
+        if isRebuilt { return }
         // A JPEG whose colour space only its EXIF names (Adobe RGB), or a grey
         // one without a profile, is shown in other colours as JPEG XL.
         guard pa.iccProfile == pb.iccProfile else {
             throw VerificationError(reason: String(localized: "it would be shown in other colours", bundle: .module))
         }
-        // A JPEG whose resolution only JFIF states (JPEG XL has no JFIF), or
-        // that browsers show at the size its EXIF resolution gives (they
-        // don't for JPEG XL), is shown at another size as JPEG XL.
-        guard pa.resolution == pb.resolution, pa.browserSize == [pa.width, pa.height] else {
+        // A JPEG that browsers show at the size its EXIF resolution gives
+        // would be shown larger as JPEG XL: they don't do so for JPEG XL.
+        // A resolution only JFIF states is lost (JPEG XL has no JFIF); it is
+        // the size apps show and print at by default, which any app lets
+        // you change, so that may go.
+        guard pa.browserSize == [pa.width, pa.height] else {
             throw VerificationError(reason: String(localized: "it would be shown at another size", bundle: .module))
         }
     }
 
     /// A JPEG XL made from a JPEG, stored anew: both rebuild into JPEGs with
-    /// the same coefficients; the new one passes every check of a
-    /// conversion; and ImageIO shows the old and the new alike.
+    /// the same coefficients; the new one rebuilds and decodes as a
+    /// conversion must; and ImageIO shows the old and the new alike.
     private static func verifyRecompressedJXL(original: URL, result: URL) async throws {
         let work = result.deletingLastPathComponent(), id = UUID().uuidString
         let a = work.appending(path: "before-\(id).jpg"), b = work.appending(path: "after-\(id).jpg")
