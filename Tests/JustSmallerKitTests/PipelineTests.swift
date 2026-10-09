@@ -37,7 +37,10 @@ struct PipelineTests {
     }
 
     @Test func gifIsLeftForALaterVersion() {
-        #expect(Pipeline.stages(for: .gif, facts: FileFacts(byteSize: 100_000), settings: OptimizationSettings()).isEmpty)
+        #expect(!ImageFormat.gif.isOptimizable)
+        for format in ImageFormat.allCases where !format.isOptimizable {
+            #expect(Pipeline.stages(for: format, facts: FileFacts(byteSize: 100_000), settings: OptimizationSettings()).isEmpty)
+        }
     }
 
     @Test func svgIDsThatEditorsNumberAreGenerated() {

@@ -8,6 +8,9 @@ public enum ImageFormat: String, CaseIterable, Codable, Sendable, Identifiable {
 
     public var id: Self { self }
 
+    /// Whether this version optimizes the format at all (GIF not yet).
+    public var isOptimizable: Bool { self != .gif }
+
     public var displayName: String {
         switch self {
         case .png: "PNG"
