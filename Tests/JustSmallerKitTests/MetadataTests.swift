@@ -528,6 +528,50 @@ final class MetadataTests {
         #expect(decoded == [.removePrivate, .keep, .copyrightOnly])
     }
 
+    /// ImageMagick writes eXIf after the image data, where ImageIO doesn't
+    /// read it; the filter moves it in front, as the specification wants.
+    /// Its values are the original's all the same, and what the level
+    /// removes goes from it too — but a rotation no viewer showed before
+    /// must not appear: then the file stays as it is.
+    @Test(arguments: [1, 6])
+    func exifAfterTheImageData(orientation: Int) async throws {
+        let url = dir.appending(path: "late-exif-\(orientation).png")
+        let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), nil)
+        #expect(CGImageDestinationFinalize(dest))
+        let rational: [UInt8] = [0, 0, 0, 144, 0, 0, 0, 1]
+        let tiff = exifBlock(main: [(0x0112, 3, [0, UInt8(orientation)]), (0x011A, 5, rational), (0x011B, 5, rational), (0x0128, 3, [0, 2])],
+                             exif: [(0x9286, 7, Array("ASCII\0\0\0Screenshot".utf8))], interop: [])
+        var png = Data(PNGChunks.signature) // ImageIO's own eXIf (before IDAT) goes; ours goes in front of IEND
+        for chunk in try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true) where chunk.type != "eXIf" {
+            if chunk.type == "IEND" { png.append(PNGChunks.write("eXIf", tiff)) }
+            png.append(chunk.whole.bytes)
+        }
+        try png.write(to: url)
+        #expect(props(url)[kCGImagePropertyOrientation] == nil)
+        #expect(MetadataCheck.hasFieldsToRemove(url, level: .removePrivate)) // the comment
+        let original = try Data(contentsOf: url)
+
+        let out = dir.appending(path: "late-exif-\(orientation)-filtered.png")
+        try PNGMetadataFilter.filter(Data(contentsOf: url), level: .removePrivate, orientation: 1).write(to: out)
+        #expect(try PNGChunks.read(ByteView(Data(contentsOf: out)), strict: true).map(\.type).prefix(2) == ["IHDR", "eXIf"])
+        try MetadataCheck.verify(original: url, result: out, level: .removePrivate)
+
+        var settings = OptimizationSettings()
+        settings.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        switch (orientation, outcome) {
+        case (1, .optimized):
+            #expect(!MetadataCheck.hasFieldsToRemove(url, level: .removePrivate))
+            #expect(MetadataCheck.fields(try Data(contentsOf: url))[MetadataCheck.Key(ns: MetadataPolicy.NS.tiff, name: "XResolution")]?.text == "144/1")
+        case (6, .unchanged):
+            #expect(try Data(contentsOf: url) == original)
+        default:
+            Issue.record("unexpected: \(outcome)")
+        }
+        #expect(props(url)[kCGImagePropertyOrientation] as? Int ?? 1 == 1)
+    }
+
     @Test func checkRejectsInventedValues() throws {
         let url = photo("check.jpg")
         let other = dir.appending(path: "other.jpg")
@@ -542,7 +586,7 @@ final class MetadataTests {
     /// A big-endian TIFF block with IFD0, an EXIF IFD and an Interop IFD.
     private func exifBlock(main: [(UInt16, UInt16, [UInt8])], exif: [(UInt16, UInt16, [UInt8])],
                            interop: [(UInt16, UInt16, [UInt8])]) -> [UInt8] {
-        let sizes: [UInt16: Int] = [2: 1, 3: 2, 4: 4, 7: 1]
+        let sizes: [UInt16: Int] = [2: 1, 3: 2, 4: 4, 5: 8, 7: 1]
         var out: [UInt8] = Array("MM".utf8) + [0, 42, 0, 0, 0, 8]
         func u16(_ v: Int) -> [UInt8] { [UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }
         func u32(_ v: Int) -> [UInt8] { [UInt8(v >> 24 & 0xFF), UInt8(v >> 16 & 0xFF), UInt8(v >> 8 & 0xFF), UInt8(v & 0xFF)] }

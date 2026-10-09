@@ -16,8 +16,13 @@ import ImageIO
 /// When filtering removes the one it showed, the other appears — a value the
 /// original held all along. So a result's value may come from any of the
 /// original's sources: the merged view, EXIF and IPTC alone, or XMP alone —
-/// or, for fields ImageIO couldn't read in the original (broken IIM from old
-/// programs), text that stands in the original file as it is.
+/// or a PNG's EXIF alone — or, for fields ImageIO couldn't read in the
+/// original (broken IIM from old programs), text that stands in the original
+/// file as it is.
+///
+/// A PNG's eXIf after the image data counts like one before it: ImageIO
+/// skips it there (the specification wants it before, some programs write
+/// it after), other readers show it, and the filter moves it in front.
 ///
 /// A JPEG that holds several images is checked image by image: a gain map
 /// or a depth image can carry EXIF with the location too.
@@ -89,7 +94,10 @@ enum MetadataCheck {
             // lengths in Google's container directory with the images it
             // lists — the structure check reads the result along them.
             if merged[key] == value || key.name == "LegacyIPTCDigest" || isJPEG(result) && isContainerDirectory(key) { continue }
-            if sources == nil { sources = [fields(original, excludingXMP: true), xmpFields(original)] }
+            if sources == nil {
+                let exif = pngEXIFImage(original, onlyAfterImageData: false).map { imageIOFields($0, excludingXMP: true) } ?? [:]
+                sources = [fields(original, excludingXMP: true), xmpFields(original), exif]
+            }
             if sources?.contains(where: { $0[key] == value }) == true { continue }
             if regions == nil { regions = MetadataRegions.of(original) }
             guard standsIn(regions ?? [], value) else {
@@ -122,6 +130,7 @@ enum MetadataCheck {
 
     /// Whether the file holds a maker note, or tags of Apple's, the level removes.
     private static func hasMakerNotesToRemove(_ data: Data, level: MetadataHandling) -> Bool {
+        if let exif = pngEXIFImage(data, onlyAfterImageData: true), hasMakerNotesToRemove(exif, level: level) { return true }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any] else { return false }
         return properties.contains { key, value in
@@ -154,8 +163,17 @@ enum MetadataCheck {
         static func == (a: Value, b: Value) -> Bool { a.text == b.text }
     }
 
-    /// Top-level properties with their values flattened to text.
+    /// Top-level properties with their values flattened to text; with a
+    /// PNG's eXIf after the image data where ImageIO shows nothing else.
     static func fields(_ data: Data, excludingXMP: Bool = false) -> [Key: Value] {
+        var out = imageIOFields(data, excludingXMP: excludingXMP)
+        if let exif = pngEXIFImage(data, onlyAfterImageData: true) {
+            out.merge(imageIOFields(exif, excludingXMP: true)) { shown, _ in shown }
+        }
+        return out
+    }
+
+    private static func imageIOFields(_ data: Data, excludingXMP: Bool) -> [Key: Value] {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let metadata = CGImageSourceCopyMetadataAtIndex(source, 0, [kCGImageMetadataShouldExcludeXMP: excludingXMP] as CFDictionary)
         else { return [:] }
@@ -187,6 +205,18 @@ enum MetadataCheck {
             return fields(metadata)
         }
         return [:]
+    }
+
+    /// A PNG's eXIf in an image of its own, which ImageIO reads (it reads
+    /// EXIF only along with an image); nil without one, or with one in
+    /// front of the image data where only that is asked for.
+    private static func pngEXIFImage(_ data: Data, onlyAfterImageData: Bool) -> Data? {
+        let b = ByteView(data)
+        guard b.has(PNGChunks.signature), let chunks = try? PNGChunks.read(b, strict: false),
+              let i = chunks.firstIndex(where: { $0.type == "eXIf" }),
+              !onlyAfterImageData || chunks[..<i].contains(where: { $0.type == "IDAT" })
+        else { return nil }
+        return PNGChunks.image(holding: chunks[i])
     }
 
     private static func fields(_ metadata: CGImageMetadata) -> [Key: Value] {

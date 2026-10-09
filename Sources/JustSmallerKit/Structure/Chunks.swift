@@ -43,6 +43,17 @@ enum PNGChunks {
             + Data([UInt8(crc >> 24), UInt8(crc >> 16 & 0xFF), UInt8(crc >> 8 & 0xFF), UInt8(crc & 0xFF)])
     }
 
+    /// A 1 × 1 grey PNG with `chunk` in front of its image data: for
+    /// readers that read a chunk only along with an image.
+    static func image(holding chunk: Chunk) -> Data {
+        var png = Data(signature)
+        png.append(write("IHDR", [0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0])) // 1 × 1, grey, 8 bits
+        png.append(chunk.whole.bytes)
+        png.append(write("IDAT", [0x78, 0x9C, 0x63, 0x60, 0x00, 0x00, 0x00, 0x02, 0x00, 0x01])) // zlib: filter 0, pixel 0
+        png.append(write("IEND", []))
+        return png
+    }
+
     /// The keyword of a text chunk (tEXt, zTXt, iTXt) or the name of an
     /// iCCP profile: 1–79 bytes before the first NUL.
     static func keyword(_ chunk: Chunk) throws -> String {
