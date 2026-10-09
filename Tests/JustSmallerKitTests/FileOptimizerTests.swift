@@ -729,11 +729,38 @@ final class FileOptimizerTests {
         let facts = FileFacts(byteSize: 1, jpegQuality: 97, jpegLayout: layout)
         let lossy = Pipeline.stages(for: .jpeg, facts: facts, settings: settings).joined().filter(\.isLossy)
         #expect(lossy.isEmpty)
+        try await expectOptimizedWithoutLossOrUnchanged(url, original: TestImages.arithmeticJPEG, settings: settings)
+    }
+
+    /// A JPEG whose frame header the lossy encoder reads, but whose data its
+    /// decoder rejects: jpegli leaves the image as it is, and the file is
+    /// optimized without loss or stays as it is, never an error.
+    @Test func lossyJPEGStaysWhenJpegliCantDecode() async throws {
+        let original = TestImages.fractionalSamplingJPEG
+        let url = dir.appending(path: "fractional.jpg")
+        try original.write(to: url)
+        let layout = try #require(JPEGLayout.read(ByteView(original)))
+        #expect(layout.isPlain && layout.mayChangeWithLoss)
+        let changed = try await Pipeline.jpegli(quality: 70, layout: layout).run(url, dir.appending(path: "out.jpg"), dir)
+        #expect(!changed)
+
+        var settings = self.settings
+        settings.lossy = true
+        settings.quality = 70
+        settings.metadata = .keep
+        var facts = FileOptimizer.facts(about: url, format: .jpeg, size: Int64(original.count))
+        facts.jpegLayout = layout
+        let lossy = Pipeline.stages(for: .jpeg, facts: facts, settings: settings).joined().filter(\.isLossy)
+        #expect(lossy.map(\.name) == ["jpegli"])
+        try await expectOptimizedWithoutLossOrUnchanged(url, original: original, settings: settings)
+    }
+
+    /// Lossy settings, but `url` is optimized without loss or stays as it
+    /// is, never an error.
+    private func expectOptimizedWithoutLossOrUnchanged(_ url: URL, original: Data, settings: OptimizationSettings) async throws {
         switch try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) {
         case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
-        case .alreadyOptimal, .unchanged:
-            let after = try Data(contentsOf: url)
-            #expect(after == TestImages.arithmeticJPEG)
+        case .alreadyOptimal, .unchanged: #expect(try Data(contentsOf: url) == original)
         case let outcome: Issue.record("\(outcome)")
         }
     }

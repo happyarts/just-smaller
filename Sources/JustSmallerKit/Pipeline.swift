@@ -293,33 +293,45 @@ enum Pipeline {
     }
 
     /// jpegli (Google, BSD). It drops metadata, so the original's is put back.
+    /// If encoding fails (cjpegli can't decode the image, say), the image
+    /// stays as it is.
     static func jpegli(quality: Int, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
             try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
-                try await jpegli(from, quality: quality, to: to, work: work)
-                return true
+                try await unchangedOnFailure("Encoding with jpegli") {
+                    try await jpegli(from, quality: quality, to: to, work: work)
+                    return true
+                }
             }
         }
     }
 
     /// jpegli at the quality `chooser` picks, image by image. A search that
-    /// fails (its measuring tool, say) leaves the image as it is.
+    /// fails (its measuring tool, say, or cjpegli) leaves the image as it is.
     static func jpegli(chosenBy chooser: any QualityChooser, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpegli", isLossy: true) { input, output, work in
             try await eachImage(of: input, to: output, layout: layout, work: work, level: .keep, withLoss: true, onlySmaller: true) { from, to, _, _ in
                 let own = work.appending(path: "chooser-\(UUID().uuidString)")
                 try FileManager.default.createDirectory(at: own, withIntermediateDirectories: false)
                 defer { try? FileManager.default.removeItem(at: own) }
-                do {
-                    return try await chooser.choose(image: from, output: to, work: own) { quality, encoded in
+                return try await unchangedOnFailure("Choosing a quality") {
+                    try await chooser.choose(image: from, output: to, work: own) { quality, encoded in
                         try await jpegli(from, quality: quality, to: encoded, work: own)
                     }
-                } catch {
-                    try Task.checkCancellation()
-                    log.error("Choosing a quality failed: \(error.localizedDescription, privacy: .public)")
-                    return false
                 }
             }
+        }
+    }
+
+    /// What `change` returns, or false when it fails: the image stays as it
+    /// was. Cancelling still ends the step.
+    private static func unchangedOnFailure(_ step: String, _ change: () async throws -> Bool) async throws -> Bool {
+        do {
+            return try await change()
+        } catch {
+            try Task.checkCancellation()
+            log.error("\(step, privacy: .public) failed: \(error.localizedDescription, privacy: .public)")
+            return false
         }
     }
 

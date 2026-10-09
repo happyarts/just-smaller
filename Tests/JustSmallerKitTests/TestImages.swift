@@ -77,6 +77,15 @@ enum TestImages {
         ahx/2b7kKiAgY0qyKwDTvE44MecgP3CeG8u0LTFPeYlC2I8X/CvH7OImMeJ4QeqdPhW+0gwhP68l/wCMx8BHTL24ox5x8bP/2Q==
         """, options: .ignoreUnknownCharacters)!
 
+    /// A flat 24 × 8 baseline JPEG, quantization all ones, whose chroma is
+    /// sampled 2 × 1 against luma 3 × 1: libjpeg-turbo, cjpegli's decoder,
+    /// can't upsample that ratio, but reads the coefficients. Written by
+    /// hand (one MCU, one-bit Huffman codes), then rewritten by jpeg-scan.
+    static let fractionalSamplingJPEG = Data(base64Encoded: """
+        /9j/2wBDAAEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQH/wAAR
+        CAAIABgDATEAAiEAAyEA/8QAJgABAAAAAAAAAAAAAAAAAAAAABABAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACAAMAAD8AAAP/2Q==
+        """, options: .ignoreUnknownCharacters)!
+
     /// The standard sRGB profile from HP and Microsoft (sRGB IEC61966-2.1,
     /// 3 144 bytes, no profile ID), as image editors embed it.
     static let standardSRGBProfile = Data(base64Encoded: """
