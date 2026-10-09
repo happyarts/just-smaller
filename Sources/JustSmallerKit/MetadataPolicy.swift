@@ -109,6 +109,8 @@ enum MetadataPolicy {
             case "Orientation", "ImageWidth", "ImageLength", "TileWidth", "TileLength", "BitsPerSample",
                  "Compression", "PhotometricInterpretation", "SamplesPerPixel", "PlanarConfiguration",
                  "YCbCrSubSampling", "YCbCrPositioning": return .display
+            // The colours, as EXIF's IFD0 states them (`group(exifTag:)`).
+            case "TransferFunction", "WhitePoint", "PrimaryChromaticities": return .display
             case "Artist", "Copyright": return .rights
             case "Software", "NativeDigest": return nil
             default: return .imageInfo
@@ -222,6 +224,12 @@ enum MetadataPolicy {
         case .main:
             switch tag {
             case 0x0112: return .display // Orientation
+            case 0x012D, 0x013E, 0x013F:
+                // TransferFunction, WhitePoint, PrimaryChromaticities: the
+                // colours. A camera set to Adobe RGB states them instead of an
+                // ICC profile, and ImageIO shows the photo in Adobe RGB from
+                // the white point, the primaries and EXIF's Gamma.
+                return .display
             case 0x013B, 0x8298, 0x9C9D: return .rights // Artist, Copyright, Windows author
             case 0x010E, 0x010F, 0x0110, // ImageDescription, Make, Model
                  0x011A, 0x011B, 0x0128, // resolution

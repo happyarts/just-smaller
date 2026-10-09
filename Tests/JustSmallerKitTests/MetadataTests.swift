@@ -142,6 +142,57 @@ final class MetadataTests {
         #expect(EXIFFilter.filter(plain, level: .removeAll) == nil)
     }
 
+    /// A camera set to Adobe RGB, without an ICC profile: colour space
+    /// "uncalibrated", interoperability index "R03", and the white point,
+    /// primaries and gamma, from which ImageIO shows it in Adobe RGB. The
+    /// photo looks the same at every level, and its private data still goes.
+    @Test(arguments: MetadataHandling.allCases)
+    func adobeRGBWithoutProfileLooksTheSameAtEveryLevel(level: MetadataHandling) async throws {
+        func rationals(_ values: [(Int, Int)]) -> [UInt8] {
+            values.flatMap { n, d in [n, d].flatMap { v in [24, 16, 8, 0].map { UInt8(v >> $0 & 0xFF) } } }
+        }
+        let tiff = exifBlock(main: [(0x010F, 2, Array("NIKON\0".utf8)), (0x0131, 2, Array("SecretEditor 1.0\0".utf8)),
+                                    (0x013E, 5, rationals([(313, 1000), (329, 1000)])),
+                                    (0x013F, 5, rationals([(64, 100), (33, 100), (21, 100), (71, 100), (15, 100), (6, 100)]))],
+                             exif: [(0xA001, 3, [0xFF, 0xFF]), (0xA500, 5, rationals([(22, 10)])),
+                                    (0xA431, 2, Array("SN12345\0".utf8))],
+                             interop: [(0x0001, 2, Array("R03\0".utf8)), (0x0002, 7, Array("0100".utf8))])
+        // The image data of a JPEG ImageIO writes, with only this EXIF before it.
+        let plain = dir.appending(path: "plain.jpg")
+        let dest = CGImageDestinationCreateWithURL(plain as CFURL, UTType.jpeg.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(dest, image(), [kCGImageDestinationLossyCompressionQuality: 0.95] as CFDictionary)
+        #expect(CGImageDestinationFinalize(dest))
+        let data = try Data(contentsOf: plain)
+        let (segments, scan) = try JPEGMarkers.headers(ByteView(data))
+        var jpeg = Data([0xFF, 0xD8]) + JPEGMarkers.write(0xE1, JPEGMarkers.exifHeader + tiff)
+        for s in segments where !(0xE0...0xEF).contains(s.marker) { jpeg += s.whole.bytes }
+        jpeg += data[scan...]
+        let url = dir.appending(path: "adobe-rgb-\(level.rawValue).jpg")
+        try jpeg.write(to: url)
+
+        func colourSpace(_ url: URL) -> String? {
+            CGImageSourceCreateWithURL(url as CFURL, nil).flatMap { CGImageSourceCreateImageAtIndex($0, 0, nil) }?
+                .colorSpace?.name as String?
+        }
+        try #require(colourSpace(url) == CGColorSpace.adobeRGB1998 as String)
+        let p = props(try filtered(url, level))
+        #expect(p[kCGImagePropertyProfileName] as? String == "Adobe RGB (1998)")
+        let exif = p[kCGImagePropertyExifDictionary] as? [CFString: Any]
+        #expect(exif?[kCGImagePropertyExifColorSpace] as? Int == 0xFFFF)
+        #expect((exif?[kCGImagePropertyExifBodySerialNumber] == nil) == (level != .keep))
+
+        // The whole run: optimized, not left unchanged, and still Adobe RGB.
+        var settings = OptimizationSettings()
+        settings.metadata = level
+        settings.moveOriginalsToTrash = false
+        let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(colourSpace(url) == CGColorSpace.adobeRGB1998 as String)
+        let raw = try Data(contentsOf: url)
+        #expect(raw.contains(Data("R03".utf8)))
+        #expect(raw.contains(Data("SecretEditor".utf8)) == (level == .keep))
+    }
+
     // MARK: - XMP
 
     /// A description named after the document ("uuid:…", as some cameras

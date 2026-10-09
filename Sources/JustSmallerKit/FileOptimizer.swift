@@ -166,6 +166,13 @@ public struct FileOptimizer: Sendable {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
                     lastError = error
                     if let error = error as? VerificationError { rejected = error }
+                    // The promise can't be kept: say why here, rather than
+                    // let later stages work on the unfiltered file.
+                    if promised {
+                        metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                        best = source
+                        break stages
+                    }
                     continue
                 }
                 best = output; bestSize = outSize; used.append(candidate.name)
