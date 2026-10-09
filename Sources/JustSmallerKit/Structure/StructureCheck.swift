@@ -22,6 +22,11 @@ enum StructureCheck {
             case heif(HEIFCheck.Reference), svg(SVGCheck.Reference), none
         }
         fileprivate let summary: Summary
+        /// A JPEG original's reference.
+        var jpeg: JPEGCheck.Reference? {
+            if case .jpeg(let r) = summary { return r }
+            return nil
+        }
 
         /// `level`: the metadata level the result was made for (what may go).
         init(original: URL, format: ImageFormat, level: MetadataHandling = .keep) {

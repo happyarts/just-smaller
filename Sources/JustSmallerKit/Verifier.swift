@@ -19,7 +19,8 @@ enum Verifier {
     /// caller reads it once for all candidates of a step.
     static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
                        exactUnderAlpha: Bool = true, structure: StructureCheck.Reference? = nil) async throws {
-        try StructureCheck.verify(result: result, against: structure ?? StructureCheck.Reference(original: original, format: format))
+        let structure = structure ?? StructureCheck.Reference(original: original, format: format)
+        try StructureCheck.verify(result: result, against: structure)
         if format == .jxl {
             try await verifyRecompressedJXL(original: original, result: result)
             return
@@ -35,7 +36,15 @@ enum Verifier {
             try await compareRenderings(original, result, strict: pixelsMustMatch)
             return
         }
-        guard let a = CGImageSourceCreateWithURL(original as CFURL, nil),
+        // A gain map the original hid by where its index lay shows in the
+        // result (`JPEGLayout.hidesGainMap`): compared with the original as
+        // it shows it.
+        var shown: Data?
+        if let jpeg = structure.jpeg, let layout = jpeg.layout, layout.hidesGainMap,
+           let b = try? Data(contentsOf: result, options: .alwaysMapped) {
+            shown = layout.withGainMapShown(jpeg.original, for: ByteView(b))
+        }
+        guard let a = shown.map({ CGImageSourceCreateWithData($0 as CFData, nil) }) ?? CGImageSourceCreateWithURL(original as CFURL, nil),
               let b = CGImageSourceCreateWithURL(result as CFURL, nil),
               CGImageSourceGetCount(b) > 0
         else { throw VerificationError(reason: String(localized: "unreadable", bundle: .module)) }

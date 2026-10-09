@@ -211,6 +211,16 @@
         }
       }
     },
+    "HDR marking repaired": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "HDR-Kennzeichnung repariert"
+          }
+        }
+      }
+    },
     "Metadata": {
       "localizations": {
         "de": {

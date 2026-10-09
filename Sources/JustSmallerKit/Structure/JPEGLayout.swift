@@ -81,6 +81,14 @@ struct JPEGLayout: Sendable {
     private let directories: [[GoogleXMP.Item]]
     /// The photo is coded in a way the lossy encoder reads (`readsForEncoding`).
     private let photoReadsForEncoding: Bool
+    /// The photo's multi-picture index lies behind its tables
+    /// (`MultiPictureIndex.liesBehindTables`), where ImageIO doesn't find
+    /// it, though Google's container names a gain map among the images the
+    /// index lists: other readers show the photo in HDR, Apple's don't.
+    /// jpeg-scan writes the index where readers look for it, and the gain
+    /// map shows everywhere (`showsGainMap`); the checks then compare with
+    /// the original as it shows it (`withGainMapShown`).
+    let hidesGainMap: Bool
 
     /// `firstEnd`: where the first image ends, when a parse already found it.
     static func read(_ b: ByteView, firstEnd: Int? = nil) -> JPEGLayout? {
@@ -107,7 +115,7 @@ struct JPEGLayout: Sendable {
         if images.count == 1, afterPhoto.isPadding {
             return JPEGLayout(images: images, gaps: gaps(images), index: index, problem: indexFits ? nil : .unfittingIndex,
                               isPlain: true, containerEntries: [], keptData: [], kept: [0..<0], imagesListed: false, directories: [],
-                              photoReadsForEncoding: encodable)
+                              photoReadsForEncoding: encodable, hidesGainMap: false)
         }
         let xmp = GoogleXMP.read(headers)
         // Google's container lays the parts out after the photo (`placed`,
@@ -149,7 +157,9 @@ struct JPEGLayout: Sendable {
                                            jpegInLeftover: jpegInLeftover),
                           isPlain: false, containerEntries: entries, keptData: keptData, kept: kept,
                           imagesListed: xmp?.listing != nil, directories: xmp?.directories ?? [],
-                          photoReadsForEncoding: encodable)
+                          photoReadsForEncoding: encodable,
+                          hidesGainMap: index == .multiPicture && MultiPictureIndex.liesBehindTables(headers)
+                              && xmp?.directories.contains { $0.contains { $0.semantic == "GainMap" } } == true)
     }
 
     /// Which part of each gap must stay (see `kept`). Without Google's
@@ -246,6 +256,31 @@ struct JPEGLayout: Sendable {
     static func readsForEncoding(_ frame: JPEGMarkers.Frame?) -> Bool {
         guard let frame, [0xC0, 0xC1, 0xC2, 0xC3].contains(frame.marker), frame.precision == 8 else { return false }
         return frame.components == 1 || frame.components == 3
+    }
+
+    /// Whether `result`, made from the file this layout was read from,
+    /// shows the gain map it hides (`hidesGainMap`): its multi-picture index
+    /// lies where readers look for it.
+    func showsGainMap(in result: ByteView) -> Bool {
+        guard hidesGainMap, let headers = try? JPEGMarkers.headers(result).segments,
+              (MultiPictureIndex.read(result, headers: headers)?.count ?? 0) > 1 else { return false }
+        return !MultiPictureIndex.liesBehindTables(headers)
+    }
+
+    /// `original` (the file this layout was read from) as it reads with the
+    /// gain map it hides shown, when `result` shows it: the multi-picture
+    /// index in front of the tables, its offsets rewritten; nothing else
+    /// moves. The image check holds `result` to this. nil otherwise.
+    func withGainMapShown(_ original: ByteView, for result: ByteView) -> Data? {
+        guard showsGainMap(in: result), let photo = try? Data(original.view(images[0]).bytes),
+              let headers = try? JPEGMarkers.headers(ByteView(photo)).segments,
+              let index = headers.first(where: MultiPictureIndex.isIndex),
+              let tables = headers.first(where: { !JPEGCheck.isMetadata($0.marker) }), tables.end <= index.offset,
+              let shown = try? MultiPictureIndex.rewritten(photo.prefix(tables.offset) + Data(index.whole.bytes)
+                                                               + photo[tables.offset..<index.offset] + photo.dropFirst(index.end),
+                                                           sizes: images.map(\.count), gaps: gaps.map(\.count)),
+              let rest = try? original.view(from: images[0].upperBound) else { return nil }
+        return shown + rest.bytes
     }
 
     /// Whether a step at `level` writes the new lengths of the images

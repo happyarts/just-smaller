@@ -37,6 +37,9 @@ public struct FileOptimizer: Sendable {
     /// `settings.quality`.
     public let chooser: (any QualityChooser)?
 
+    /// Listed among the steps when a hidden gain map shows again (`JPEGLayout.hidesGainMap`).
+    static var repairedHDR: String { String(localized: "HDR marking repaired", bundle: .module) }
+
     public init(settings: OptimizationSettings, chooser: (any QualityChooser)? = nil) {
         self.settings = settings
         self.chooser = chooser
@@ -264,6 +267,11 @@ public struct FileOptimizer: Sendable {
             return .alreadyOptimal(size: size, copy: copy)
         }
         try Task.checkCancellation()
+        // Listed like a step: the gain map the original hid shows everywhere now.
+        if let layout = jpegLayout, layout.hidesGainMap, let result = try? Data(contentsOf: best, options: .alwaysMapped),
+           layout.showsGainMap(in: ByteView(result)) {
+            used.append(Self.repairedHDR)
+        }
 
         let fidelity: Fidelity = beforeLoss != nil ? .lossy : canBeIdentical ? .pixelIdentical : .lossless
         switch destination {

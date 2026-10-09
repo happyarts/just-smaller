@@ -16,6 +16,14 @@ enum MultiPictureIndex {
         s.marker == 0xE2 && s.payload.has("MPF\0")
     }
 
+    /// Whether the index lies behind the image's first table or frame
+    /// header (`headers` are the image's). Readers look for it among the
+    /// APPn segments before them; ImageIO doesn't find it later.
+    static func liesBehindTables(_ headers: [JPEGMarkers.Segment]) -> Bool {
+        guard let index = headers.firstIndex(where: isIndex) else { return false }
+        return headers[..<index].contains { !JPEGCheck.isMetadata($0.marker) }
+    }
+
     /// The images the index lists, in its order: nil without an index, empty
     /// when it can't be read. `headers` are the first image's, when already
     /// read. Offsets in the index count from its own TIFF header.

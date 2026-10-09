@@ -38,6 +38,12 @@
   a change on the hot path must not slow plain files down.
 - The promise: never damage an image, never change the format. Every result
   is verified (pixels / DCT coefficients / SVG rendering) or thrown away.
+- A file that bends its specification but clearly means something (an
+  index where some readers don't look for it) is written the way the
+  specification wants, so that as many readers as possible read it: only
+  how the image is described changes, never its data. The checks compare
+  the result with the original as it then reads, and the result names the
+  repair ("HDR marking repaired").
 - Only MIT/BSD/Apache tools; no GPL.
 - This repository is public: nothing private goes in here — and no research
   either. Measurements, tool comparisons, thresholds and the reasoning behind

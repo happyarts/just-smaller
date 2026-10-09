@@ -295,6 +295,73 @@ final class MultiImageJPEGTests {
         return (url, photo, between + second + after)
     }
 
+    /// An Ultra HDR photo as an editor wrote one: a gain map whose XMP says
+    /// how bright, the photo's XMP marking it (`declared`: Google's
+    /// container names the gain map), and the multi-picture index (taken
+    /// from a gain map photo ImageIO wrote) in front of the tables or
+    /// behind them (`hidden`), where ImageIO doesn't find it.
+    private func ultraHDR(_ name: String, hidden: Bool, declared: Bool = true) throws -> URL {
+        func jpeg(_ image: CGImage) -> Data {
+            let data = NSMutableData()
+            let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)!
+            CGImageDestinationAddImage(dest, image, nil)
+            #expect(CGImageDestinationFinalize(dest))
+            return data as Data
+        }
+        let grey = CGContext(data: nil, width: 80, height: 60, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceGray(),
+                             bitmapInfo: 0)!
+        grey.draw(image(), in: CGRect(x: 0, y: 0, width: 80, height: 60))
+        let hdrgm = "xmlns:hdrgm=\"http://ns.adobe.com/hdr-gain-map/1.0/\" hdrgm:Version=\"1.0\""
+        let gainMap = inserting(GoogleXMPSamples.segment("<rdf:Description \(hdrgm) hdrgm:GainMapMax=\"1\" hdrgm:HDRCapacityMax=\"1\"/>"),
+                                into: jpeg(grey.makeImage()!))
+        let photo = inserting(GoogleXMPSamples.segment("<rdf:Description \(hdrgm)/>"
+                                                       + (declared ? GoogleXMPSamples.directory(gainMapLength: gainMap.count) : "")),
+                              into: jpeg(image()))
+        let photoWithIndex = try #require(images(try Data(contentsOf: gainMapPhoto("index-" + name))).first)
+        let index = try #require(try JPEGMarkers.headers(ByteView(photoWithIndex)).segments.first(where: MultiPictureIndex.isIndex)).whole.bytes
+        let headers = try JPEGMarkers.headers(ByteView(photo))
+        let at = hidden ? headers.scan : try #require(headers.segments.first { !JPEGCheck.isMetadata($0.marker) }).offset
+        let indexed = try MultiPictureIndex.rewritten(photo.prefix(at) + index + photo.dropFirst(at),
+                                                      sizes: [photo.count + index.count, gainMap.count], gaps: [0, 0])
+        let url = dir.appending(path: name)
+        try (indexed + gainMap).write(to: url)
+        return url
+    }
+
+    private func shownGainMap(_ url: URL) -> Bool {
+        CGImageSourceCreateWithURL(url as CFURL, nil).map { !AuxiliaryImages.all($0).isEmpty } ?? false
+    }
+
+    /// A gain map the photo hides by where its index lies, though Google's
+    /// container names it: other readers show the photo in HDR, ImageIO
+    /// doesn't. The index goes where readers look, every image stays, the
+    /// photo shows as bright as with the index in place, and the file says
+    /// it was repaired. Not named by the container, the gain map stays
+    /// hidden.
+    @Test(arguments: [MetadataHandling.keep, .removePrivate])
+    func hiddenGainMapShowsAgain(level: MetadataHandling) async throws {
+        settings.metadata = level
+        let shown = try ultraHDR("shown-\(level.rawValue).jpg", hidden: false)
+        #expect(shownGainMap(shown) && (headroom(shown) ?? 1) > 1)
+        let url = try ultraHDR("hidden-\(level.rawValue).jpg", hidden: true)
+        let original = try Data(contentsOf: url)
+        let layout = try #require(JPEGLayout.read(ByteView(original)))
+        #expect(layout.hidesGainMap)
+        // What the checks compare with: the original with its index in front.
+        #expect(layout.withGainMapShown(ByteView(original), for: ByteView(try Data(contentsOf: shown))) == (try Data(contentsOf: shown)))
+        #expect(!shownGainMap(url))
+        let outcome = try await optimize(url)
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(fidelity == .pixelIdentical && tools.last == FileOptimizer.repairedHDR)
+        #expect(layout.showsGainMap(in: ByteView(try Data(contentsOf: url))))
+        #expect(shownGainMap(url) && headroom(url) == headroom(shown))
+
+        let undeclared = try ultraHDR("undeclared-\(level.rawValue).jpg", hidden: true, declared: false)
+        #expect(try #require(JPEGLayout.read(ByteView(try Data(contentsOf: undeclared)))).hidesGainMap == false)
+        if case .optimized(_, _, let tools, _, _, _) = try await optimize(undeclared) { #expect(!tools.contains(FileOptimizer.repairedHDR)) }
+        #expect(!shownGainMap(undeclared))
+    }
+
     /// Images only Google's container lists (Pixel portraits, Ultra HDR
     /// without an index) are found where its directory says — counted from
     /// the end, or right after the photo with camera data behind them
