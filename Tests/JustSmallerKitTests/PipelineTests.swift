@@ -106,11 +106,13 @@ struct PipelineTests {
         #expect(Pipeline.oxipngOptions(.balanced) == ["-o", "2", "-f", "0-9", "--zc", "13"])
         #expect(Pipeline.oxipngOptions(.thorough) == ["-o", "2", "-f", "0-9", "--zc", "14"])
         #expect(Pipeline.oxipngOptions(.maximum) == Pipeline.oxipngOptions(.thorough))
-        // Animated PNGs: the level's libdeflate run, never Zopfli.
-        for effort in [Effort.fast, .balanced, .thorough, .maximum] {
-            #expect(Pipeline.oxipngRuns(effort, animated: true) == [Pipeline.oxipngOptions(effort)])
+        // Every level's libdeflate run for still and animated PNGs; Zopfli
+        // only next to it, for still PNGs at Maximum.
+        for effort in Effort.allCases {
+            let libdeflate = Pipeline.oxipngOptions(effort)
+            #expect(Pipeline.oxipngRuns(effort, animated: true) == [libdeflate])
+            #expect(Pipeline.oxipngRuns(effort, animated: false) == (effort == .maximum ? [Pipeline.oxipngZopfliOptions, libdeflate] : [libdeflate]))
         }
-        #expect(Pipeline.oxipngRuns(.maximum, animated: false) == [Pipeline.oxipngZopfliOptions, Pipeline.oxipngOptions(.maximum)])
     }
 
     @Test func factsAboutAPNG() throws {

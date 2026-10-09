@@ -155,23 +155,25 @@ enum Pipeline {
         }
     }
 
-    /// OxiPNG from Balanced on tries all its filter strategies (`-f 0-9`) and,
-    /// on larger images, chooses among them section by section (our fork,
-    /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
-    /// (`--zc`, our fork); with both fixed, its -o presets give the same
-    /// result. Maximum also runs OxiPNG with Zopfli next to Thorough's
-    /// OxiPNG and keeps the smaller result, so it is never larger than
-    /// Thorough. Animated PNGs get only the libdeflate run.
+    /// One OxiPNG candidate per run.
     static func pngCompressors(effort: Effort, lossy: Bool, facts: FileFacts) -> [Candidate] {
         oxipngRuns(effort, animated: facts.isAnimated).map { oxipng($0, lossy: lossy) }
     }
 
-    /// The OxiPNG runs for a PNG, each with its options.
+    /// The OxiPNG runs for a PNG. Maximum also runs OxiPNG with Zopfli next
+    /// to Thorough's run and keeps the smaller result, so it is never larger
+    /// than Thorough. Animated PNGs skip the Zopfli run: it would compress
+    /// every frame again, at many times the time.
     static func oxipngRuns(_ effort: Effort, animated: Bool) -> [[String]] {
         effort == .maximum && !animated ? [oxipngZopfliOptions, oxipngOptions(effort)] : [oxipngOptions(effort)]
     }
 
-    /// OxiPNG's options at each effort, for still and animated PNGs.
+    /// OxiPNG's options at each effort, for still and animated PNGs. From
+    /// Balanced on it tries all its filter strategies (`-f 0-9`) and, on
+    /// larger images, chooses among them section by section (our fork,
+    /// oxipng/oxipng#883); it compresses with libdeflate's levels 13 and 14
+    /// (`--zc`, our fork); with both fixed, its -o presets give the same
+    /// result.
     static func oxipngOptions(_ effort: Effort) -> [String] {
         switch effort {
         case .fast: ["-o", "2"]
