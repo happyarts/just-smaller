@@ -77,12 +77,12 @@ final class FileOptimizerTests {
         let copy = dir.appending(path: "reference.png")
         try FileManager.default.copyItem(at: url, to: copy)
 
-        guard case .optimized(let before, let after, let tools, _, _, let identical) = try await optimize(url) else {
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
         #expect(after < before)
         #expect(tools.contains("OxiPNG"))
-        #expect(identical)
+        #expect(fidelity == .pixelIdentical)
         try await Verifier.verify(original: copy, result: url, format: .png, pixelsMustMatch: true)
     }
 
@@ -171,7 +171,10 @@ final class FileOptimizerTests {
         try await Verifier.verify(original: reference, result: url, format: .png, pixelsMustMatch: true)
     }
 
-    @Test func svgGetsSmallerAndLooksTheSame() async throws {
+    /// Checked by its rendering, an SVG is never proven pixel identical; in
+    /// lossy mode its optimizer may approximate.
+    @Test(arguments: [false, true])
+    func svgGetsSmallerAndLooksTheSame(lossy: Bool) async throws {
         let url = dir.appending(path: "editor.svg")
         let svg = """
         <?xml version="1.0" encoding="UTF-8" standalone="no"?>
@@ -186,10 +189,13 @@ final class FileOptimizerTests {
         </svg>
         """
         try Data(svg.utf8).write(to: url)
-        guard case .optimized(let before, let after, _, _, _, _) = try await optimize(url) else {
-            Issue.record("not optimized"); return
-        }
+        var settings = self.settings
+        settings.lossy = lossy
+        guard case .optimized(let before, let after, _, _, _, let fidelity) =
+            try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        else { Issue.record("not optimized"); return }
         #expect(after < before / 2)
+        #expect(fidelity == (lossy ? .lossy : .lossless))
         #expect(try String(contentsOf: url, encoding: .utf8).contains("<svg"))
     }
 
@@ -664,11 +670,11 @@ final class FileOptimizerTests {
             try await Verifier.verify(original: a, result: b, format: .jpeg, pixelsMustMatch: true)
         }
         // The rewritten entropy coding carries the same coefficients and earns the seal.
-        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(a) else {
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(a) else {
             Issue.record("not optimized"); return
         }
         #expect(tools.contains("jpeg-scan"))
-        #expect(identical)
+        #expect(fidelity == .pixelIdentical)
     }
 
     /// 16 bits per channel and the alpha channel must survive untouched.
@@ -704,12 +710,12 @@ final class FileOptimizerTests {
         let url = write(image(width: 400, height: 300, space: CGColorSpace.displayP3), "lossy.jpg", type: .jpeg,
                         properties: [kCGImagePropertyOrientation: 6,
                                      kCGImageDestinationLossyCompressionQuality: 0.97])
-        guard case .optimized(let before, let after, let tools, _, _, let identical) =
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity) =
             try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(tools.contains("jpegli"))
         #expect(after < before)
-        #expect(!identical)
+        #expect(fidelity == .lossy)
         #expect(props(url)[kCGImagePropertyOrientation] as? Int == 6)
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
     }
@@ -759,7 +765,7 @@ final class FileOptimizerTests {
     /// is, never an error.
     private func expectOptimizedWithoutLossOrUnchanged(_ url: URL, original: Data, settings: OptimizationSettings) async throws {
         switch try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
+        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
         case .alreadyOptimal, .unchanged: #expect(try Data(contentsOf: url) == original)
         case let outcome: Issue.record("\(outcome)")
         }
@@ -816,8 +822,8 @@ final class FileOptimizerTests {
         try FileManager.default.copyItem(at: url, to: original)
 
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, let identical) = outcome else { Issue.record("not optimized: \(outcome)"); return }
-        #expect(!tools.contains("quantizr") && identical, "\(tools)")
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(!tools.contains("quantizr") && fidelity == .pixelIdentical, "\(tools)")
         try await Verifier.verify(original: original, result: url, format: .png, pixelsMustMatch: true)
     }
 
@@ -914,11 +920,11 @@ final class FileOptimizerTests {
         let url = write(image(width: 400, height: 300), "already-small.jpg", type: .jpeg,
                         properties: [kCGImageDestinationLossyCompressionQuality: 0.4])
         #expect((JPEGQuality.estimate(try Data(contentsOf: url)) ?? 100) < 90)
-        guard case .optimized(_, _, let tools, _, _, let identical) =
+        guard case .optimized(_, _, let tools, _, _, let fidelity) =
             try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(!tools.contains("jpegli"))
-        #expect(identical)
+        #expect(fidelity == .pixelIdentical)
     }
 
     @Test func jpegQualityEstimateRisesWithQuality() throws {
@@ -1056,10 +1062,10 @@ final class FileOptimizerTests {
         for c in all.dropFirst() where PNGChunks.isCritical(c) { png += c.whole.bytes }
         let url = dir.appending(path: "hp-srgb.png")
         try png.write(to: url)
-        guard case .optimized(_, _, _, _, _, let identical) = try await optimize(url) else {
+        guard case .optimized(_, _, _, _, _, let fidelity) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
-        #expect(identical)
+        #expect(fidelity == .pixelIdentical)
         let types = try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true).map(\.type)
         #expect(types.contains("sRGB") && !types.contains("iCCP"))
     }

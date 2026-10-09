@@ -157,6 +157,8 @@ struct Report: Sendable {
     var result: URL?
     var tools: [String] = []
     var identical = false
+    /// A lossy step is part of the result.
+    var lossy = false
     var reason: String?
 
     var saved: Int64 { status == "optimized" ? originalSize - newSize : 0 }
@@ -164,8 +166,9 @@ struct Report: Sendable {
     init(file: URL, outcome: Outcome) {
         self.file = file
         switch outcome {
-        case .optimized(let before, let after, let tools, let result, _, let identical):
-            (status, originalSize, newSize, self.result, self.tools, self.identical) = ("optimized", before, after, result, tools, identical)
+        case .optimized(let before, let after, let tools, let result, _, let fidelity):
+            (status, originalSize, newSize, self.result, self.tools) = ("optimized", before, after, result, tools)
+            (identical, lossy) = (fidelity == .pixelIdentical, fidelity == .lossy)
         case .alreadyOptimal(let size, let copy):
             (status, originalSize, newSize, result, identical) = ("unchanged", size, size, copy, true)
         case .unchanged(let reason, let size, let copy):
@@ -195,7 +198,7 @@ struct Report: Sendable {
 
     var json: String {
         var object: [String: Any] = ["file": file.path, "status": status, "originalSize": originalSize, "size": newSize,
-                                     "saved": saved, "identical": identical, "tools": tools]
+                                     "saved": saved, "identical": identical, "lossy": lossy, "tools": tools]
         if let result, result != file { object["result"] = result.path }
         if let reason { object["reason"] = reason }
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()

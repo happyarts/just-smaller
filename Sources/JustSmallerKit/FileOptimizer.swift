@@ -2,11 +2,21 @@ import Foundation
 import ImageIO
 import OSLog
 
+/// What an optimized file kept of its original.
+public enum Fidelity: Sendable, Equatable {
+    /// Every step was proven to keep every pixel.
+    case pixelIdentical
+    /// No lossy step ran, but the format's check is not an exact comparison
+    /// (an SVG's rendering).
+    case lossless
+    /// A lossy step is part of the result.
+    case lossy
+}
+
 public enum Outcome: Sendable {
     /// `result` is where the optimized file is: the original's place, or a new file.
-    /// `pixelIdentical`: every step was proven to keep every pixel.
     case optimized(originalSize: Int64, newSize: Int64, tools: [String], result: URL, trashedOriginal: URL?,
-                   pixelIdentical: Bool)
+                   fidelity: Fidelity)
     /// `copy` is set when an unchanged copy was written to an output folder.
     case alreadyOptimal(size: Int64, copy: URL?)
     /// A smaller result was found but failed verification; the file stays as
@@ -116,9 +126,9 @@ public struct FileOptimizer: Sendable {
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
         let canBeIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
-        var pixelIdentical = canBeIdentical
         // The best result before the first lossy step: what stays when a
-        // chosen encoding fails its last check.
+        // chosen encoding fails its last check. Set while the result holds a
+        // lossy step.
         var beforeLoss: (best: URL, size: Int64, used: [String])?
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
@@ -126,7 +136,7 @@ public struct FileOptimizer: Sendable {
         // Before a step judged on the finished file: the state to go back to,
         // and the size the finished file must stay below. What the discarded
         // steps ran into goes with them.
-        var beforeTrial: (best: URL, size: Int64, used: [String], pixelIdentical: Bool,
+        var beforeTrial: (best: URL, size: Int64, used: [String],
                           beforeLoss: (best: URL, size: Int64, used: [String])?,
                           rejected: VerificationError?, lastError: (any Error)?, limit: Int64)?
         stages: for (n, stage) in stages.enumerated() {
@@ -196,28 +206,27 @@ public struct FileOptimizer: Sendable {
                     }
                     continue
                 }
-                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, pixelIdentical, beforeLoss, rejected, lastError, limit) }
+                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, beforeLoss, rejected, lastError, limit) }
                 if candidate.isLossy, beforeLoss == nil { beforeLoss = (best, bestSize, used) }
                 best = output; bestSize = outSize; used.append(candidate.name)
-                if candidate.isLossy { pixelIdentical = false }
                 break
             }
         }
         if let trial = beforeTrial, best != source, bestSize >= trial.limit {
-            (best, bestSize, used, pixelIdentical, beforeLoss) = (trial.best, trial.size, trial.used, trial.pixelIdentical, trial.beforeLoss)
+            (best, bestSize, used, beforeLoss) = (trial.best, trial.size, trial.used, trial.beforeLoss)
             (rejected, lastError) = (trial.rejected, trial.lastError)
         }
 
         // A chosen encoding is measured once more, as the finished file. If
         // it fails, the result without loss stays.
-        if let beforeLoss, let chooser, chooser.formats.contains(format) {
+        if let lossless = beforeLoss, let chooser, chooser.formats.contains(format) {
             do {
                 try await chooser.verify(original: source, result: best, format: format, work: work)
             } catch {
                 try Task.checkCancellation()
                 log.fault("The chosen encoding of \(url.lastPathComponent, privacy: .private) failed its check: \(error.localizedDescription, privacy: .public)")
-                (best, bestSize, used) = beforeLoss
-                pixelIdentical = canBeIdentical
+                (best, bestSize, used) = lossless
+                beforeLoss = nil
             }
         }
         // The whole chain against the original, not just the metadata stage:
@@ -250,12 +259,13 @@ public struct FileOptimizer: Sendable {
         }
         try Task.checkCancellation()
 
+        let fidelity: Fidelity = beforeLoss != nil ? .lossy : canBeIdentical ? .pixelIdentical : .lossless
         switch destination {
         case .newFile(let planned, _):
             let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
                                                    moveAsideToTrash: settings.moveOriginalsToTrash)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: target, trashedOriginal: nil,
-                              pixelIdentical: pixelIdentical)
+                              fidelity: fidelity)
         case .replace:
             // Don't overwrite changes someone made while we were working.
             let now = try Self.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey])
@@ -265,7 +275,7 @@ public struct FileOptimizer: Sendable {
             let trashed = try FileReplacer.replace(url, with: best, moveOriginalToTrash: settings.moveOriginalsToTrash,
                                                    keepModificationDate: settings.keepModificationDate)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: url, trashedOriginal: trashed,
-                              pixelIdentical: pixelIdentical)
+                              fidelity: fidelity)
         }
     }
 

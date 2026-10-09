@@ -209,12 +209,12 @@ final class AnimatedPNGTests {
         let url = try saved(original, "animated-\(effort)-\(lossy).png")
         let reference = try saved(original, "reference-\(effort)-\(lossy).png")
 
-        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(url) else {
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else {
             Issue.record("not optimized, nothing checked"); return
         }
         #expect(tools.contains("OxiPNG"))
         // Lossy mode has no lossy step for an animation: a palette would make it a still image.
-        #expect(identical)
+        #expect(fidelity == .pixelIdentical)
         let result = try Data(contentsOf: url)
         func payloads(_ png: Data, _ type: String) throws -> [Data] {
             try PNGChunks.read(ByteView(png), strict: true).filter { $0.type == type }.map(\.data.bytes)

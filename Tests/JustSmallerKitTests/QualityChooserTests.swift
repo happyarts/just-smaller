@@ -76,11 +76,11 @@ final class QualityChooserTests {
     @Test func theChosenEncodingIsUsedAndCheckedAsTheFinishedFile() async throws {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([90, 75])
-        guard case .optimized(let before, let after, let tools, _, _, let identical) =
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity) =
             try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(chooser.tried == [90, 75])
-        #expect(tools.contains("jpegli") && !identical && after < before)
+        #expect(tools.contains("jpegli") && fidelity == .lossy && after < before)
         #expect(chooser.verified == [Int(after)])
     }
 
@@ -90,11 +90,10 @@ final class QualityChooserTests {
     func aFailedCheckLeavesTheLosslessResult(searchFails: Bool) async throws {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([75], passes: false, fails: searchFails)
-        switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
-        case .alreadyOptimal: break
-        case let outcome: Issue.record("\(outcome)")
-        }
+        guard case .optimized(_, _, let tools, _, _, let fidelity) =
+            try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
+        else { Issue.record("not optimized"); return }
+        #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
         #expect(chooser.verified.count == (searchFails ? 0 : 1))
     }
 
@@ -103,7 +102,7 @@ final class QualityChooserTests {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([])
         switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
+        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
         case .alreadyOptimal: break
         case let outcome: Issue.record("\(outcome)")
         }
@@ -115,7 +114,7 @@ final class QualityChooserTests {
         let url = jpeg("small.jpg", quality: 0.3)
         let chooser = Chooser([100])
         switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let identical): #expect(identical && !tools.contains("jpegli"))
+        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
         case .alreadyOptimal: break
         case let outcome: Issue.record("\(outcome)")
         }
@@ -147,10 +146,10 @@ final class QualityChooserTests {
         #expect(CGImageDestinationFinalize(dest))
         var settings = self.settings
         settings.quality = 85
-        guard case .optimized(_, _, let tools, _, _, let identical) =
+        guard case .optimized(_, _, let tools, _, _, let fidelity) =
             try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
-        #expect(tools.contains("quantizr") && !identical && chooser.verified.isEmpty, "\(tools) \(identical)")
+        #expect(tools.contains("quantizr") && fidelity == .lossy && chooser.verified.isEmpty, "\(tools) \(fidelity)")
     }
 
     /// The settings' fixed quality and every other lossy tool stay off; a
@@ -171,5 +170,24 @@ final class QualityChooserTests {
         lossless.lossy = false
         #expect(Pipeline.stages(for: .jpeg, facts: FileFacts(byteSize: 1, jpegQuality: 98), settings: lossless, chooser: chooser)
             .joined().allSatisfy { !$0.isLossy })
+    }
+
+    /// An SVG beside a chooser that handles only JPEG: smaller, but without a
+    /// lossy step in the result.
+    @Test func anSVGBesideTheChooserStaysLossless() async throws {
+        let url = dir.appending(path: "drawing.svg")
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!-- Created with an editor -->
+        <svg xmlns="http://www.w3.org/2000/svg" width="200" height="120" viewBox="0 0 200 120">
+          <g id="layer1">
+            <rect x="10.000000" y="10.000000" width="80.000000" height="100.000000" style="fill:#ff0000;stroke:none" />
+          </g>
+        </svg>
+        """.utf8).write(to: url)
+        guard case .optimized(_, _, _, _, _, let fidelity) =
+            try await FileOptimizer(settings: settings, chooser: Chooser([80])).optimize(url, progress: { _ in })
+        else { Issue.record("not optimized"); return }
+        #expect(fidelity == .lossless)
     }
 }

@@ -135,10 +135,10 @@ final class MultiImageJPEGTests {
         #expect(props(parts[1])[kCGImagePropertyGPSDictionary] != nil)
 
         settings.metadata = level
-        guard case .optimized(let from, let to, _, _, _, let identical) = try await optimize(url) else {
+        guard case .optimized(let from, let to, _, _, _, let fidelity) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
-        #expect(identical && to < from)
+        #expect(fidelity == .pixelIdentical && to < from)
         let after = try Data(contentsOf: url)
         let result = images(after)
         #expect(result.count == 2)
@@ -543,8 +543,8 @@ final class MultiImageJPEGTests {
                 .joined().contains(where: \.isLossy)
         }
         #expect(!lossy(layout) && lossy(plain))
-        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(url) else { Issue.record("not optimized"); return }
-        #expect(identical && !tools.contains("jpegli"))
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
     }
 
     /// Leftover bytes may stay only as they were, and only when everything is kept.

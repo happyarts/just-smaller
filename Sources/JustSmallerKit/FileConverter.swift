@@ -119,7 +119,7 @@ public struct FileConverter: Sendable {
             }
         }
         return .optimized(originalSize: size, newSize: newSize, tools: ["jxl-transcode"], result: written,
-                          trashedOriginal: trashed, pixelIdentical: true)
+                          trashedOriginal: trashed, fidelity: .pixelIdentical)
     }
 
     private enum Conversion {

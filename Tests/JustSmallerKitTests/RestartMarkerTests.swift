@@ -139,10 +139,10 @@ final class RestartMarkerTests {
         let reference = dir.appending(path: "reference-\(fixture).jpg")
         try original.write(to: reference)
 
-        guard case .optimized(_, _, let tools, _, _, let identical) = try await optimize(url) else {
+        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else {
             Issue.record("not optimized, nothing checked"); return
         }
-        #expect(tools.contains("jpeg-scan") && identical)
+        #expect(tools.contains("jpeg-scan") && fidelity == .pixelIdentical)
         try await Verifier.verify(original: reference, result: url, format: .jpeg, pixelsMustMatch: true)
     }
 

@@ -190,8 +190,8 @@ for n in names:
         elif rec.get("status") in ("optimized", "unchanged", "rejected"):
             fails.append((n, "NO RESULT IN THE OUTPUT FOLDER")); continue
     # With loss, only these may show a changed picture, and only when the
-    # tool doesn't call the result identical; the rest is checked as without.
-    lost = lossy and not rec.get("identical", True) and kind in (".jpg", ".png", ".heic", ".svg")
+    # tool reports a lossy step in the result; the rest is checked as without.
+    lost = lossy and rec.get("lossy", False) and kind in (".jpg", ".png", ".heic", ".svg")
     whole_b = open(b, "rb").read()
     sa, sb = len(whole_a), len(whole_b); result[n] = sb
     cat[0] += 1; cat[1] += sa; cat[2] += sb

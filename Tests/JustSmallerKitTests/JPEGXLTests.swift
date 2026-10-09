@@ -43,7 +43,7 @@ final class JPEGXLTests {
     }
 
     private func result(_ outcome: Outcome) -> URL? {
-        if case .optimized(_, _, _, let result, _, let identical) = outcome, identical { return result }
+        if case .optimized(_, _, _, let result, _, let fidelity) = outcome, fidelity == .pixelIdentical { return result }
         return nil
     }
 
@@ -112,7 +112,7 @@ final class JPEGXLTests {
         let original = jpeg("max.jpg", width: 320, height: 240)
         let size = try Data(contentsOf: original).count
         let outcome = try await convert(original, to: .jxl)
-        guard case .optimized(_, let newSize, _, _, _, true) = outcome else { Issue.record("not converted"); return }
+        guard case .optimized(_, let newSize, _, _, _, .pixelIdentical) = outcome else { Issue.record("not converted"); return }
         #expect(newSize < size)
     }
 
@@ -148,7 +148,7 @@ final class JPEGXLTests {
         var optimizing = OptimizationSettings()
         optimizing.moveOriginalsToTrash = false
         let outcome = try await FileOptimizer(settings: optimizing).optimize(jxl, to: .replace) { _ in }
-        guard case .optimized(_, _, let tools, _, _, true) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, .pixelIdentical) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(tools == ["jxl-transcode"])
         #expect(ImageFormat.detect(at: jxl) == .jxl)
         #expect(gps(jxl) == nil)
