@@ -12,6 +12,7 @@ Tests/corpus/run.sh --quick         # ~80 files, seconds — after every change
 Tests/corpus/run.sh --full          # ~700 files, 1 GB, four minutes — before a release or a tool update
 Tests/corpus/run.sh --private       # your own photos in Testkorpus/private, if you have that folder
 Tests/corpus/run.sh --quick -- --effort maximum   # pass options to just-smaller
+Tests/corpus/run.sh --quick --lossy                # with loss, results into an output folder
 Tests/corpus/bench.sh ../Testkorpus/full/real-photo-jpeg   # time one job; --cli to compare with another build
 Tests/corpus/convert.sh --quick     # the JPEGs to JPEG XL (--to jxl) and back (--to jpeg); also --full, --private
 ```
@@ -26,6 +27,10 @@ coefficients; it lists why the others stayed JPEG and keeps its own baseline
 that got bigger than its baseline, so compression regressions show up even when
 everything is still lossless.
 
+`run.sh --lossy` runs `just-smaller --lossy --output …` and checks the
+results in the output folder; the originals must stay byte for byte. Its
+sizes have their own baseline (`baseline-TIER-lossy.tsv`).
+
 ## What a run checks
 
 - no file lost, no leftover files, nothing grew, no optimizer error
@@ -36,6 +41,13 @@ everything is still lossless.
 - colour profile and EXIF orientation survive metadata stripping
 - SVGs render the same (Quick Look thumbnail, ≤ 0.1 % antialiasing pixels)
 - `broken-*` files are left byte-for-byte alone
+- no result changes format
+- with `--lossy`: where a step with loss changed the picture (a PNG, the
+  photo of a JPEG that holds one image, a HEIC, an SVG; never in a result
+  the tool calls identical), it must decode (a JPEG without a warning) to
+  the same size and keep orientation, colour profile, HDR and animation; pixels and
+  coefficients are not compared there. Everything else is checked as
+  without loss: a JPEG's other images, its container and video, Ultra HDR
 - Google's XMP in the JPEGs (container directory, motion photo mark) reads the
   same in the engine and in an independent second reader (`google-xmp.py`,
   Python and expat)

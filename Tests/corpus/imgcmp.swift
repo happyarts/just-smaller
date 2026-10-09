@@ -1,6 +1,6 @@
 // imgcmp — decides whether two images look the same, using Apple's ImageIO.
 //
-// usage: imgcmp [--tolerance N] ORIGINAL RESULT
+// usage: imgcmp [--tolerance N | --no-pixels] ORIGINAL RESULT
 // exit 0: same, 1: different, 2: unreadable
 //
 // Every frame is decoded to 8-bit RGBA in sRGB. Fully transparent pixels count
@@ -10,19 +10,30 @@
 //
 // --tolerance N allows each channel to differ by up to N, for comparing
 // rasterized vector images where antialiasing may shift by a step.
+//
+// --no-pixels checks everything but the pixels, for results made with loss:
+// both decode, to the same size, orientation, HDR and animation length, and
+// their colour profiles give the same colours in sRGB (the same profile
+// stored another way passes; with the pixels compared, a lost profile shows
+// in them).
 
 import Foundation
 import ImageIO
 import CoreGraphics
 
 var args = Array(CommandLine.arguments.dropFirst())
-var tolerance = 0
-if args.first == "--tolerance", args.count >= 2, let t = Int(args[1]) {
-    tolerance = t
-    args.removeFirst(2)
+var tolerance = 0, pixels = true
+while let flag = args.first {
+    if flag == "--no-pixels" {
+        pixels = false
+        args.removeFirst()
+    } else if flag == "--tolerance", args.count >= 2, let t = Int(args[1]) {
+        tolerance = t
+        args.removeFirst(2)
+    } else { break }
 }
 guard args.count == 2 else {
-    FileHandle.standardError.write("usage: imgcmp [--tolerance N] ORIGINAL RESULT\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: imgcmp [--tolerance N | --no-pixels] ORIGINAL RESULT\n".data(using: .utf8)!)
     exit(2)
 }
 
@@ -86,6 +97,42 @@ func orientation(_ path: String) -> Int {
 if orientation(args[0]) != orientation(args[1]) {
     print("DIFFERENT: orientation \(orientation(args[0])) vs \(orientation(args[1]))"); exit(1)
 }
+/// How the first image's colour space shows grey tones and each of its
+/// components, in sRGB (extended: colours outside it are not clipped together);
+/// nil where a colour can't be converted, then only its ICC data tells.
+func colours(_ path: String) -> (model: CGColorSpaceModel, greys: [CGFloat]?, components: [CGFloat]?, icc: Data?)? {
+    guard let src = CGImageSourceCreateWithURL(URL(fileURLWithPath: path) as CFURL, nil),
+          let image = CGImageSourceCreateImageAtIndex(src, 0, nil), var space = image.colorSpace else { return nil }
+    if space.model == .indexed, let base = space.baseColorSpace { space = base }
+    let n = space.numberOfComponents, srgb = CGColorSpace(name: CGColorSpace.extendedSRGB)!
+    func shown(_ colours: [[CGFloat]]) -> [CGFloat]? {
+        var all: [CGFloat] = []
+        for colour in colours {
+            var c = colour + [1]
+            guard let converted = CGColor(colorSpace: space, components: &c)?.converted(to: srgb, intent: .relativeColorimetric, options: nil),
+                  let components = converted.components else { return nil }
+            all += components
+        }
+        return all
+    }
+    let greys = ([0.25, 0.5, 0.75] as [CGFloat]).map { g in space.model == .cmyk ? [0, 0, 0, 1 - g] : Array(repeating: g, count: n) }
+    return (space.model, shown(greys), shown((0..<n).map { k in (0..<n).map { $0 == k ? 1 : 0 } }), space.copyICCData() as Data?)
+}
+func close(_ x: [CGFloat]?, _ y: [CGFloat]?) -> Bool {
+    guard let x, let y else { return false }
+    return x.count == y.count && !zip(x, y).contains { abs($0 - $1) > 0.01 }
+}
+if !pixels {
+    // A grey image may be stored as RGB and back (a palette, a reduction).
+    let same = switch (colours(args[0]), colours(args[1])) {
+    case (nil, nil): true
+    case let (x?, y?) where x.model == y.model:
+        x.greys == nil || y.greys == nil ? x.icc == y.icc : close(x.greys, y.greys) && close(x.components, y.components)
+    case let (x?, y?): close(x.greys, y.greys) && [x.model, y.model].allSatisfy { $0 == .monochrome || $0 == .rgb }
+    default: false
+    }
+    if !same { print("DIFFERENT: colour profile"); exit(1) }
+}
 // An HDR photo's gain map and other auxiliary images, and how bright it is
 // shown, come from data next to the pixels: losing it changes the photo.
 func hdr(_ path: String) -> String {
@@ -102,6 +149,8 @@ if hdr(args[0]) != hdr(args[1]) {
 let ta = timeline(a), tb = timeline(b)
 let durA = ta.last!.to, durB = tb.last!.to
 if a.count > 1 && durA != durB { print("DIFFERENT: duration \(durA) vs \(durB) cs"); exit(1) }
+let label = a.count == 1 ? "1 Frame" : "\(a.count)→\(b.count) Frames, \(durA) cs"
+if !pixels { print("same apart from the pixels (\(label))"); exit(0) }
 // Walk both timelines segment by segment and compare what is on screen.
 var i = 0, j = 0, badSpans = 0, badPx = 0, maxDiff = 0, spans = 0
 var cache: [String: (Int, Int)] = [:]
@@ -112,6 +161,5 @@ while i < ta.count && j < tb.count {
     if r.0 > 0 { badSpans += 1; badPx = max(badPx, r.0); maxDiff = max(maxDiff, r.1) }
     if ta[i].to < tb[j].to { i += 1 } else if tb[j].to < ta[i].to { j += 1 } else { i += 1; j += 1 }
 }
-let label = a.count == 1 ? "1 Frame" : "\(a.count)→\(b.count) Frames, \(durA) cs"
 if badSpans == 0 { print("identical (\(label))"); exit(0) }
 print("DIFFERENT: \(badSpans)/\(spans) time spans, up to \(badPx) pixels, max. difference \(maxDiff) (\(label))"); exit(1)

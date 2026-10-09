@@ -1,7 +1,7 @@
 #!/bin/sh
 # Runs a corpus tier through the just-smaller command and checks every result.
 #
-# usage: Tests/corpus/run.sh [--quick|--full] [--update-baseline] [-- extra just-smaller options]
+# usage: Tests/corpus/run.sh [--quick|--full|--private] [--lossy] [--update-baseline] [-- extra just-smaller options]
 #
 # For each file: it must still exist, nothing new may appear next to it, it must
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
@@ -17,6 +17,17 @@
 # baseline so that a compression regression shows up even when everything is
 # still lossless.
 #
+# --lossy runs with loss (just-smaller --lossy) and writes the results into an
+# output folder (--output), so the originals must stay byte for byte as they
+# were. Where a step with loss changed the picture (a PNG, the photo of a JPEG
+# that holds one image, a HEIC, an SVG; never in a result the tool calls
+# identical), its pixels or coefficients are not compared: it must be the same
+# format, decode (a JPEG without a warning) to the same size, and keep
+# orientation, colour profile, HDR and animation (imgcmp --no-pixels). Everything else is
+# checked as without loss: the other images of a JPEG, its container and
+# video, Ultra HDR, and files no step with loss changed. Its sizes have their
+# own baseline (baseline-TIER-lossy.tsv).
+#
 # Works on a copy; replaced originals are deleted (--no-trash), never moved to
 # the Trash, and no settings are read or written.
 set -eu
@@ -24,15 +35,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$HERE/../.." && pwd)
 . "$ROOT/Tools/xcode-env.sh"
 CORPUS=${JUST_SMALLER_CORPUS:-$(dirname "$ROOT")/Testkorpus}
-TIER=quick; UPDATE=no
+TIER=quick; UPDATE=no; LOSSY=no
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--quick) TIER=quick ;; --full) TIER=full ;; --private) TIER=private ;;
+		--lossy) LOSSY=yes ;;
 		--update-baseline) UPDATE=yes ;;
 		--) shift; break ;;
 		*) echo >&2 "unknown option $1"; exit 2 ;;
 	esac; shift
 done
+case " $* " in *" --lossy "*) echo >&2 "use run.sh --lossy: it also sets the output folder and the baseline"; exit 2 ;; esac
 [ -d "$CORPUS/$TIER" ] || { echo >&2 "no corpus at $CORPUS/$TIER — run Tests/corpus/build-corpus.sh"; exit 2; }
 TOOLS=$ROOT/build/tools
 [ -x "$TOOLS/oxipng" ] || { echo >&2 "optimizers missing — run Tools/build.sh"; exit 2; }
@@ -54,6 +67,11 @@ else
 	cp -pR "$CORPUS/quick/." "$WORK/orig/"
 fi
 cp -p "$WORK/orig/"* "$WORK/run/"
+BASELINE=$CORPUS/baseline-$TIER.tsv
+if [ $LOSSY = yes ]; then
+	BASELINE=$CORPUS/baseline-$TIER-lossy.tsv
+	set -- --lossy --output "$WORK/out" "$@"
+fi
 
 START=$(date +%s)
 # Exit status 1 (some files skipped) is expected: the corpus has broken files.
@@ -62,14 +80,17 @@ STATUS=0
 ELAPSED=$(( $(date +%s) - START ))
 
 RESULT=0
-python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$CORPUS/baseline-$TIER.tsv" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" <<'PY' || RESULT=$?
-import json, os, re, subprocess, sys, collections, importlib.util, hashlib
-work, imgcmp, jpegcmp, base_path, update, elapsed, status, root = sys.argv[1:]
+python3 - "$WORK" "$BIN/imgcmp" "$TOOLS/jpegcmp" "$BASELINE" "$UPDATE" "$ELAPSED" "$STATUS" "$ROOT" "$LOSSY" <<'PY' || RESULT=$?
+import json, os, re, subprocess, sys, collections, importlib.util, hashlib, unicodedata
+work, imgcmp, jpegcmp, base_path, update, elapsed, status, root, lossy = sys.argv[1:]
+lossy = lossy == "yes"
 spec = importlib.util.spec_from_file_location("google_xmp", os.path.join(root, "Tests/corpus/google-xmp.py"))
 google_xmp = importlib.util.module_from_spec(spec); spec.loader.exec_module(google_xmp)
 # Built by Tests/corpus/build-ultrahdr.sh next to the comparator, if at all.
 ultrahdr, uhdr_checked = os.path.join(os.path.dirname(imgcmp), "ultrahdr_app"), 0
 orig, run = os.path.join(work, "orig"), os.path.join(work, "run")
+# With loss, results go into the output folder, under the run folder's name.
+output = os.path.join(work, "out", "run")
 raster = {".png", ".gif", ".webp", ".heic"}
 baseline = {}
 if os.path.exists(base_path):
@@ -130,56 +151,89 @@ def jpeg_images(path):
         if b[s:s + 2] != b"\xff\xd8" or (e := end_of(s)) is None: break
         out.append(b[s:e])
     return out
+def format_of(h):
+    if h[:3] == b"\xff\xd8\xff": return "JPEG"
+    if h[:4] == b"\x89PNG": return "PNG"
+    if h[:4] == b"GIF8": return "GIF"
+    if h[:4] == b"RIFF" and h[8:12] == b"WEBP": return "WebP"
+    if h[4:8] == b"ftyp": return "HEIF"
+    if h[:2] == b"\xff\x0a" or h == b"\0\0\0\x0cJXL \r\n\x87\n": return "JPEG XL"
+    return "other"
 def render(p, outdir):
     subprocess.run(["qlmanage", "-t", "-s", "512", "-o", outdir, p], capture_output=True)
     return os.path.join(outdir, os.path.basename(p) + ".png")
 names = sorted(os.listdir(orig))
 extra = sorted(set(os.listdir(run)) - set(names))
+# Anywhere in the output folder, which may hold the names in another
+# Unicode normalization.
+nfc = lambda s: unicodedata.normalize("NFC", s)
+if lossy:
+    top, known = os.path.dirname(output), {nfc(os.path.join(output, x)) for x in names}
+    extra += sorted(os.path.relpath(p, top) for d, _, files in os.walk(top) for f in files if nfc(p := os.path.join(d, f)) not in known)
 if extra: fails.append(("—", "LEFTOVER FILES: " + ", ".join(extra)))
-result = {}
+result, relaxed = {}, 0
 for n in names:
     a, b = os.path.join(orig, n), os.path.join(run, n)
     ext = os.path.splitext(n)[1].lower()
     cat = per[ext or "(none)"]
-    kind = ext
-    with open(a, "rb") as fh: head = fh.read(4)
-    if head[:3] == b"\xff\xd8\xff": kind = ".jpg"
-    elif head == b"\x89PNG": kind = ".png"
+    whole_a = open(a, "rb").read()
+    kind = {"JPEG": ".jpg", "PNG": ".png"}.get(format_of(whole_a), ext)
     if not os.path.exists(b):
         fails.append((n, "LOST")); continue
-    sa, sb = os.path.getsize(a), os.path.getsize(b); result[n] = sb
+    rec = records.get(n, {})
+    if lossy:
+        # The original stays; its result is in the output folder, unless it
+        # got none (skipped): then the original is what is checked.
+        if os.path.getsize(b) != len(whole_a) or open(b, "rb").read() != whole_a:
+            fails.append((n, "CHANGED THE ORIGINAL")); continue
+        if os.path.exists(os.path.join(output, n)): b = os.path.join(output, n)
+        elif rec.get("status") in ("optimized", "unchanged", "rejected"):
+            fails.append((n, "NO RESULT IN THE OUTPUT FOLDER")); continue
+    # With loss, only these may show a changed picture, and only when the
+    # tool doesn't call the result identical; the rest is checked as without.
+    lost = lossy and not rec.get("identical", True) and kind in (".jpg", ".png", ".heic", ".svg")
+    whole_b = open(b, "rb").read()
+    sa, sb = len(whole_a), len(whole_b); result[n] = sb
     cat[0] += 1; cat[1] += sa; cat[2] += sb
-    same = open(a, "rb").read() == open(b, "rb").read()
+    same = whole_a == whole_b
     if (n.startswith("broken") or "unchanged-" in n) and not same: fails.append((n, "TOUCHED A FILE THAT MUST STAY AS IT IS"))
     # A file may grow only when private metadata had to go (the promise
     # beats the size); then its only tool is the metadata filter.
-    tools = records.get(n, {}).get("tools", [])
+    tools = rec.get("tools", [])
     if sb > sa and tools != ["Metadata"]: fails.append((n, f"GREW {sa} -> {sb}"))
     # Also files that stay as they are now but got smaller before: a tool
     # that stopped working shows up here.
     if n in baseline and sb > baseline[n]:
-        why = records.get(n, {}).get("reason") or "+".join(tools) or records.get(n, {}).get("status", "")
+        why = rec.get("reason") or "+".join(tools) or rec.get("status", "")
         regress.append((n, baseline[n], f"{sb}  ({why})"))
     if same: continue
     cat[3] += 1
+    if (fa := format_of(whole_a)) != (fb := format_of(whole_b)): fails.append((n, f"FORMAT {fa} -> {fb}")); continue
     if kind in (".jpg", ".jpeg"):
         # ImageIO decodes identical DCT data differently depending on the
         # Huffman tables; the coefficients are the exact proof. jpegcmp reads
         # one image: a file that holds several is compared image by image.
         ia, ib = jpeg_images(a), jpeg_images(b)
         if len(ia) != len(ib): fails.append((n, f"IMAGES: {len(ia)} -> {len(ib)}"))
-        for k, (x, y) in enumerate(zip(ia, ib)):
-            pa, pb = os.path.join(work, "image-a.jpg"), os.path.join(work, "image-b.jpg")
-            open(pa, "wb").write(x); open(pb, "wb").write(y)
-            r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
-            if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
+        tail = whole_a[len(ia[0]):] if ia else b""
+        pa, pb = os.path.join(work, "image-a.jpg"), os.path.join(work, "image-b.jpg")
+        # Only a plain JPEG's photo may change with loss: one image, nothing
+        # but padding after it. It must still read without a warning.
+        if lost and len(ia) == 1 and not tail.strip(b"\0\xff"):
+            open(pb, "wb").write(ib[0] if ib else whole_b)
+            r = subprocess.run([jpegcmp, "--check", pb], capture_output=True, text=True)
+            if r.returncode != 0: fails.append((n, "DOESN'T READ CLEANLY: " + (r.stdout + r.stderr).strip()))
+            relaxed += 1
+        else:
+            for k, (x, y) in enumerate(zip(ia, ib)):
+                open(pa, "wb").write(x); open(pb, "wb").write(y)
+                r = subprocess.run([jpegcmp, pa, pb], capture_output=True, text=True)
+                if r.returncode != 0: fails.append((n, f"COEFFICIENTS (image {k + 1}): " + (r.stdout + r.stderr).strip()))
         # What Google's container lists after the photo (images, a motion
         # photo's video), read with the second reader: in the result each
         # item lies where its directory says, each JPEG with the same
         # coefficients, anything else byte for byte. An older motion photo's
         # video (no directory): everything after the photo stays.
-        whole_a, whole_b = open(a, "rb").read(), open(b, "rb").read()
-        tail = whole_a[len(ia[0]):] if ia else b""
         said = google_xmp.opinion(a)
         pa = google_xmp.placed(a) if said["lists"] else None
         if pa is not None:
@@ -197,8 +251,8 @@ for n in names:
                     if r.returncode != 0: fails.append((n, "COEFFICIENTS (container item): " + (r.stdout + r.stderr).strip()))
         elif (said["lists"] or said["motion"] and b"ftyp" in tail) and not whole_b.endswith(tail):
             fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
-        r = subprocess.run([imgcmp, "--tolerance", "255", a, b], capture_output=True, text=True)
-        if "orientation" in r.stdout or "HDR" in r.stdout: fails.append((n, r.stdout.strip()))
+        r = subprocess.run([imgcmp, "--no-pixels", a, b], capture_output=True, text=True)
+        if any(w in r.stdout for w in ("orientation", "profile", "HDR")) or lost and r.returncode: fails.append((n, r.stdout.strip()))
         # Google's own decoder, a second opinion on HDR gain maps: an Ultra
         # HDR original and its result decode to the same HDR picture.
         if os.path.exists(ultrahdr) and subprocess.run([ultrahdr, "-m", "1", "-P", "-j", a], capture_output=True).returncode == 0:
@@ -223,12 +277,16 @@ for n in names:
             r = subprocess.run([jpegcmp, ra, rb], capture_output=True, text=True)
             if r.returncode != 0: fails.append((n, "REBUILT COEFFICIENTS: " + (r.stdout + r.stderr).strip()))
     elif kind in raster:
-        r = subprocess.run([imgcmp, a, b], capture_output=True, text=True)
-        if r.returncode != 0: fails.append((n, "PIXELS: " + r.stdout.strip()))
+        relaxed += lost
+        # With loss: decodes to the same size, orientation, profile, HDR, animation.
+        r = subprocess.run([imgcmp, *(["--no-pixels"] if lost else []), a, b], capture_output=True, text=True)
+        if r.returncode != 0: fails.append((n, ("DECODED: " if lost else "PIXELS: ") + r.stdout.strip()))
     elif kind == ".svg":
         ra, rb = os.path.join(work, "ra"), os.path.join(work, "rb")
         os.makedirs(ra, exist_ok=True); os.makedirs(rb, exist_ok=True)
-        r = subprocess.run([imgcmp, "--tolerance", "2", render(a, ra), render(b, rb)], capture_output=True, text=True)
+        # With loss it only has to render, at the same size.
+        relaxed += lost
+        r = subprocess.run([imgcmp, *(["--no-pixels"] if lost else ["--tolerance", "2"]), render(a, ra), render(b, rb)], capture_output=True, text=True)
         # Antialiasing may differ in a handful of edge pixels (0.1 % of the 512 px thumbnail).
         m = re.search(r"up to (\d+) pixels", r.stdout)
         if r.returncode != 0 and not (m and int(m.group(1)) <= 262):
@@ -242,6 +300,7 @@ print(f"{'total':<8}{tot[0]:>6}{tot[3]:>8}{tot[1]:>12}{tot[2]:>12}{(1 - tot[2] /
 if baseline:
     was = sum(baseline.get(n, result.get(n, 0)) for n in result); now = sum(result.values())
     print(f"vs baseline: {now - was:+d} bytes over {len(result)} files")
+if lossy: print(f"with loss: {relaxed} results checked to decode, not to match")
 for n, old, new in regress: print(f"  REGRESSION {n}: {old} -> {new}")
 for n, why in fails: print(f"  FAIL {n}: {why}")
 if update == "yes":
