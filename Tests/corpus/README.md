@@ -13,7 +13,14 @@ Tests/corpus/run.sh --full          # ~700 files, 1 GB, four minutes — before 
 Tests/corpus/run.sh --private       # your own photos in Testkorpus/private, if you have that folder
 Tests/corpus/run.sh --quick -- --effort maximum   # pass options to just-smaller
 Tests/corpus/bench.sh ../Testkorpus/full/real-photo-jpeg   # time one job; --cli to compare with another build
+Tests/corpus/convert.sh --quick     # the JPEGs to JPEG XL (--to jxl) and back (--to jpeg); also --full, --private
 ```
+
+`convert.sh` checks each conversion again from outside: the JPEG rebuilt
+from the JPEG XL has the original's coefficients, jxl-rs shows what libjpeg
+shows, nothing that stayed JPEG was touched, and back to JPEG gives the same
+coefficients; it lists why the others stayed JPEG and keeps its own baseline
+(`baseline-convert-TIER.tsv`).
 
 `run.sh --update-baseline` records the result sizes; later runs report any file
 that got bigger than its baseline, so compression regressions show up even when

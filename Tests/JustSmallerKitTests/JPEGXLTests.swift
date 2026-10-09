@@ -151,6 +151,15 @@ final class JPEGXLTests {
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "hdr.jxl").path))
     }
 
+    @Test func aTinyJPEGStaysWhenJPEGXLIsLarger() async throws {
+        settings.metadata = .keep
+        let tiny = jpeg("tiny.jpg", width: 1, height: 1)
+        // Nothing but the image: a few hundred bytes JPEG XL can't beat.
+        try JPEGMetadataFilter.filter(Data(contentsOf: tiny), level: .removeAll, orientation: 1, itemLengths: [:]).write(to: tiny)
+        #expect(reason(try await convert(tiny, to: .jxl)) == "As JPEG XL it wouldn’t be smaller")
+        #expect(FileManager.default.fileExists(atPath: tiny.path))
+    }
+
     @Test func aJPEGXLNotMadeFromAJPEGHasNoWayBack() async throws {
         let bare = dir.appending(path: "pixels.jxl")
         try Data([0xFF, 0x0A, 0xFA, 0x7F, 0x01]).write(to: bare)

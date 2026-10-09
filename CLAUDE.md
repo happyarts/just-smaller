@@ -26,7 +26,10 @@
   build and `swift test`; `--quick` when a change can alter what a level
   produces (pipeline, OxiPNG, zopfli, a tool); `--full` before a new baseline
   or for larger level changes. The runner uses Balanced; zopfli only runs at
-  Maximum (`run.sh --quick -- --effort maximum`).
+  Maximum (`run.sh --quick -- --effort maximum`). A change to converting
+  (JPEG ↔ JPEG XL: FileConverter, jxl-transcode, jxl-pixels, the rules in
+  JPEGLayout) runs `Tests/corpus/convert.sh --quick`, `--full` before a new
+  baseline.
   `--update-baseline` after intended size changes.
   It also compares Google's XMP with a second reader (`google-xmp.py`).
   `Tests/corpus/bench.sh <folder>` times one job (`--cli` for another build):

@@ -67,7 +67,7 @@ public struct FileConverter: Sendable {
         let result: URL
         switch target {
         case .jxl:
-            switch try await toJXL(source, work: work, progress: progress) {
+            switch try await toJXL(source, smallerThan: size, work: work, progress: progress) {
             case .converted(let jxl): result = jxl
             case .refused(let reason): return .skipped(reason: reason, size: size)
             case .rejected(let reason):
@@ -130,7 +130,10 @@ public struct FileConverter: Sendable {
         case rejected(String)
     }
 
-    private func toJXL(_ source: URL, work: URL, progress: @escaping @Sendable (String) -> Void) async throws -> Conversion {
+    /// Only a JPEG XL smaller than the original file (`smallerThan` bytes)
+    /// counts: a tiny JPEG can come out larger.
+    private func toJXL(_ source: URL, smallerThan limit: Int64, work: URL,
+                       progress: @escaping @Sendable (String) -> Void) async throws -> Conversion {
         // The metadata level, as when optimizing: the same filter, checked
         // the same way (coefficients unchanged, only what the level removes
         // gone).
@@ -180,9 +183,13 @@ public struct FileConverter: Sendable {
             return .refused(String(localized: "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)",
                                    bundle: .module))
         }
+        let smaller = candidates.filter { $0.1 < limit }
+        guard !smaller.isEmpty else {
+            return .refused(String(localized: "As JPEG XL it wouldn’t be smaller", bundle: .module))
+        }
         progress(String(localized: "Checking", bundle: .module))
         var rejected = ""
-        for (jxl, _) in candidates {
+        for (jxl, _) in smaller {
             do {
                 try await Verifier.verifyConversion(jpeg: jpeg, jxl: jxl, tolerance: .converted)
                 try MetadataCheck.verifyConverted(jpeg: jpeg, jxl: jxl)

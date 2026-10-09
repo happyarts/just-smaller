@@ -51,6 +51,16 @@
         }
       }
     },
+    "As JPEG XL it wouldn’t be smaller": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Als JPEG XL wäre es nicht kleiner"
+          }
+        }
+      }
+    },
     "Checking": {
       "localizations": {
         "de": {
