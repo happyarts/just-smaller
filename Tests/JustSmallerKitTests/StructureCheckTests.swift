@@ -138,6 +138,25 @@ final class StructureCheckTests {
         #expect(try rejects(withoutDC, original: url, .jpeg))
     }
 
+    /// A lossless JPEG is sound without quantization tables, and not
+    /// damaged; a result of one still can't be proven (jpegcmp reads DCT
+    /// coefficients, which it has none of), so it is rejected.
+    @Test func losslessJPEGIsSoundButNotProven() async throws {
+        let url = dir.appending(path: "lossless.jpg")
+        try TestImages.losslessJPEG.write(to: url)
+        #expect(try JPEGMarkers.frame(JPEGMarkers.headers(ByteView(TestImages.losslessJPEG)).segments)?.marker == 0xC3)
+        #expect(try !rejects(bytes(url), original: url, .jpeg))
+        #expect(FileOptimizer.damage(of: url, format: .jpeg) == nil)
+        await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: url, result: url, format: .jpeg, pixelsMustMatch: true)
+        }
+        // A DCT JPEG still needs the table its components name.
+        let dct = write("dct.jpg", .jpeg)
+        var undefined = try bytes(dct)
+        undefined[segment(undefined, 0xC0) + 4 + 8] = 3 // first component: quantization table 3
+        #expect(try rejects(undefined, original: dct, .jpeg))
+    }
+
     @Test func libjpegWarningsCount() async throws {
         let url = write("a.jpg", .jpeg)
         let b = try bytes(url)

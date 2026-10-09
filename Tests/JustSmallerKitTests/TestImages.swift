@@ -60,6 +60,16 @@ enum TestImages {
         return CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceDecodeRequest: kCGImageSourceDecodeToHDR] as CFDictionary)?.contentHeadroom
     }
 
+    /// A 16 × 12 lossless JPEG (SOF3), which has no quantization tables:
+    /// libjpeg-turbo's cjpeg -lossless 1 on a generated gradient.
+    static let losslessJPEG = Data(base64Encoded: """
+        /9j/7gAOQWRvYmUAZAAAAAAA/8MAEQgADAAQA1IRAEcRAEIRAP/EABgAAQEBAQEAAAAAAAAAAAAAAAAFCAQH/9oADANSAEcAQgAB
+        AADP+f8A0jvKBQKDL9AoFAoNQUCgUCgy/QKBQFV3lAoFBl+gUCgUGoKBQKBQZfoFAoCq7ygUCgy/QKBQKDUFAoFAoMv0CgUBVd5Q
+        KBQZfoFAoFBqCgUCgUGX6BQKArZf7ygUCg1BQKBQKDL9AoFAoNQUCgUBVd5QKBQagoFAoFBl+gUCgUGoKBQKAqu8oFAoNQUCgUCg
+        y/QKBQKDUFAoFAVXeUCgUGoKBQKBQZfoFAoFBqCgUCgK2oO8oFAoMv0CgUCg1BQKBQKDL9AoFAVXeUCgUGX6BQKBQagoFAoFBl+g
+        UCgKrvKBQKDL9AoFAoNQUCgUCgy/QKBQFV3lAoFBl+gUCgUGoKBQKBQZfoFAoH//2Q==
+        """, options: .ignoreUnknownCharacters)!
+
     /// A 32 × 24 JPEG with arithmetic coding (SOF9), quality 97: libjpeg-turbo's
     /// cjpeg, then jpegtran -arithmetic.
     static let arithmeticJPEG = Data(base64Encoded: """

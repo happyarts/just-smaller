@@ -203,7 +203,9 @@ enum JPEGCheck {
                     let id = try s.u8(1 + 2 * c)
                     guard let index = components.firstIndex(where: { $0.id == id }), index > (members.last ?? -1)
                     else { throw Invalid("SOS component") }
-                    guard quant[components[index].table] else { throw Invalid("quantization table used before it is defined") }
+                    // Lossless frames are not quantized: they have no tables.
+                    guard quant[components[index].table] || JPEGMarkers.lossless.contains(image.frame)
+                    else { throw Invalid("quantization table used before it is defined") }
                     members.append(index)
                 }
                 let ss = try s.u8(1 + 2 * ns), se = try s.u8(2 + 2 * ns)
