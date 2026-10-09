@@ -17,6 +17,10 @@ struct Candidate: Sendable {
     /// A lossy re-encode must save at least this fraction to be worth the
     /// generation loss.
     var minimumGain = 0.0
+    /// A lossy step the following stages compress further is judged on the
+    /// finished file: that must be smaller than the result before the step
+    /// by `minimumGain`, or the file goes back to that result.
+    var judgedFinished = false
     /// When this candidate fails, the file stays as it is: removing private
     /// metadata is a promise, not an optimization.
     var isRequired = false
@@ -83,11 +87,12 @@ enum Pipeline {
         }
         switch format {
         case .png:
-            var stages: [[Candidate]] = []
-            // quantizr reads one frame; an animation would become a still image.
-            if s.lossy, !facts.isAnimated { stages.append([pngQuantize()]) }
-            stages.append([pngMetadata(s.metadata, orientation: facts.orientation)])
-            stages.append(pngCompressors(effort: s.effort, lossy: s.lossy, facts: facts))
+            let compress = pngCompressors(effort: s.effort, lossy: s.lossy, facts: facts)
+            var stages = [[pngMetadata(s.metadata, orientation: facts.orientation)], compress]
+            // The palette image is compressed the same way and must beat the
+            // file without loss by enough to be worth it. quantizr reads one
+            // frame; an animation would become a still image.
+            if s.lossy, !facts.isAnimated { stages += [[pngQuantize()], compress] }
             return stages
 
         case .jpeg:
@@ -233,9 +238,11 @@ enum Pipeline {
     }
 
     /// Palette reduction with quantizr (MIT) through our png-quantize, which
-    /// keeps the colour metadata and copies the rest for the metadata filter.
+    /// keeps the colour and other metadata. Judged after OxiPNG, against the
+    /// file compressed without loss; a file OxiPNG already stores as a palette
+    /// stays as it is.
     static func pngQuantize() -> Candidate {
-        Candidate(name: "quantizr", isLossy: true) { input, output, work in
+        Candidate(name: "quantizr", isLossy: true, minimumGain: pngPaletteMinimumGain, judgedFinished: true) { input, output, work in
             do {
                 try await ToolRunner.run("png-quantize", [input.path, output.path], in: work)
             } catch let error as ToolError where error.status == 97 || error.status == 98 {
@@ -244,6 +251,9 @@ enum Pipeline {
             return true
         }
     }
+
+    /// What the palette image must save over the file compressed without loss.
+    static let pngPaletteMinimumGain = 0.05
 
     // MARK: - JPEG
 

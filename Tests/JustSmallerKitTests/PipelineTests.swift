@@ -115,6 +115,26 @@ struct PipelineTests {
         }
     }
 
+    /// Lossy: the palette image is made from the file compressed without
+    /// loss, compressed the same way and judged as the finished file against
+    /// it. Animations get no palette.
+    @Test func lossyPNGPaletteIsJudgedAgainstTheLosslessFile() throws {
+        var settings = OptimizationSettings()
+        settings.lossy = true
+        func stages(animated: Bool) -> [[Candidate]] {
+            var facts = FileFacts(byteSize: 1_000)
+            facts.isAnimated = animated
+            return Pipeline.stages(for: .png, facts: facts, settings: settings)
+        }
+        let metadata = Pipeline.pngMetadata(.keep, orientation: 1).name
+        let still = stages(animated: false)
+        #expect(still.map { $0.map(\.name) } == [[metadata], ["OxiPNG"], ["quantizr"], ["OxiPNG"]])
+        let quantize = try #require(still[2].first)
+        #expect(quantize.isLossy && quantize.judgedFinished && quantize.minimumGain == Pipeline.pngPaletteMinimumGain)
+        #expect(Pipeline.pngPaletteMinimumGain > 0)
+        #expect(stages(animated: true).map { $0.map(\.name) } == [[metadata], ["OxiPNG"]])
+    }
+
     @Test func factsAboutAPNG() throws {
         let dir = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }

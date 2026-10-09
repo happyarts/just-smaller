@@ -123,6 +123,12 @@ public struct FileOptimizer: Sendable {
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
+        // Before a step judged on the finished file: the state to go back to,
+        // and the size the finished file must stay below. What the discarded
+        // steps ran into goes with them.
+        var beforeTrial: (best: URL, size: Int64, used: [String], pixelIdentical: Bool,
+                          beforeLoss: (best: URL, size: Int64, used: [String])?,
+                          rejected: VerificationError?, lastError: (any Error)?, limit: Int64)?
         stages: for (n, stage) in stages.enumerated() {
             try Task.checkCancellation()
             var shown = Set<String>()
@@ -170,7 +176,7 @@ public struct FileOptimizer: Sendable {
                 // counts even when the file grows (ImageIO writes metadata
                 // less compactly), as long as there was something to remove.
                 let promised = candidate.isRequired && hasFieldsToRemove
-                guard outSize < limit || promised else { continue }
+                guard outSize < limit || promised || candidate.judgedFinished else { continue }
                 if structure == nil { structure = StructureCheck.Reference(original: input, format: format, level: settings.metadata) }
                 do {
                     // Against this stage's input: after a lossy stage the
@@ -190,11 +196,16 @@ public struct FileOptimizer: Sendable {
                     }
                     continue
                 }
+                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, pixelIdentical, beforeLoss, rejected, lastError, limit) }
                 if candidate.isLossy, beforeLoss == nil { beforeLoss = (best, bestSize, used) }
                 best = output; bestSize = outSize; used.append(candidate.name)
                 if candidate.isLossy { pixelIdentical = false }
                 break
             }
+        }
+        if let trial = beforeTrial, best != source, bestSize >= trial.limit {
+            (best, bestSize, used, pixelIdentical, beforeLoss) = (trial.best, trial.size, trial.used, trial.pixelIdentical, trial.beforeLoss)
+            (rejected, lastError) = (trial.rejected, trial.lastError)
         }
 
         // A chosen encoding is measured once more, as the finished file. If

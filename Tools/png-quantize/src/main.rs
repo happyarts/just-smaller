@@ -3,9 +3,9 @@
 //!     png-quantize INPUT OUTPUT [--colors N] [--dither 0..1]
 //!
 //! Uses quantizr (MIT) for the palette and dithering. The colour metadata of
-//! the input — ICC profile, sRGB intent, gamma, chromaticities and physical
-//! pixel size — is written to the output, so the colours are interpreted the
-//! same way, including a cICP chunk. Every other ancillary chunk that stays
+//! the input — ICC profile, sRGB intent, gamma, chromaticities, cICP — is
+//! copied byte for byte and the physical pixel size written, so the colours
+//! are interpreted the same way. Every other ancillary chunk that stays
 //! true of the new image data — EXIF, XMP and text, the modification time,
 //! safe-to-copy chunks of other programs — is copied as it is, on its side of
 //! the image data; the metadata filter decides afterwards what stays. Chunks
@@ -90,11 +90,6 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     if entries.iter().any(|c| c.a != 255) {
         info.trns = Some(Cow::Owned(entries.iter().map(|c| c.a).collect()));
     }
-    // Keep how the colours are to be interpreted.
-    info.icc_profile = source.icc_profile.clone();
-    info.srgb = source.srgb;
-    info.source_gamma = source.source_gamma;
-    info.source_chromaticities = source.source_chromaticities;
     info.pixel_dims = source.pixel_dims;
 
     let mut encoded = Vec::new();
@@ -118,13 +113,22 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     writer.write_image_data(&indices)?;
     copy(&mut writer, true)?;
     writer.finish()?;
-    // The png crate can't write cICP; it belongs right after IHDR (signature 8 + IHDR 25 bytes).
-    if let Some(cicp) = cicp {
-        encoded.splice(33..33, cicp.iter().copied());
-    }
+    // How the colours are to be interpreted, byte for byte and in their
+    // order, right after IHDR (signature 8 + IHDR 25 bytes), before the
+    // palette. The png crate can't write cICP, and it would add a gAMA and
+    // cHRM of its own to an sRGB chunk.
+    let colour: Vec<u8> = chunks(&raw)
+        .take_while(|c| c.0 != b"IDAT")
+        .filter(|c| COLOUR.contains(&c.0))
+        .flat_map(|c| raw[c.1].iter().copied())
+        .collect();
+    encoded.splice(33..33, colour);
     BufWriter::new(File::create(output)?).write_all(&encoded)?;
     Ok(ExitCode::SUCCESS)
 }
+
+/// The chunks that say how the colours are to be interpreted.
+const COLOUR: [&[u8]; 5] = [b"cICP", b"iCCP", b"sRGB", b"gAMA", b"cHRM"];
 
 /// Whether a chunk of the input is copied into the palette image: an
 /// ancillary chunk that is safe to copy when the image data changes

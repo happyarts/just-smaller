@@ -806,6 +806,58 @@ final class FileOptimizerTests {
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
     }
 
+    /// A palette image counts only when it saves enough over the file
+    /// compressed without loss — not over the original. A smooth gradient of
+    /// 512 colours, stored uncompressed, is far smaller as a palette than as
+    /// it is, but without loss its identical rows shrink to almost nothing.
+    @Test func lossyPNGStaysLosslessWhenAPaletteSavesTooLittle() async throws {
+        settings.lossy = true
+        let url = dir.appending(path: "gradient-rows.png")
+        try uncompressedPNG(width: 512, height: 256) { x, _ in [UInt8(x / 2), UInt8(255 - x / 2), UInt8(x % 2 * 255)] }.write(to: url)
+        let original = dir.appending(path: "gradient-rows-original.png")
+        try FileManager.default.copyItem(at: url, to: original)
+
+        let outcome = try await optimize(url)
+        guard case .optimized(_, _, let tools, _, _, let identical) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(!tools.contains("quantizr") && identical, "\(tools)")
+        try await Verifier.verify(original: original, result: url, format: .png, pixelsMustMatch: true)
+    }
+
+    /// The palette image says how its colours are meant exactly as the
+    /// original does: an sRGB chunk alone gets no gamma or chromaticities
+    /// added (the structure check would reject the palette).
+    @Test func lossyPNGWithAnSRGBChunkIsQuantized() async throws {
+        settings.lossy = true
+        let url = dir.appending(path: "srgb-grain.png")
+        try uncompressedPNG(width: 256, height: 256, colour: [PNGChunks.write("sRGB", [0])]) { x, y in
+            let grain = (x * 7919 ^ y * 104_729) % 13
+            return [UInt8(x / 2 + grain), UInt8(100 + grain), UInt8(y / 2 + grain)]
+        }.write(to: url)
+
+        let outcome = try await optimize(url)
+        guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        #expect(tools.contains("quantizr"), "\(tools)")
+        let chunks = try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true)
+        #expect(chunks.map(\.type) == ["IHDR", "sRGB", "PLTE", "IDAT", "IEND"])
+        #expect(chunks.first { $0.type == "sRGB" }?.data.bytes == Data([0]))
+    }
+
+    /// 8-bit RGB, the rows as they are, packed without compression; `colour`
+    /// chunks right after IHDR.
+    private func uncompressedPNG(width: Int, height: Int, colour: [Data] = [], pixel: (_ x: Int, _ y: Int) -> [UInt8]) -> Data {
+        var rows: [UInt8] = []
+        for y in 0..<height {
+            rows.append(0)
+            for x in 0..<width { rows += pixel(x, y) }
+        }
+        var size = uLongf(compressBound(uLong(rows.count)))
+        var packed = [UInt8](repeating: 0, count: Int(size))
+        precondition(compress2(&packed, &size, rows, uLong(rows.count), 0) == Z_OK)
+        let bigEndian = { (n: Int) in (0..<4).map { UInt8(n >> (24 - 8 * $0) & 0xFF) } }
+        return Data(PNGChunks.signature) + PNGChunks.write("IHDR", bigEndian(width) + bigEndian(height) + [8, 2, 0, 0, 0])
+            + colour.reduce(Data(), +) + PNGChunks.write("IDAT", Array(packed.prefix(Int(size)))) + PNGChunks.write("IEND", [])
+    }
+
     /// The palette image keeps the metadata: EXIF, XMP and text on their side
     /// of the image data, and the time. What describes the old pixels goes
     /// (background colour, significant bits, unsafe-to-copy chunks of other
