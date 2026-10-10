@@ -92,9 +92,6 @@ public struct FileOptimizer: Sendable {
             counted = rejections.count
             return error.reason
         }
-        // Only formats whose image data is compared exactly can earn the
-        // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
-        let canBeIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
         // The best result before the first lossy step: what stays when a
         // chosen encoding fails its last check. Set while the result holds a
         // lossy step.
@@ -229,7 +226,8 @@ public struct FileOptimizer: Sendable {
             used.append(Self.repairedHDR)
         }
 
-        let fidelity: Fidelity = beforeLoss != nil ? .lossy : canBeIdentical ? .pixelIdentical : .lossless
+        // Only formats whose image data is compared exactly earn the guarantee.
+        let fidelity: Fidelity = beforeLoss != nil ? .lossy : Verifier.comparesExactly(format) ? .pixelIdentical : .lossless
         switch destination {
         case .newFile(let planned, _):
             let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url,

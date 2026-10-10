@@ -195,7 +195,7 @@ struct Report: Sendable {
         case "optimized":
             // A file grows only when private metadata had to go.
             let percent = (Double(abs(saved)) / Double(max(originalSize, 1))).formatted(.percent.precision(.fractionLength(1)))
-            return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  \(saved < 0 ? "+" : "−")\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : "")"
+            return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  \(saved < 0 ? "+" : "−")\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : lossy ? "  (lossy)" : "")"
         case "unchanged":
             let note = holdsPrivateData == true ? "  (private data stays in)" : ""
             return reason == "alreadyOptimal" ? "= \(name)  already optimal\(note)" : "– \(name)  \(message ?? "")\(note)"

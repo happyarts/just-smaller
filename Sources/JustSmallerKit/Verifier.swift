@@ -19,6 +19,16 @@ struct VerificationError: LocalizedError {
 /// it. Just Smaller never trusts a tool: a result that looks different, lost its
 /// colour profile or orientation, or can't be decoded is thrown away.
 enum Verifier {
+    /// Whether `verify` with `pixelsMustMatch` compares a format's image data
+    /// exactly, so a result that passes is proven identical. An SVG is
+    /// compared by its rendering, which doesn't prove it identical.
+    static func comparesExactly(_ format: ImageFormat) -> Bool {
+        switch format {
+        case .png, .gif, .webp, .jpeg, .heic, .jxl: true
+        case .svg: false
+        }
+    }
+
     /// `exactUnderAlpha` false allows a different colour under fully
     /// transparent pixels (lossy mode's lossless steps); visible pixels must
     /// still match.
