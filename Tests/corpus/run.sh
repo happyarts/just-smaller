@@ -7,15 +7,18 @@
 # not grow, raster images must decode pixel-identical (imgcmp.swift, via
 # ImageIO), JPEGs must keep their DCT coefficients (jpegcmp), SVGs must render
 # the same, and files named broken-* or unchanged-* must be left byte-for-byte
-# alone; what a photo's Google container lists (images, a video) must lie
-# where its directory says, the same images and bytes, and Ultra HDR results
-# must decode in Google's libultrahdr as before (if built:
-# build-ultrahdr.sh). Google's XMP in the JPEGs is read a second time by an
-# independent reader (google-xmp.py) and must read the same. --private runs
-# your own photos in Testkorpus/private (a folder or a link to one; never in
-# a repository) the same way. Result sizes are compared with the last
-# baseline so that a compression regression shows up even when everything is
-# still lossless.
+# alone; what a photo's Google container lists (images, a video) must lie where
+# its directory says, the same images and bytes, and Ultra HDR results must
+# decode in Google's libultrahdr as before (if built: build-ultrahdr.sh). A
+# photo whose multi-picture index lay behind its tables and lies in front of
+# them in the result is compared with the original as it reads with its index in
+# front (moved by the runner's own reader); the tool reports "HDR marking
+# repaired" exactly when ImageIO shows more auxiliary images in that original.
+# Google's XMP in the JPEGs is read a second time by an independent reader
+# (google-xmp.py) and must read the same. --private runs your own photos in
+# Testkorpus/private (a folder or a link to one; never in a repository) the same
+# way. Result sizes are compared with the last baseline so that a compression
+# regression shows up even when everything is still lossless.
 #
 # --lossy runs with loss (just-smaller --lossy) and writes the results into an
 # output folder (--output), so the originals must stay byte for byte as they
@@ -114,10 +117,31 @@ for line in open(os.path.join(work, "results.jsonl")):
     records[os.path.basename(r["file"])] = r
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
         fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("reason", "")))
-def jpeg_images(path):
-    """Each JPEG in the file from its SOI to its EOI: the first, then those its
-    multi-picture index (MPF) lists, found where the index says they start."""
-    b = open(path, "rb").read()
+def mp_index(b):
+    """The first image's multi-picture index (MPF), an APP2 segment among its
+    headers: where the segment starts and ends, where its first table or frame
+    header starts (None when the index comes before them), the index's byte
+    order, and where each image's offset after the first is written (offsets
+    count from the index's TIFF header, 8 bytes into the segment). None
+    without an index."""
+    tables, i = None, 2
+    while b[i:i + 1] == b"\xff" and b[i + 1:i + 2] not in (b"\xda", b"\xd9", b""):
+        m, end = b[i + 1], i + 2 + int.from_bytes(b[i + 2:i + 4], "big")
+        if m == 0xE2 and b[i + 4:i + 8] == b"MPF\0":
+            t = i + 8; e = "big" if b[t:t + 2] == b"MM" else "little"
+            rd = lambda at, n: int.from_bytes(b[at:at + n], e)
+            ifd, fields = t + rd(t + 4, 4), []
+            for k in range(rd(ifd, 2)):
+                at = ifd + 2 + 12 * k
+                if rd(at, 2) == 0xB002:
+                    fields = [t + rd(at + 8, 4) + 16 * n + 8 for n in range(1, rd(at + 4, 4) // 16)]
+            return i, end, tables, e, fields
+        if tables is None and not (0xE0 <= m <= 0xEF or m == 0xFE): tables = i
+        i = end
+    return None
+def jpeg_images(b):
+    """Each JPEG in the file `b` from its SOI to its EOI: the first, then those
+    its multi-picture index (MPF) lists, found where the index says they start."""
     def end_of(i):
         i += 2
         while i + 1 < len(b) and b[i] == 0xFF:
@@ -132,24 +156,25 @@ def jpeg_images(path):
                         i = k + 2
                     i = k if k >= 0 else len(b)
         return None
-    # The index is an APP2 "MPF" segment among the first image's headers.
-    starts, m, i = [0], -1, 2
-    while b[i:i + 1] == b"\xff" and b[i + 1:i + 2] not in (b"\xda", b"\xd9", b""):
-        if b[i + 1] == 0xE2 and b[i + 4:i + 8] == b"MPF\0": m = i + 4; break
-        i += 2 + int.from_bytes(b[i + 2:i + 4], "big")
-    if m > 0:
-        t = m + 4; e = "big" if b[t:t + 2] == b"MM" else "little"
-        rd = lambda at, n: int.from_bytes(b[at:at + n], e)
-        ifd = t + rd(t + 4, 4)
-        for k in range(rd(ifd, 2)):
-            at = ifd + 2 + 12 * k
-            if rd(at, 2) == 0xB002:
-                entries = t + rd(at + 8, 4)
-                starts += [t + rd(entries + 16 * n + 8, 4) for n in range(1, rd(at + 4, 4) // 16)]
+    starts = [0]
+    if index := mp_index(b):
+        at, _, _, e, fields = index
+        starts += [at + 8 + int.from_bytes(b[f:f + 4], e) for f in fields]
     out = []
     for s in starts:
         if b[s:s + 2] != b"\xff\xd8" or (e := end_of(s)) is None: break
         out.append(b[s:e])
+    return out
+def index_in_front(b, index):
+    """The file `b` with its multi-picture index (`mp_index`) moved in front of
+    its tables and frame header, where ImageIO looks for it, and the image
+    offsets moved with it. Nothing else moves: the photo keeps its length."""
+    at, end, tables, e, fields = index
+    out = bytearray(b)
+    out[tables:end] = b[at:end] + b[tables:at]
+    for f in fields:
+        f -= at - tables
+        out[f:f + 4] = (int.from_bytes(out[f:f + 4], e) + at - tables).to_bytes(4, e)
     return out
 def format_of(h):
     if h[:3] == b"\xff\xd8\xff": return "JPEG"
@@ -206,6 +231,18 @@ for n in names:
     if n in baseline and sb > baseline[n]:
         why = rec.get("reason") or "+".join(tools) or rec.get("status", "")
         regress.append((n, baseline[n], f"{sb}  ({why})"))
+    # An original whose multi-picture index lay behind its tables and lies in
+    # front of them in the result is compared as it reads with its index in
+    # front. The tool reports "HDR marking repaired" exactly when ImageIO
+    # shows more auxiliary images then (a gain map it didn't see).
+    index, front = mp_index(whole_a) if kind == ".jpg" else None, None
+    if index and index[2] is not None and (after := mp_index(whole_b)) and after[2] is None and after[4]:
+        front = os.path.join(work, "index-in-front.jpg"); open(front, "wb").write(index_in_front(whole_a, index))
+    seen = front and re.search(r"HDR (\d+) auxiliary images.* vs (\d+) auxiliary images",
+                               subprocess.run([imgcmp, "--no-pixels", a, front], capture_output=True, text=True).stdout)
+    repaired = bool(seen) and int(seen[2]) > int(seen[1])
+    if repaired != ("HDR marking repaired" in tools):
+        fails.append((n, "INDEX MOVED, NOT REPORTED" if repaired else "REPORTS A REPAIR IT DIDN'T MAKE"))
     if same: continue
     cat[3] += 1
     if (fa := format_of(whole_a)) != (fb := format_of(whole_b)): fails.append((n, f"FORMAT {fa} -> {fb}")); continue
@@ -213,7 +250,7 @@ for n in names:
         # ImageIO decodes identical DCT data differently depending on the
         # Huffman tables; the coefficients are the exact proof. jpegcmp reads
         # one image: a file that holds several is compared image by image.
-        ia, ib = jpeg_images(a), jpeg_images(b)
+        ia, ib = jpeg_images(whole_a), jpeg_images(whole_b)
         if len(ia) != len(ib): fails.append((n, f"IMAGES: {len(ia)} -> {len(ib)}"))
         tail = whole_a[len(ia[0]):] if ia else b""
         pa, pb = os.path.join(work, "image-a.jpg"), os.path.join(work, "image-b.jpg")
@@ -251,7 +288,7 @@ for n in names:
                     if r.returncode != 0: fails.append((n, "COEFFICIENTS (container item): " + (r.stdout + r.stderr).strip()))
         elif (said["lists"] or said["motion"] and b"ftyp" in tail) and not whole_b.endswith(tail):
             fails.append((n, "WHAT FOLLOWS THE PHOTO CHANGED (GOOGLE CONTAINER)"))
-        r = subprocess.run([imgcmp, "--no-pixels", a, b], capture_output=True, text=True)
+        r = subprocess.run([imgcmp, "--no-pixels", front or a, b], capture_output=True, text=True)
         if any(w in r.stdout for w in ("orientation", "profile", "HDR")) or lost and r.returncode: fails.append((n, r.stdout.strip()))
         # Google's own decoder, a second opinion on HDR gain maps: an Ultra
         # HDR original and its result decode to the same HDR picture.

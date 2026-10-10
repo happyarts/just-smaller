@@ -39,6 +39,11 @@ sizes have their own baseline (`baseline-TIER-lossy.tsv`).
 - JPEGs keep their DCT coefficients (`jpegcmp`): ImageIO decodes identical DCT
   data differently depending on Huffman tables
 - colour profile and EXIF orientation survive metadata stripping
+- a photo whose multi-picture index lay behind its tables and lies in front
+  of them in the result is compared with the original as it reads with the
+  index in front (moved by the runner itself); "HDR marking repaired" is
+  reported exactly when ImageIO shows more auxiliary images in that original
+  (a gain map it didn't see)
 - SVGs render the same (Quick Look thumbnail, ≤ 0.1 % antialiasing pixels)
 - `broken-*` files are left byte-for-byte alone
 - no result changes format
