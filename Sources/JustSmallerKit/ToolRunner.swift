@@ -31,96 +31,157 @@ public enum ToolRunner {
     }
 
     /// Runs a tool and waits for it. Cancelling the task terminates the process.
-    /// Output goes to files, never to pipes, so a chatty tool cannot block on a
-    /// full pipe buffer.
-    @discardableResult
+    /// What a tool prints goes to files, never to pipes this process would
+    /// have to drain, so a chatty tool cannot block on a full pipe buffer.
     /// `stderr`, if given, receives the tool's messages and is left for the
     /// caller; otherwise they are only used for the error.
     public static func run(_ name: String, _ arguments: [String], stdout: URL? = nil, stderr: URL? = nil,
-                           in directory: URL, timeout: Duration = .seconds(3600)) async throws -> Int32 {
-        guard let executable = executable(name) else {
-            throw ToolError(tool: name, status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
-        }
-        let errURL = stderr ?? directory.appending(path: "\(name)-\(UUID().uuidString).stderr")
-        FileManager.default.createFile(atPath: errURL.path, contents: nil)
-        defer { if stderr == nil { try? FileManager.default.removeItem(at: errURL) } }
+                           in directory: URL, timeout: Duration = .seconds(3600)) async throws {
+        try await run([(name, arguments)], stdout: stdout, stderr: stderr, in: directory, timeout: timeout)
+    }
 
-        let process = Process()
-        process.executableURL = executable
-        process.arguments = arguments
-        process.currentDirectoryURL = directory
-        process.qualityOfService = .utility
-        process.standardInput = FileHandle.nullDevice
-        // Closed as soon as the tool is done: some volumes (WebDAV) refuse to
+    /// Runs `name` with its standard output piped into `next`, and waits for
+    /// both: what passes between them is never written to a disk. When both
+    /// fail, the error is the first one's (the second only lacked its input);
+    /// so `next` must read all its input before it may fail on its own.
+    static func run(_ name: String, _ arguments: [String], into next: String, _ nextArguments: [String],
+                    stdout: URL? = nil, in directory: URL, timeout: Duration = .seconds(3600)) async throws {
+        try await run([(name, arguments), (next, nextArguments)], stdout: stdout, stderr: nil, in: directory, timeout: timeout)
+    }
+
+    /// Each tool's standard output is the next one's standard input; the
+    /// last one's goes to `stdout`, and `stderr` takes its messages.
+    private static func run(_ tools: [(name: String, arguments: [String])], stdout: URL?, stderr: URL?,
+                            in directory: URL, timeout: Duration) async throws {
+        let fm = FileManager.default
+        let errURLs = tools.indices.map { i in
+            (i == tools.count - 1 ? stderr : nil) ?? directory.appending(path: "\(tools[i].name)-\(UUID().uuidString).stderr")
+        }
+        defer { for url in errURLs where url != stderr { try? fm.removeItem(at: url) } }
+
+        var processes: [Process] = []
+        // Closed as soon as the tools are done: some volumes (WebDAV) refuse to
         // delete a file that is still open.
-        let errHandle = try FileHandle(forWritingTo: errURL)
-        var outHandle: FileHandle?
-        defer { try? errHandle.close(); try? outHandle?.close() }
-        process.standardError = errHandle
-        if let stdout {
-            FileManager.default.createFile(atPath: stdout.path, contents: nil)
-            outHandle = try FileHandle(forWritingTo: stdout)
-            process.standardOutput = outHandle
-        } else {
-            process.standardOutput = FileHandle.nullDevice
+        var handles: [FileHandle] = []
+        defer { for handle in handles { try? handle.close() } }
+        var input: Any = FileHandle.nullDevice
+        for (i, tool) in tools.enumerated() {
+            guard let executable = executable(tool.name) else {
+                throw ToolError(tool: tool.name, status: -1, message: String(localized: "The optimizer is missing from the app bundle.", bundle: .module))
+            }
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = tool.arguments
+            process.currentDirectoryURL = directory
+            process.qualityOfService = .utility
+            process.standardInput = input
+            fm.createFile(atPath: errURLs[i].path, contents: nil)
+            let errHandle = try FileHandle(forWritingTo: errURLs[i])
+            handles.append(errHandle)
+            process.standardError = errHandle
+            if i < tools.count - 1 {
+                // Process closes this side's ends of the pipe once the tools
+                // have started, so a tool that ends early leaves the next one
+                // at the end of its input.
+                let pipe = Pipe()
+                process.standardOutput = pipe
+                input = pipe
+            } else if let stdout {
+                fm.createFile(atPath: stdout.path, contents: nil)
+                let outHandle = try FileHandle(forWritingTo: stdout)
+                handles.append(outHandle)
+                process.standardOutput = outHandle
+            } else {
+                process.standardOutput = FileHandle.nullDevice
+            }
+            processes.append(process)
         }
 
-        // Cancellation and the time limit may come before the process has
-        // started; the guard makes sure it is stopped either way.
-        let guardian = ProcessGuard(process)
+        // Cancellation and the time limit may come before the processes have
+        // started; the guard makes sure they are stopped either way.
+        let guardian = ProcessGuard(processes)
         let watchdog = Task {
             try await Task.sleep(for: timeout)
             guardian.stop(timedOut: true)
         }
         defer { watchdog.cancel() }
         try Task.checkCancellation()
-        let status: Int32 = try await withTaskCancellationHandler {
+        try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
-                process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
-                do { try guardian.start() } catch {
-                    process.terminationHandler = nil
-                    continuation.resume(throwing: error)
+                let waiter = Waiter(count: processes.count, continuation)
+                for process in processes { process.terminationHandler = { _ in waiter.finished() } }
+                do {
+                    try guardian.start()
+                } catch {
+                    waiter.failed(error)
                 }
             }
         } onCancel: {
             guardian.stop(timedOut: false)
         }
         try Task.checkCancellation()
+        let statuses = processes.map(\.terminationStatus)
         if guardian.timedOut {
-            throw ToolError(tool: name, status: status, message: String(localized: "The optimizer took too long and was stopped.", bundle: .module))
+            throw ToolError(tool: tools[0].name, status: statuses[0],
+                            message: String(localized: "The optimizer took too long and was stopped.", bundle: .module))
         }
-        if status != 0 {
-            let output = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
-            // A full disk is no fault of the file: it fails as a full disk,
-            // not as whatever the tool's status means.
-            if output.contains(String(cString: strerror(ENOSPC))) {
-                let volume = try? directory.resourceValues(forKeys: [.volumeLocalizedNameKey]).volumeLocalizedName
-                throw CocoaError(.fileWriteOutOfSpace, userInfo: volume.map {
-                    [NSLocalizedDescriptionKey: String(localized: "Not enough free space on “\($0)” for the work files", bundle: .module)]
-                } ?? [:])
-            }
-            let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let i = statuses.firstIndex(where: { $0 != 0 }) {
+            let message = (try? String(contentsOf: errURLs[i], encoding: .utf8))?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(separator: "\n").last.map(String.init) ?? ""
-            throw ToolError(tool: name, status: status, message: message)
+            throw ToolError(tool: tools[i].name, status: statuses[i], message: message)
         }
-        return status
     }
 }
 
-/// Starts and stops a process from any thread without racing: a stop that
-/// comes before the start stops it right after it has started.
+/// Resumes once: when all processes have ended, or starting them failed.
+private final class Waiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var running: Int
+    private var continuation: CheckedContinuation<Void, any Error>?
+
+    init(count: Int, _ continuation: CheckedContinuation<Void, any Error>) {
+        running = count
+        self.continuation = continuation
+    }
+
+    func finished() {
+        lock.lock(); defer { lock.unlock() }
+        running -= 1
+        guard running == 0 else { return }
+        continuation?.resume()
+        continuation = nil
+    }
+
+    func failed(_ error: any Error) {
+        lock.lock(); defer { lock.unlock() }
+        continuation?.resume(throwing: error)
+        continuation = nil
+    }
+}
+
+/// Starts and stops processes from any thread without racing: a stop that
+/// comes before the start stops them right after they have started. If one
+/// can't start, those already running are stopped.
 private final class ProcessGuard: @unchecked Sendable {
-    private let process: Process
+    private let processes: [Process]
     private let lock = NSLock()
     private var stopped = false
     private(set) var timedOut = false
 
-    init(_ process: Process) { self.process = process }
+    init(_ processes: [Process]) { self.processes = processes }
 
     func start() throws {
         lock.lock(); defer { lock.unlock() }
-        try process.run()
-        if stopped { process.terminate() }
+        for (i, process) in processes.enumerated() {
+            do {
+                try process.run()
+            } catch {
+                for started in processes[..<i] { started.terminate() }
+                throw error
+            }
+        }
+        if stopped { for process in processes { process.terminate() } }
     }
 
     func stop(timedOut: Bool) {
@@ -128,6 +189,6 @@ private final class ProcessGuard: @unchecked Sendable {
         guard !stopped else { return }
         stopped = true
         if timedOut { self.timedOut = true }
-        if process.isRunning { process.terminate() }
+        for process in processes where process.isRunning { process.terminate() }
     }
 }

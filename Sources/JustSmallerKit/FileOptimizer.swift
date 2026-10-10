@@ -99,7 +99,7 @@ public struct FileOptimizer: Sendable {
         facts.jpegLayout = jpegLayout
         // A JPEG XL is stored anew from the JPEG it holds: that JPEG must
         // rebuild and be one a JPEG XL shows in full.
-        if format == .jxl, facts.isJPEGInJXL, let reason = try await FileConverter.obstacleToRecompressing(url) {
+        if format == .jxl, facts.isJPEGInJXL, let reason = await FileConverter.obstacleToRecompressing(url) {
             return .skipped(reason: reason, size: size)
         }
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
@@ -397,7 +397,7 @@ public struct FileOptimizer: Sendable {
         }
     }
 
-    static func isOutOfSpace(_ error: any Error) -> Bool {
+    private static func isOutOfSpace(_ error: any Error) -> Bool {
         let error = error as NSError
         return (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
             || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))

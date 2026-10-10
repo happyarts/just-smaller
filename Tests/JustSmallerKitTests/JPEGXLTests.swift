@@ -150,27 +150,25 @@ final class JPEGXLTests {
         return volume
     }
 
-    /// A JPEG whose pixels, unpacked for the check, take 9 MB.
-    private func large(on volume: DiskImage) throws -> URL {
-        let url = volume.mount.appending(path: "large.jpg")
-        try FileManager.default.moveItem(at: jpeg("large.jpg", width: 2000, height: 1500), to: url)
-        return url
-    }
-
-    @Test func convertsOnAMemoryCardTooSmallForTheCheck() async throws {
-        let card = try volume("MS-DOS")
-        let original = try large(on: card)
+    @Test func convertsOnADiskTooSmallForThePixels() async throws {
+        // Its pixels, unpacked for the check, take 9 MB; the disk has less.
+        let original = try volume("APFS").mount.appending(path: "large.jpg")
+        try FileManager.default.moveItem(at: jpeg("large.jpg", width: 2000, height: 1500), to: original)
         let jxl = try #require(result(try await convert(original, to: .jxl)))
         #expect(!FileManager.default.fileExists(atPath: original.path))
         #expect(FileManager.default.fileExists(atPath: jxl.path))
     }
 
-    @Test func aFullDiskIsSaidToBeFull() async throws {
-        let disk = try volume("APFS")
-        let original = try large(on: disk)
-        let before = try Data(contentsOf: original)
-        await #expect { try await self.convert(original, to: .jxl) } throws: { FileOptimizer.isOutOfSpace($0) }
-        #expect(try Data(contentsOf: original) == before)
+    @Test func worksOnTheFilesVolumeOnlyWhereItClones() throws {
+        for (fileSystem, onVolume) in [("APFS", true), ("MS-DOS", false)] {
+            let disk = try volume(fileSystem)
+            let file = disk.mount.appending(path: "photo.jpg")
+            try Data([0xFF, 0xD8]).write(to: file)
+            let (work, _) = try FileOptimizer.workCopy(of: file, named: "source.jpg")
+            defer { try? FileManager.default.removeItem(at: work) }
+            let id = { (url: URL) in try url.resourceValues(forKeys: [.volumeIdentifierKey]).volumeIdentifier as? NSObject }
+            #expect(try (id(work) == id(disk.mount)) == onVolume, "\(fileSystem)")
+        }
     }
 
     @Test func deletesAPrecomposedNameOnExFAT() async throws {

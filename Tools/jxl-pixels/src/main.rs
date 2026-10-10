@@ -1,14 +1,16 @@
 //! jxl-pixels — decodes a JPEG XL image to 8-bit RGB with jxl-rs.
 //!
-//!     jxl-pixels INPUT.jxl OUTPUT.ppm
+//!     jxl-pixels INPUT.jxl > OUTPUT.ppm
+//!     jxl-pixels --orientation INPUT.jxl
 //!
 //! jxl-rs (BSD-3) is the decoder Chrome and Firefox use, written apart from
-//! libjxl. The image is written as it is stored — its orientation turned
-//! back — in the colour space it is coded in: for a JPEG turned into JPEG XL
-//! that is the JPEG's own, so the pixels can be compared with what a JPEG
-//! decoder makes of the JPEG. Prints the orientation the file states
-//! (1–8, as in EXIF): "orientation 6". Only the first frame; alpha and other
-//! extra channels are left out.
+//! libjxl. The image is written to standard output as a binary PPM, as it is
+//! stored — its orientation turned back — in the colour space it is coded
+//! in: for a JPEG turned into JPEG XL that is the JPEG's own, so the pixels
+//! can be compared with what a JPEG decoder makes of the JPEG (piped into
+//! `jpegcmp --pixels JPEG -`). Only the first frame; alpha and other extra
+//! channels are left out. With --orientation, only the header is read and
+//! the orientation it states is printed (1–8, as in EXIF): "orientation 6".
 //! Exit status: 0 written, 1 error.
 
 use std::io::Write;
@@ -22,11 +24,15 @@ const SAMPLE_LIMIT: usize = 1 << 30;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let [input, output] = args.as_slice() else {
-        eprintln!("usage: jxl-pixels INPUT.jxl OUTPUT.ppm");
-        return ExitCode::from(1);
+    let result = match args.as_slice() {
+        [flag, input] if flag == "--orientation" => orientation(input),
+        [input] => pixels(input),
+        _ => {
+            eprintln!("usage: jxl-pixels INPUT.jxl > OUTPUT.ppm\n       jxl-pixels --orientation INPUT.jxl");
+            return ExitCode::from(1);
+        }
     };
-    match run(input, output) {
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("jxl-pixels: {e}");
@@ -35,19 +41,35 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(input: &str, output: &str) -> Result<(), String> {
-    let data = std::fs::read(input).map_err(|e| format!("can't read input: {e}"))?;
-    let mut rest: &[u8] = &data;
+/// The decoder with the file's header read, and the rest of the file.
+fn header(data: &[u8]) -> Result<(JxlDecoder<states::WithImageInfo>, &[u8]), String> {
+    let mut rest = data;
     let mut options = JxlDecoderOptions::default();
     // Oriented pixels; turned back below. (jxl-rs 0.7 ignores this switch
     // and always orients, so it is set explicitly to what it does.)
     options.adjust_orientation = true;
     options.sample_limit = Some(SAMPLE_LIMIT);
     let decoder = JxlDecoder::<states::Initialized>::new(options);
-    let mut decoder = match decoder.process(&mut rest, None).map_err(|e| format!("{e:?}"))? {
-        ProcessingResult::Complete { result } => result,
-        ProcessingResult::NeedsMoreInput { .. } => return Err("the file is incomplete".into()),
-    };
+    match decoder.process(&mut rest, None).map_err(|e| format!("{e:?}"))? {
+        ProcessingResult::Complete { result } => Ok((result, rest)),
+        ProcessingResult::NeedsMoreInput { .. } => Err("the file is incomplete".into()),
+    }
+}
+
+fn read(input: &str) -> Result<Vec<u8>, String> {
+    std::fs::read(input).map_err(|e| format!("can't read input: {e}"))
+}
+
+fn orientation(input: &str) -> Result<(), String> {
+    let data = read(input)?;
+    let (decoder, _) = header(&data)?;
+    println!("orientation {}", decoder.basic_info().orientation as usize);
+    Ok(())
+}
+
+fn pixels(input: &str) -> Result<(), String> {
+    let data = read(input)?;
+    let (mut decoder, mut rest) = header(&data)?;
     let extra = decoder.basic_info().extra_channels.len();
     let orientation = decoder.basic_info().orientation as usize;
     decoder.set_pixel_format(JxlPixelFormat::rgba8(extra)).map_err(|e| format!("{e:?}"))?;
@@ -79,16 +101,17 @@ fn run(input: &str, output: &str) -> Result<(), String> {
             _ => (x, y),
         }
     };
-    let mut ppm = Vec::with_capacity(w * h * 3 + 32);
-    write!(ppm, "P6\n{w} {h}\n255\n").map_err(|e| e.to_string())?;
-    for y in 0..h {
-        for x in 0..w {
-            let (sx, sy) = shown(x, y);
-            let i = (sy * width + sx) * 4;
-            ppm.extend_from_slice(&rgba[i..i + 3]);
+    let write = || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(std::io::stdout().lock());
+        write!(out, "P6\n{w} {h}\n255\n")?;
+        for y in 0..h {
+            for x in 0..w {
+                let (sx, sy) = shown(x, y);
+                let i = (sy * width + sx) * 4;
+                out.write_all(&rgba[i..i + 3])?;
+            }
         }
-    }
-    std::fs::write(output, ppm).map_err(|e| format!("can't write output: {e}"))?;
-    println!("orientation {orientation}");
-    Ok(())
+        out.flush()
+    };
+    write().map_err(|e| format!("can't write output: {e}"))
 }

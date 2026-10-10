@@ -149,8 +149,8 @@ public struct FileConverter: Sendable {
             try await Verifier.verify(original: source, result: filtered, format: .jpeg, pixelsMustMatch: true,
                                       structure: StructureCheck.Reference(original: source, format: .jpeg, level: level))
             jpeg = filtered
-        } catch where error is CancellationError || FileOptimizer.isOutOfSpace(error) {
-            throw error
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             // Removing private data is a promise: without it, no conversion.
             if level != .keep {
@@ -207,8 +207,8 @@ public struct FileConverter: Sendable {
 
     /// Why a JPEG XL made from a JPEG can't be stored anew, or nil: its
     /// JPEG doesn't rebuild (edited since, damaged), holds more than the
-    /// photo, or has Content Credentials. A full disk throws.
-    static func obstacleToRecompressing(_ jxl: URL) async throws -> String? {
+    /// photo, or has Content Credentials.
+    static func obstacleToRecompressing(_ jxl: URL) async -> String? {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? fm.removeItem(at: work) }
@@ -216,8 +216,6 @@ public struct FileConverter: Sendable {
         do {
             try fm.createDirectory(at: work, withIntermediateDirectories: true)
             try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
-        } catch where FileOptimizer.isOutOfSpace(error) {
-            throw error
         } catch {
             return String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module)
         }

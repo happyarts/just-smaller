@@ -17,9 +17,10 @@
 // With --pixels, decodes JPEG to RGB (libjpeg-turbo's defaults, without
 // applying an orientation) and compares it with an 8-bit binary PPM of the
 // same size, as another decoder (of another format holding the same image)
-// produced it. Prints the mean absolute difference, the largest mean of any
-// 8x8 block and the largest single difference, in 8-bit steps:
-// "mean 0.46 block 0.93 max 5". Exit status 0 compared, 1 different size.
+// produced it; PPM "-" reads it from standard input. Prints the mean
+// absolute difference, the largest mean of any 8x8 block and the largest
+// single difference, in 8-bit steps: "mean 0.46 block 0.93 max 5". Exit
+// status 0 compared, 1 different size.
 //
 // Exit status: 0 identical, 1 different, 2 unreadable, 3 the result reads
 // only with warnings (damaged data, bytes where a marker belongs).
@@ -111,8 +112,10 @@ static unsigned char *read_ppm(FILE *file, unsigned *width, unsigned *height) {
 }
 
 static int compare_pixels(const char *jpeg_path, const char *ppm_path) {
-    FILE *fj = fopen(jpeg_path, "rb"), *fp = fopen(ppm_path, "rb");
+    FILE *fj = fopen(jpeg_path, "rb"), *fp = strcmp(ppm_path, "-") == 0 ? stdin : fopen(ppm_path, "rb");
     if (!fj || !fp) {
+        if (fj) fclose(fj);
+        if (fp) fclose(fp);
         fprintf(stderr, "jpegcmp: can't open input\n");
         return 2;
     }

@@ -110,7 +110,9 @@ for n in names:
         fails.append((n, "CAN'T BE REBUILT")); continue
     c = subprocess.run([jpegcmp, a, rebuilt], capture_output=True, text=True)
     if c.returncode != 0: fails.append((n, "REBUILT COEFFICIENTS: " + (c.stdout + c.stderr).strip()))
-    if subprocess.run([pixels, jxl, ppm], capture_output=True).returncode != 0:
+    with open(ppm, "wb") as out:
+        decoded = subprocess.run([pixels, jxl], stdout=out, stderr=subprocess.DEVNULL).returncode == 0
+    if not decoded:
         fails.append((n, "JXL-RS CAN'T DECODE IT")); continue
     p = subprocess.run([jpegcmp, "--pixels", a, ppm], capture_output=True, text=True)
     m = re.search(r"mean ([0-9.]+) block ([0-9.]+) max (\d+)", p.stdout)

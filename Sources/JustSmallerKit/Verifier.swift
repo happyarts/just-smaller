@@ -145,9 +145,8 @@ enum Verifier {
         }
 
         let rebuilt = work.appending(path: "rebuilt-\(UUID().uuidString).jpg")
-        let pixels = work.appending(path: "pixels-\(UUID().uuidString).ppm")
         let output = work.appending(path: "pixels-\(UUID().uuidString).txt")
-        defer { for url in [rebuilt, pixels, output] { try? FileManager.default.removeItem(at: url) } }
+        defer { for url in [rebuilt, output] { try? FileManager.default.removeItem(at: url) } }
         if !isRebuilt {
             do {
                 try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
@@ -160,7 +159,7 @@ enum Verifier {
         }
 
         do {
-            try await ToolRunner.run("jxl-pixels", [jxl.path, pixels.path], stdout: output, in: work)
+            try await ToolRunner.run("jxl-pixels", ["--orientation", jxl.path], stdout: output, in: work)
         } catch is ToolError {
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
         }
@@ -168,9 +167,10 @@ enum Verifier {
         guard stated == FileFacts.orientation(of: try Data(contentsOf: jpeg, options: .alwaysMapped)) else {
             throw VerificationError(reason: String(localized: "orientation lost", bundle: .module))
         }
+        // The decoded pixels go straight from one tool to the other.
         do {
-            try await ToolRunner.run("jpegcmp", ["--pixels", jpeg.path, pixels.path], stdout: output, in: work)
-        } catch let error as ToolError where error.status == 1 {
+            try await ToolRunner.run("jxl-pixels", [jxl.path], into: "jpegcmp", ["--pixels", jpeg.path, "-"], stdout: output, in: work)
+        } catch let error as ToolError where error.tool == "jpegcmp" && error.status == 1 {
             throw VerificationError(reason: String(localized: "different dimensions", bundle: .module))
         } catch is ToolError {
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
