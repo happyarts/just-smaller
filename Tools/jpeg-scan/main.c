@@ -24,7 +24,8 @@
 // with optimal length-limited ones (package-merge).
 //
 // Exit status: 0 written, 2 unreadable or failed, 3 not supported (12-bit
-// or lossless JPEG, damaged image data): the caller keeps the input.
+// or lossless JPEG, coefficients out of range), 4 damaged image data: the
+// caller keeps the input.
 
 #include <dispatch/dispatch.h>
 #include <os/lock.h>
@@ -2092,7 +2093,7 @@ int main(int argc, char **argv) {
     // might still recover more from the original.
     if (src.err->num_warnings > 0) {
         fprintf(stderr, "jpeg-scan: damaged image data, left alone\n");
-        return 3;
+        return 4;
     }
 
     Image img;

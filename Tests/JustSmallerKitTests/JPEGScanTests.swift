@@ -116,10 +116,14 @@ final class JPEGScanTests {
     }
 
     /// libjpeg fills in what it can't read; a rewrite would make that final.
+    /// Damaged data (4) is told apart from a JPEG it doesn't handle (3).
     @Test func damagedDataIsLeftAlone() throws {
         let good = try Data(contentsOf: jpeg("whole.jpg", width: 120, height: 80))
         let damaged = dir.appending(path: "damaged.jpg")
         try good.prefix(good.count * 2 / 3).write(to: damaged)
-        #expect(try run("jpeg-scan", [damaged.path, dir.appending(path: "out-damaged.jpg").path]) == 3)
+        #expect(try run("jpeg-scan", [damaged.path, dir.appending(path: "out-damaged.jpg").path]) == 4)
+        let lossless = dir.appending(path: "lossless.jpg")
+        try TestImages.losslessJPEG.write(to: lossless)
+        #expect(try run("jpeg-scan", [lossless.path, dir.appending(path: "out-lossless.jpg").path]) == 3)
     }
 }

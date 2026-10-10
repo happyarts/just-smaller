@@ -246,7 +246,7 @@ public struct FileOptimizer: Sendable {
         guard best != source else {
             // Nothing came of it: when the original itself isn't sound, that
             // is the reason, not what a tool or a check said about it.
-            let damage = lastError != nil || metadataFailure != nil ? StructureCheck.damage(of: source, format: format) : nil
+            let damage = lastError != nil || metadataFailure != nil ? await Verifier.damage(of: source, format: format) : nil
             if damage == nil, metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {

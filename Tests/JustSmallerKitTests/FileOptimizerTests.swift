@@ -1164,6 +1164,26 @@ final class FileOptimizerTests {
         b[marker + 1] = 0xD7
         try b.write(to: jpeg)
         try await staysDamaged(jpeg, .removePrivate)
+
+        // A sound structure whose image data the decoder finds damaged (bytes
+        // near the end of the last scan zeroed), in the photo and in a gain
+        // map, at every level. The photo as written at "keep" already, so
+        // that there only jpeg-scan reads its image data.
+        var keep = settings
+        keep.metadata = .keep
+        let sound = TestImages.gainMapPhoto(at: dir.appending(path: "gain-map.jpg"))
+        guard case .optimized = try await FileOptimizer(settings: keep).optimize(sound, progress: { _ in }) else {
+            Issue.record("the sound photo wasn't optimized"); return
+        }
+        let photo = try Data(contentsOf: sound)
+        for (n, image) in try #require(JPEGLayout.read(ByteView(photo))?.images).enumerated() {
+            var damaged = photo
+            damaged.resetBytes(in: image.upperBound - 48..<image.upperBound - 16)
+            let url = dir.appending(path: "damaged-data-\(n).jpg")
+            try damaged.write(to: url)
+            #expect(StructureCheck.damage(of: url, format: .jpeg) == nil, "image \(n + 1)")
+            for level in MetadataHandling.allCases { try await staysDamaged(url, level) }
+        }
     }
 
     @Test func originalGoesToTrashAndCanBeFound() async throws {

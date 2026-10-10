@@ -277,7 +277,8 @@ enum Pipeline {
     /// Tools/jpeg-scan: finds the progressive scan split that codes this
     /// image's coefficients smallest, and writes it with libjpeg-turbo.
     /// Exit status 3: a JPEG it doesn't handle (12-bit, lossless,
-    /// arithmetic); that image stays as it was.
+    /// coefficients out of range); that image stays as it was. Damaged image
+    /// data (4) fails the step, so the optimizer can say why the file stays.
     static func jpegScan(effort: Effort, layout: JPEGLayout?) -> Candidate {
         Candidate(name: "jpeg-scan") { input, output, work in
             // Gaps the metadata step left stay.

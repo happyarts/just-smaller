@@ -265,26 +265,56 @@ enum Verifier {
             group.addTask { try await jpegcmp(original, result) }
             for pair in pairs {
                 group.addTask {
-                    let a = folder.appending(path: "image-\(UUID().uuidString).jpg"), b = folder.appending(path: "image-\(UUID().uuidString).jpg")
-                    defer { try? FileManager.default.removeItem(at: a); try? FileManager.default.removeItem(at: b) }
-                    try pair.original.write(to: a)
-                    try pair.result.write(to: b)
-                    try await jpegcmp(a, b)
+                    try await withFile(pair.original, in: folder) { a in
+                        try await withFile(pair.result, in: folder) { b in try await jpegcmp(a, b) }
+                    }
                 }
             }
             try await group.waitForAll()
         }
     }
 
-    private static func jpegcmp(_ original: URL?, _ result: URL) async throws {
+    /// `unreadableIsSound`: an image libjpeg can't read at all passes (a
+    /// lossless JPEG has no coefficients to read, which is not damage).
+    private static func jpegcmp(_ original: URL?, _ result: URL, unreadableIsSound: Bool = false) async throws {
         do {
             try await ToolRunner.run("jpegcmp", [original?.path ?? "--check", result.path], in: result.deletingLastPathComponent())
         } catch let error as ToolError where error.status == 1 {
             throw VerificationError(reason: String(localized: "pixels changed", bundle: .module))
         } catch let error as ToolError where error.status == 2 {
+            if unreadableIsSound { return }
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
         } catch let error as ToolError where error.status == 3 {
             throw VerificationError(reason: String(localized: "the decoder reports damaged data", bundle: .module))
+        }
+    }
+
+    /// `body` with `image` in a file of its own in `folder`, removed afterwards.
+    private static func withFile<T>(_ image: Data, in folder: URL, _ body: (URL) async throws -> T) async throws -> T {
+        let file = folder.appending(path: "image-\(UUID().uuidString).jpg")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try image.write(to: file)
+        return try await body(file)
+    }
+
+    /// Why an original isn't sound in itself, or nil, to say why a file
+    /// stays as it is: how its structure reads and, for a JPEG, what libjpeg
+    /// reports reading each image (damaged data it filled in).
+    static func damage(of url: URL, format: ImageFormat) async -> String? {
+        if let reason = StructureCheck.damage(of: url, format: format) { return reason }
+        guard format == .jpeg, let data = try? Data(contentsOf: url, options: .alwaysMapped),
+              let images = JPEGLayout.read(ByteView(data))?.images
+        else { return nil }
+        let folder = url.deletingLastPathComponent()
+        do {
+            // The first image: jpegcmp reads it from the whole file.
+            try await jpegcmp(nil, url, unreadableIsSound: true)
+            for image in images.dropFirst() {
+                try await withFile(data.subdata(in: image), in: folder) { try await jpegcmp(nil, $0, unreadableIsSound: true) }
+            }
+            return nil
+        } catch {
+            return (error as? VerificationError)?.reason
         }
     }
 
