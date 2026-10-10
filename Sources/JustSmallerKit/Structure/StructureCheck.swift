@@ -65,13 +65,20 @@ enum StructureCheck {
         }
     }
 
-    /// The original by the same rules, on its own: whether it is sound in
-    /// itself, to say why a file stays as it is. A JPEG's images each on
-    /// their own; the rules around them hold a result to its original.
-    static func verifyOriginal(_ url: URL, format: ImageFormat) throws {
-        guard format == .jpeg else { return try verify(result: url, against: Reference(original: url, format: format)) }
-        let b = ByteView(try Data(contentsOf: url, options: .alwaysMapped))
-        try reporting { try JPEGCheck.checkImages(b) }
+    /// Why the original isn't sound in itself, read by the same rules, or
+    /// nil when it is (or can't be read again): to say why a file stays as
+    /// it is. A JPEG's images each on their own; the rules around them hold
+    /// a result to its original.
+    static func damage(of url: URL, format: ImageFormat) -> String? {
+        do {
+            switch format {
+            case .jpeg: try reporting { try JPEGCheck.checkImages(ByteView(Data(contentsOf: url, options: .alwaysMapped))) }
+            default: try verify(result: url, against: Reference(original: url, format: format))
+            }
+            return nil
+        } catch {
+            return (error as? VerificationError)?.reason
+        }
     }
 
     /// A check's finding as the reason a file is rejected.

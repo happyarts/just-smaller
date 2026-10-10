@@ -75,35 +75,6 @@ final class RestartMarkerTests {
         return url
     }
 
-    /// What a JPEG image says about restarts, read byte by byte: its
-    /// interval and where its DRI segment starts, and for each scan its
-    /// components and where each of its restart markers starts.
-    struct Restarts {
-        var interval = 0, dri: Int?
-        var scans: [(components: Int, markers: [Int])] = []
-    }
-
-    static func restarts(_ d: Data, from start: Int = 0) -> Restarts {
-        let d = [UInt8](d)
-        var r = Restarts(), i = start + 2
-        while i + 6 <= d.count, d[i] == 0xFF, d[i + 1] != 0xD9 {
-            let marker = d[i + 1], length = Int(d[i + 2]) << 8 | Int(d[i + 3])
-            if marker == 0xDD { (r.interval, r.dri) = (Int(d[i + 4]) << 8 | Int(d[i + 5]), i) }
-            let components = Int(d[i + 4])
-            i += 2 + length
-            guard marker == 0xDA else { continue }
-            // The entropy-coded data, up to the next marker that isn't a restart.
-            var markers: [Int] = []
-            while i + 1 < d.count {
-                if d[i] == 0xFF, (0xD0...0xD7).contains(d[i + 1]) { markers.append(i); i += 2; continue }
-                if d[i] == 0xFF, d[i + 1] != 0 { break }
-                i += 1
-            }
-            r.scans.append((components, markers))
-        }
-        return r
-    }
-
     /// Whether the structure check rejects `bytes` as the result of optimizing `original`.
     private func rejects(_ bytes: Data, original: URL) throws -> Bool {
         do {
@@ -126,7 +97,7 @@ final class RestartMarkerTests {
     func optimizedWithTheSameCoefficients(fixture: Fixture) async throws {
         let url = try file(fixture, "\(fixture).jpg")
         let original = try Data(contentsOf: url)
-        let r = Self.restarts(original)
+        let r = TestImages.restarts(original)
         switch fixture {
         case .baseline:
             #expect(r.interval > 0 && r.scans.count == 1 && r.scans[0].markers.count > 8)
@@ -154,7 +125,7 @@ final class RestartMarkerTests {
         let original = try Data(contentsOf: url)
         let filtered = try JPEGMetadataFilter.filter(original, level: .removePrivate, orientation: 1)
         if fixture == .baseline { #expect(filtered != original) }
-        let before = Self.restarts(original), after = Self.restarts(filtered)
+        let before = TestImages.restarts(original), after = TestImages.restarts(filtered)
         #expect(after.interval == before.interval)
         func scans(_ d: Data) throws -> Data { d.suffix(from: d.startIndex + (try JPEGMarkers.headers(ByteView(d)).scan)) }
         #expect(try scans(filtered) == scans(original))
@@ -178,7 +149,7 @@ final class RestartMarkerTests {
         try await ToolRunner.run("jpeg-scan", [url.path, rewritten.path], in: dir)
         #expect(try !rejects(try Data(contentsOf: rewritten), original: url))
 
-        let r = Self.restarts(b)
+        let r = TestImages.restarts(b)
         let dri = try #require(r.dri)
         // The scan whose markers are damaged: for the progressive JPEG one of a chroma component.
         let scan = try #require(fixture == .baseline ? r.scans.first : r.scans.first { $0.components == 1 && $0.markers.count == 5 })
@@ -204,7 +175,7 @@ final class RestartMarkerTests {
         let url = TestImages.gainMapPhoto(at: dir.appending(path: "gain-map.jpg"))
         let b = try Data(contentsOf: url)
         let gainMap = try #require(JPEGLayout.read(ByteView(b))?.images.dropFirst().first)
-        let r = Self.restarts(b, from: gainMap.lowerBound)
+        let r = TestImages.restarts(b, from: gainMap.lowerBound)
         #expect(r.scans.count == 1 && r.scans[0].components == 1 && r.scans[0].markers.count > 1)
         #expect(try !rejects(b, original: url))
         var outOfTurn = b

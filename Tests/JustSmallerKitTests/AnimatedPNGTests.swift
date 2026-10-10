@@ -295,7 +295,7 @@ final class AnimatedPNGTests {
         case .skipped(let reason, _):
             #expect(["The file is damaged or incomplete", "Die Datei ist beschädigt oder unvollständig"].contains(reason))
         case .unchanged(let reason, _, _):
-            #expect(["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) }, "\(reason)")
+            #expect(TestImages.isDamaged(reason), "\(reason)")
         case let outcome:
             Issue.record("\(outcome)")
         }

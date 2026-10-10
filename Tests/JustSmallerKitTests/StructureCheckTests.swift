@@ -72,9 +72,24 @@ final class StructureCheckTests {
             (write("a.heic", .heic), .heic),
             (try await webp(), .webp),
         ]
-        for (url, format) in files {
+        // Sound originals don't count as damaged either, a JPEG with a gain map included.
+        let gainMap = TestImages.gainMapPhoto(at: dir.appending(path: "gain-map.jpg"))
+        for (url, format) in files + [(gainMap, .jpeg)] {
             #expect(try !rejects(bytes(url), original: url, format), "\(url.lastPathComponent)")
+            #expect(StructureCheck.damage(of: url, format: format) == nil, "\(url.lastPathComponent)")
         }
+        // An index whose first size runs past the photo, as cameras write it:
+        // read as it means, so sound, though a result must have it exact.
+        let photo = try Data(contentsOf: gainMap)
+        func be32(_ v: Int) -> Data { Data(withUnsafeBytes(of: UInt32(v).bigEndian, Array.init)) }
+        let size = try #require(JPEGLayout.read(ByteView(photo))?.images.first?.count)
+        let mpf = try #require(try JPEGMarkers.headers(ByteView(photo)).segments.first { $0.marker == 0xE2 && $0.payload.bytes.starts(with: Data("MPF\0".utf8)) })
+        let at = try #require(photo.range(of: be32(size) + be32(0), in: mpf.offset..<mpf.end)).lowerBound
+        let camera = dir.appending(path: "camera-index.jpg")
+        try (photo[..<at] + be32(size + 70) + photo[(at + 4)...]).write(to: camera)
+        #expect(JPEGLayout.read(ByteView(try Data(contentsOf: camera)))?.problem == nil)
+        #expect(try rejects(bytes(camera), original: camera, .jpeg))
+        #expect(StructureCheck.damage(of: camera, format: .jpeg) == nil)
         // jpeg-scan's rewrite of both JPEGs.
         for (url, _) in files.prefix(2) {
             let out = dir.appending(path: "scan-\(url.lastPathComponent)")
@@ -146,7 +161,7 @@ final class StructureCheckTests {
         try TestImages.losslessJPEG.write(to: url)
         #expect(try JPEGMarkers.frame(JPEGMarkers.headers(ByteView(TestImages.losslessJPEG)).segments)?.marker == 0xC3)
         #expect(try !rejects(bytes(url), original: url, .jpeg))
-        #expect(FileOptimizer.damage(of: url, format: .jpeg) == nil)
+        #expect(StructureCheck.damage(of: url, format: .jpeg) == nil)
         await #expect(throws: VerificationError.self) {
             try await Verifier.verify(original: url, result: url, format: .jpeg, pixelsMustMatch: true)
         }

@@ -246,7 +246,7 @@ public struct FileOptimizer: Sendable {
         guard best != source else {
             // Nothing came of it: when the original itself isn't sound, that
             // is the reason, not what a tool or a check said about it.
-            let damage = lastError != nil || rejected != nil || metadataFailure != nil ? Self.damage(of: source, format: format) : nil
+            let damage = lastError != nil || metadataFailure != nil ? StructureCheck.damage(of: source, format: format) : nil
             if damage == nil, metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
             var copy: URL?
             if case .newFile(let planned, includeUnchanged: true) = destination {
@@ -313,17 +313,6 @@ public struct FileOptimizer: Sendable {
               CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete
         else { return false }
         return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
-    }
-
-    /// Why the original isn't sound in itself (the structure check's
-    /// reason), or nil when it is or can't be read again.
-    static func damage(of url: URL, format: ImageFormat) -> String? {
-        do {
-            try StructureCheck.verifyOriginal(url, format: format)
-        } catch let error as VerificationError {
-            return error.reason
-        } catch {}
-        return nil
     }
 
     /// C2PA Content Credentials are signed with a hash over the file's bytes,

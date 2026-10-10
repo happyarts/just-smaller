@@ -50,6 +50,41 @@ enum TestImages {
         return url
     }
 
+    /// What a JPEG image says about restarts, read byte by byte: its
+    /// interval and where its DRI segment starts, and for each scan its
+    /// components and where each of its restart markers starts.
+    struct Restarts {
+        var interval = 0, dri: Int?
+        var scans: [(components: Int, markers: [Int])] = []
+    }
+
+    static func restarts(_ d: Data, from start: Int = 0) -> Restarts {
+        let d = [UInt8](d)
+        var r = Restarts(), i = start + 2
+        while i + 6 <= d.count, d[i] == 0xFF, d[i + 1] != 0xD9 {
+            let marker = d[i + 1], length = Int(d[i + 2]) << 8 | Int(d[i + 3])
+            if marker == 0xDD { (r.interval, r.dri) = (Int(d[i + 4]) << 8 | Int(d[i + 5]), i) }
+            let components = Int(d[i + 4])
+            i += 2 + length
+            guard marker == 0xDA else { continue }
+            // The entropy-coded data, up to the next marker that isn't a restart.
+            var markers: [Int] = []
+            while i + 1 < d.count {
+                if d[i] == 0xFF, (0xD0...0xD7).contains(d[i + 1]) { markers.append(i); i += 2; continue }
+                if d[i] == 0xFF, d[i + 1] != 0 { break }
+                i += 1
+            }
+            r.scans.append((components, markers))
+        }
+        return r
+    }
+
+    /// Whether `reason` says the file stays as it is because it is damaged
+    /// (in English or German).
+    static func isDamaged(_ reason: String) -> Bool {
+        ["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) }
+    }
+
     static func properties(_ data: Data) -> [CFString: Any] {
         CGImageSourceCreateWithData(data as CFData, nil).flatMap { CGImageSourceCopyPropertiesAtIndex($0, 0, nil) } as? [CFString: Any] ?? [:]
     }

@@ -75,14 +75,17 @@ enum JPEGCheck {
     /// type allowed, and every coefficient coded — not the rules around the
     /// images, which hold a result to its original.
     static func checkImages(_ b: ByteView) throws {
-        func image(from start: Int) throws -> Image {
+        /// Where the image from `start` ends.
+        func image(from start: Int) throws -> Int {
             let frame = JPEGMarkers.frame(try JPEGMarkers.headers(b.view(from: start)).segments)?.marker
             let image = try parse(b, from: start, allowing: frame)
             guard image.complete else { throw Invalid("image data incomplete") }
-            return image
+            return image.end
         }
-        let first = try image(from: 0)
-        for range in JPEGLayout.read(b, firstEnd: first.end)?.images.dropFirst() ?? [] { _ = try image(from: range.lowerBound) }
+        let firstEnd = try image(from: 0)
+        for (n, range) in (JPEGLayout.read(b, firstEnd: firstEnd)?.images ?? []).enumerated().dropFirst() {
+            try Invalid.within("image \(n + 1)") { _ = try image(from: range.lowerBound) }
+        }
     }
 
     /// Around the images, the rules of the original's `JPEGLayout`; each

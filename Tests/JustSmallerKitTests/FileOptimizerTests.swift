@@ -1143,8 +1143,7 @@ final class FileOptimizerTests {
             let before = try Data(contentsOf: url)
             let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in }
             guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(url.lastPathComponent), \(level): \(outcome)"); return }
-            #expect(["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) },
-                    "\(level): \(reason)")
+            #expect(TestImages.isDamaged(reason), "\(level): \(reason)")
             #expect(try Data(contentsOf: url) == before)
         }
         let png = try Data(contentsOf: write(image(space: CGColorSpace.displayP3), "profiles.png", type: .png,
@@ -1159,12 +1158,9 @@ final class FileOptimizerTests {
             try await staysDamaged(profiles, level)
         }
 
-        let jpeg = dir.appending(path: "restart.jpg")
-        let dest = try #require(CGImageDestinationCreateWithURL(jpeg as CFURL, UTType.jpeg.identifier as CFString, 1, nil))
-        CGImageDestinationAddImage(dest, image(), [kCGImagePropertyGPSDictionary: TestImages.gps] as CFDictionary)
-        #expect(CGImageDestinationFinalize(dest))
+        let jpeg = write(image(), "restart.jpg", type: .jpeg, properties: [kCGImagePropertyGPSDictionary: TestImages.gps])
         var b = try Data(contentsOf: jpeg)
-        let marker = try #require(RestartMarkerTests.restarts(b).scans.first?.markers.dropFirst().first)
+        let marker = try #require(TestImages.restarts(b).scans.first?.markers.dropFirst().first)
         b[marker + 1] = 0xD7
         try b.write(to: jpeg)
         try await staysDamaged(jpeg, .removePrivate)
