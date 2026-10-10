@@ -96,13 +96,16 @@ public struct FileOptimizer: Sendable {
         // chosen encoding fails its last check. Set while the result holds a
         // lossy step.
         var beforeLoss: (best: URL, size: Int64, used: [String])?
+        // Set while the result holds a step that changed the colour under
+        // fully transparent pixels.
+        var clearedHiddenColour = false
         // Set when private metadata couldn't be removed as promised: then
         // nothing about the file changes.
         var metadataFailure: String?
         // Before a step judged on the finished file: the state to go back to,
         // and the size the finished file must stay below. What the discarded
         // steps ran into goes with them.
-        var beforeTrial: (best: URL, size: Int64, used: [String],
+        var beforeTrial: (best: URL, size: Int64, used: [String], clearedHiddenColour: Bool,
                           beforeLoss: (best: URL, size: Int64, used: [String])?,
                           counted: Int, lastError: (any Error)?, limit: Int64)?
         stages: for (n, stage) in stages.enumerated() {
@@ -154,10 +157,11 @@ public struct FileOptimizer: Sendable {
                 let promised = candidate.isRequired && hasFieldsToRemove
                 guard outSize < limit || promised || candidate.judgedFinished else { continue }
                 if structure == nil { structure = StructureCheck.Reference(original: input, format: format, level: settings.metadata) }
+                let keptHiddenColour: Bool
                 do {
                     // Against this stage's input: after a lossy stage the
                     // following lossless ones must keep the lossy result's pixels.
-                    try await Verifier.verify(original: input, result: output, format: format, pixelsMustMatch: !candidate.isLossy,
+                    keptHiddenColour = try await Verifier.verify(original: input, result: output, format: format, pixelsMustMatch: !candidate.isLossy,
                                               exactUnderAlpha: !candidate.changesHiddenColour, structure: structure)
                 } catch {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
@@ -172,14 +176,15 @@ public struct FileOptimizer: Sendable {
                     }
                     continue
                 }
-                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, beforeLoss, counted, lastError, limit) }
+                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, clearedHiddenColour, beforeLoss, counted, lastError, limit) }
                 if candidate.isLossy, beforeLoss == nil { beforeLoss = (best, bestSize, used) }
+                if !keptHiddenColour { clearedHiddenColour = true }
                 best = output; bestSize = outSize; used.append(candidate.name)
                 break
             }
         }
         if let trial = beforeTrial, best != source, bestSize >= trial.limit {
-            (best, bestSize, used, beforeLoss) = (trial.best, trial.size, trial.used, trial.beforeLoss)
+            (best, bestSize, used, clearedHiddenColour, beforeLoss) = (trial.best, trial.size, trial.used, trial.clearedHiddenColour, trial.beforeLoss)
             (counted, lastError) = (trial.counted, trial.lastError)
         }
 
@@ -227,7 +232,8 @@ public struct FileOptimizer: Sendable {
         }
 
         // Only formats whose image data is compared exactly earn the guarantee.
-        let fidelity: Fidelity = beforeLoss != nil ? .lossy : Verifier.comparesExactly(format) ? .pixelIdentical : .lossless
+        let fidelity: Fidelity = beforeLoss != nil ? .lossy : clearedHiddenColour ? .visiblyIdentical
+            : Verifier.comparesExactly(format) ? .pixelIdentical : .lossless
         switch destination {
         case .newFile(let planned, _):
             let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url,

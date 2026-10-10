@@ -20,8 +20,9 @@ struct VerificationError: LocalizedError {
 /// colour profile or orientation, or can't be decoded is thrown away.
 enum Verifier {
     /// Whether `verify` with `pixelsMustMatch` compares a format's image data
-    /// exactly, so a result that passes is proven identical. An SVG is
-    /// compared by its rendering, which doesn't prove it identical.
+    /// exactly, so a result that passes and keeps the colour under
+    /// transparent pixels (`verify` returns true) is proven identical. An SVG
+    /// is compared by its rendering, which doesn't prove it identical.
     static func comparesExactly(_ format: ImageFormat) -> Bool {
         switch format {
         case .png, .gif, .webp, .jpeg, .heic, .jxl: true
@@ -34,13 +35,16 @@ enum Verifier {
     /// still match.
     /// `structure` is what the structure check needs from the original; the
     /// caller reads it once for all candidates of a step.
+    /// Returns false when the colour under fully transparent pixels changed,
+    /// which `exactUnderAlpha` false allows.
+    @discardableResult
     static func verify(original: URL, result: URL, format: ImageFormat, pixelsMustMatch: Bool,
-                       exactUnderAlpha: Bool = true, structure: StructureCheck.Reference? = nil) async throws {
+                       exactUnderAlpha: Bool = true, structure: StructureCheck.Reference? = nil) async throws -> Bool {
         let structure = structure ?? StructureCheck.Reference(original: original, format: format)
         try StructureCheck.verify(result: result, against: structure)
         if format == .jxl {
             try await verifyRecompressedJXL(original: original, result: result)
-            return
+            return true
         }
         if format == .svg {
             // UTF-16 → UTF-8 is proven on the text itself; the renderer reads UTF-8 only.
@@ -48,10 +52,10 @@ enum Verifier {
                 guard SVGText.isSameText(original: a, result: try Data(contentsOf: result)) else {
                     throw VerificationError(reason: String(localized: "text changed", bundle: .module))
                 }
-                return
+                return true
             }
             try await compareRenderings(original, result, strict: pixelsMustMatch)
-            return
+            return true
         }
         // A gain map the original hid by where its index lay shows in the
         // result (`JPEGLayout.hidesGainMap`): compared with the original as
@@ -111,20 +115,21 @@ enum Verifier {
             } else if CGImageSourceCreateImageAtIndex(b, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) == nil {
                 throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
             }
-            return
+            return true
         }
         if format == .jpeg {
             // ImageIO decodes identical JPEG data differently depending on the
             // Huffman tables, so JPEGs are compared where the image really
             // lives: the quantized DCT coefficients, read with libjpeg.
             try await compareJPEGCoefficients(original: original, result)
-        } else if sameImage {
-            return
-        } else {
+        } else if format == .gif {
             // GIF transparency is on/off per palette entry and the colour behind
             // it carries no meaning, so only PNG and WebP must keep it too.
-            try comparePixels(a, b, exactUnderAlpha: format != .gif && exactUnderAlpha)
+            try comparePixels(a, b, straight: false)
+        } else if !sameImage {
+            return try comparePixels(a, b, straight: true, hiddenColourMayChange: !exactUnderAlpha)
         }
+        return true
     }
 
     // MARK: - JPEG XL
@@ -469,7 +474,12 @@ enum Verifier {
     /// Compares what a viewer would show over time, one frame at a time.
     /// gifsicle merges identical consecutive frames into one longer frame,
     /// which is fine as long as every moment of the animation looks the same.
-    private static func comparePixels(_ a: CGImageSource, _ b: CGImageSource, exactUnderAlpha: Bool) throws {
+    /// `straight` compares the colour under fully transparent pixels too;
+    /// `hiddenColourMayChange` then lets only that colour differ. Returns
+    /// whether it stayed.
+    @discardableResult
+    private static func comparePixels(_ a: CGImageSource, _ b: CGImageSource, straight: Bool,
+                                      hiddenColourMayChange: Bool = false) throws -> Bool {
         let da = (0..<CGImageSourceGetCount(a)).map { duration(a, $0) }
         let db = (0..<CGImageSourceGetCount(b)).map { duration(b, $0) }
         if da.count > 1 || db.count > 1, da.reduce(0, +) != db.reduce(0, +) {
@@ -477,16 +487,38 @@ enum Verifier {
         }
         let deep = depth(a, 0) > 8 || depth(b, 0) > 8
         var i = 0, j = 0, endA = da[0], endB = db[0]
-        var pa = try pixels(a, 0, deep: deep, straight: exactUnderAlpha), pb = try pixels(b, 0, deep: deep, straight: exactUnderAlpha)
+        var pa = try pixels(a, 0, deep: deep, straight: straight), pb = try pixels(b, 0, deep: deep, straight: straight)
+        var keptHiddenColour = true
         while true {
-            guard pa == pb else { throw VerificationError.pixelsChanged }
+            if pa != pb {
+                guard hiddenColourMayChange, differOnlyUnderAlpha(pa, pb, bytesPerPixel: deep ? 8 : 4) else {
+                    throw VerificationError.pixelsChanged
+                }
+                keptHiddenColour = false
+            }
             // Step past whichever frame ends first, or both if they end together.
             let stepA = endA <= endB, stepB = endB <= endA
             if stepA { i += 1 }
             if stepB { j += 1 }
-            guard i < da.count, j < db.count else { return }
-            if stepA { endA += da[i]; pa = try pixels(a, i, deep: deep, straight: exactUnderAlpha) }
-            if stepB { endB += db[j]; pb = try pixels(b, j, deep: deep, straight: exactUnderAlpha) }
+            guard i < da.count, j < db.count else { return keptHiddenColour }
+            if stepA { endA += da[i]; pa = try pixels(a, i, deep: deep, straight: straight) }
+            if stepB { endB += db[j]; pb = try pixels(b, j, deep: deep, straight: straight) }
+        }
+    }
+
+    /// Whether two frames with straight alpha (RGBA, alpha last) differ only
+    /// in the colour of pixels that are fully transparent in both.
+    private static func differOnlyUnderAlpha(_ a: [UInt8], _ b: [UInt8], bytesPerPixel: Int) -> Bool {
+        guard a.count == b.count else { return false }
+        let alpha = bytesPerPixel / 4 * 3
+        return a.withUnsafeBufferPointer { a in
+            b.withUnsafeBufferPointer { b in
+                for p in stride(from: 0, to: a.count, by: bytesPerPixel) {
+                    let transparent = (p + alpha..<p + bytesPerPixel).allSatisfy { a[$0] == 0 && b[$0] == 0 }
+                    if !transparent, (p..<p + bytesPerPixel).contains(where: { a[$0] != b[$0] }) { return false }
+                }
+                return true
+            }
         }
     }
 

@@ -4,6 +4,9 @@ import Foundation
 public enum Fidelity: Sendable, Equatable {
     /// Every step was proven to keep every pixel.
     case pixelIdentical
+    /// Every visible pixel was proven to stay; the colour under fully
+    /// transparent pixels changed, which only lossy mode allows.
+    case visiblyIdentical
     /// No lossy step ran, but the format's check is not an exact comparison
     /// (an SVG's rendering).
     case lossless

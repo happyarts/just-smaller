@@ -827,6 +827,40 @@ final class FileOptimizerTests {
         try await Verifier.verify(original: original, result: url, format: .png, pixelsMustMatch: true)
     }
 
+    /// Half red, half fully transparent, with or without colour under the
+    /// transparent half.
+    private func halfTransparentPNG(_ name: String, hiddenColour: Bool) throws -> URL {
+        let url = dir.appending(path: name)
+        try uncompressedPNG(width: 256, height: 64, alpha: true) { x, y in
+            x < 128 ? [200, 40, 40, 255] : hiddenColour ? [UInt8(x), UInt8(y * 4), UInt8(x * y & 255), 0] : [0, 0, 0, 0]
+        }.write(to: url)
+        return url
+    }
+
+    /// Where the colour under fully transparent pixels may change, the check
+    /// says whether it did; where it may not, a change fails it.
+    @Test func colourUnderTransparencyIsReported() async throws {
+        let a = try halfTransparentPNG("hidden-a.png", hiddenColour: true)
+        let b = try halfTransparentPNG("hidden-b.png", hiddenColour: false)
+        await #expect(throws: VerificationError.self) {
+            try await Verifier.verify(original: a, result: b, format: .png, pixelsMustMatch: true)
+        }
+        #expect(try await Verifier.verify(original: a, result: b, format: .png, pixelsMustMatch: true, exactUnderAlpha: false) == false)
+        #expect(try await Verifier.verify(original: b, result: b, format: .png, pixelsMustMatch: true, exactUnderAlpha: false))
+    }
+
+    /// In lossy mode OxiPNG may clear the colour under fully transparent
+    /// pixels: then the visible pixels are proven identical, not the file.
+    /// Without such colour the file stays pixel identical.
+    @Test(arguments: [false, true])
+    func lossyPNGThatClearsHiddenColourIsVisiblyIdentical(hiddenColour: Bool) async throws {
+        settings.lossy = true
+        let url = try halfTransparentPNG("half-\(hiddenColour).png", hiddenColour: hiddenColour)
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = try await optimize(url) else { Issue.record("not optimized"); return }
+        #expect(!tools.contains("quantizr"), "\(tools)")
+        #expect(fidelity == (hiddenColour ? .visiblyIdentical : .pixelIdentical))
+    }
+
     /// The palette image says how its colours are meant exactly as the
     /// original does: an sRGB chunk alone gets no gamma or chromaticities
     /// added (the structure check would reject the palette).
@@ -848,7 +882,8 @@ final class FileOptimizerTests {
 
     /// 8-bit RGB, the rows as they are, packed without compression; `colour`
     /// chunks right after IHDR.
-    private func uncompressedPNG(width: Int, height: Int, colour: [Data] = [], pixel: (_ x: Int, _ y: Int) -> [UInt8]) -> Data {
+    private func uncompressedPNG(width: Int, height: Int, alpha: Bool = false, colour: [Data] = [],
+                                 pixel: (_ x: Int, _ y: Int) -> [UInt8]) -> Data {
         var rows: [UInt8] = []
         for y in 0..<height {
             rows.append(0)
@@ -858,7 +893,7 @@ final class FileOptimizerTests {
         var packed = [UInt8](repeating: 0, count: Int(size))
         precondition(compress2(&packed, &size, rows, uLong(rows.count), 0) == Z_OK)
         let bigEndian = { (n: Int) in (0..<4).map { UInt8(n >> (24 - 8 * $0) & 0xFF) } }
-        return Data(PNGChunks.signature) + PNGChunks.write("IHDR", bigEndian(width) + bigEndian(height) + [8, 2, 0, 0, 0])
+        return Data(PNGChunks.signature) + PNGChunks.write("IHDR", bigEndian(width) + bigEndian(height) + [8, alpha ? 6 : 2, 0, 0, 0])
             + colour.reduce(Data(), +) + PNGChunks.write("IDAT", Array(packed.prefix(Int(size)))) + PNGChunks.write("IEND", [])
     }
 

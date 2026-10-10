@@ -214,7 +214,8 @@ final class AnimatedPNGTests {
         }
         #expect(tools.contains("OxiPNG"))
         // Lossy mode has no lossy step for an animation: a palette would make it a still image.
-        #expect(fidelity == .pixelIdentical)
+        // It may clear the colour under the fully transparent pixels of a frame.
+        #expect(fidelity == (lossy ? .visiblyIdentical : .pixelIdentical))
         let result = try Data(contentsOf: url)
         func payloads(_ png: Data, _ type: String) throws -> [Data] {
             try PNGChunks.read(ByteView(png), strict: true).filter { $0.type == type }.map(\.data.bytes)
