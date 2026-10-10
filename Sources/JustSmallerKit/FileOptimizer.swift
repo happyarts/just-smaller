@@ -267,9 +267,11 @@ public struct FileOptimizer: Sendable {
             return .alreadyOptimal(size: size, copy: copy)
         }
         try Task.checkCancellation()
-        // Listed like a step: the gain map the original hid shows everywhere now.
+        // Listed like a step: the gain map the original hid shows everywhere
+        // now, ImageIO too (it may have found it before by other means).
         if let layout = jpegLayout, layout.hidesGainMap, let result = try? Data(contentsOf: best, options: .alwaysMapped),
-           layout.showsGainMap(in: ByteView(result)) {
+           layout.showsGainMap(in: ByteView(result)), let a = CGImageSourceCreateWithURL(source as CFURL, nil),
+           let b = CGImageSourceCreateWithData(result as CFData, nil), AuxiliaryImages.all(b).count > AuxiliaryImages.all(a).count {
             used.append(Self.repairedHDR)
         }
 

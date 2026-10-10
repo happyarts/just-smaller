@@ -299,8 +299,10 @@ final class MultiImageJPEGTests {
     /// how bright, the photo's XMP marking it (`declared`: Google's
     /// container names the gain map), and the multi-picture index (taken
     /// from a gain map photo ImageIO wrote) in front of the tables or
-    /// behind them (`hidden`), where ImageIO doesn't find it.
-    private func ultraHDR(_ name: String, hidden: Bool, declared: Bool = true) throws -> URL {
+    /// behind them (`hidden`), where ImageIO doesn't find it — unless the
+    /// photo carries ISO 21496-1's mark (`isoMarked`), by which it finds the
+    /// gain map anyway.
+    private func ultraHDR(_ name: String, hidden: Bool, declared: Bool = true, isoMarked: Bool = false) throws -> URL {
         func jpeg(_ image: CGImage) -> Data {
             let data = NSMutableData()
             let dest = CGImageDestinationCreateWithData(data, UTType.jpeg.identifier as CFString, 1, nil)!
@@ -314,9 +316,10 @@ final class MultiImageJPEGTests {
         let hdrgm = "xmlns:hdrgm=\"http://ns.adobe.com/hdr-gain-map/1.0/\" hdrgm:Version=\"1.0\""
         let gainMap = inserting(GoogleXMPSamples.segment("<rdf:Description \(hdrgm) hdrgm:GainMapMax=\"1\" hdrgm:HDRCapacityMax=\"1\"/>"),
                                 into: jpeg(grey.makeImage()!))
-        let photo = inserting(GoogleXMPSamples.segment("<rdf:Description \(hdrgm)/>"
+        var photo = inserting(GoogleXMPSamples.segment("<rdf:Description \(hdrgm)/>"
                                                        + (declared ? GoogleXMPSamples.directory(gainMapLength: gainMap.count) : "")),
                               into: jpeg(image()))
+        if isoMarked { photo = inserting(JPEGMarkers.write(0xE2, Array("urn:iso:std:iso:ts:21496:-1\0".utf8) + [0, 0, 0, 0]), into: photo) }
         let photoWithIndex = try #require(images(try Data(contentsOf: gainMapPhoto("index-" + name))).first)
         let index = try #require(try JPEGMarkers.headers(ByteView(photoWithIndex)).segments.first(where: MultiPictureIndex.isIndex)).whole.bytes
         let headers = try JPEGMarkers.headers(ByteView(photo))
@@ -355,6 +358,13 @@ final class MultiImageJPEGTests {
         #expect(fidelity == .pixelIdentical && tools.last == FileOptimizer.repairedHDR)
         #expect(layout.showsGainMap(in: ByteView(try Data(contentsOf: url))))
         #expect(shownGainMap(url) && headroom(url) == headroom(shown))
+
+        // ImageIO saw the gain map before: nothing to report.
+        let seen = try ultraHDR("seen-\(level.rawValue).jpg", hidden: true, isoMarked: true)
+        #expect(try #require(JPEGLayout.read(ByteView(try Data(contentsOf: seen)))).hidesGainMap && shownGainMap(seen))
+        let headroomSeen = headroom(seen)
+        guard case .optimized(_, _, let seenTools, _, _, _) = try await optimize(seen) else { Issue.record("not optimized"); return }
+        #expect(!seenTools.contains(FileOptimizer.repairedHDR) && shownGainMap(seen) && headroom(seen) == headroomSeen)
 
         let undeclared = try ultraHDR("undeclared-\(level.rawValue).jpg", hidden: true, declared: false)
         #expect(try #require(JPEGLayout.read(ByteView(try Data(contentsOf: undeclared)))).hidesGainMap == false)
