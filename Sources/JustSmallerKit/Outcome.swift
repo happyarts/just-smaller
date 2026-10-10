@@ -63,10 +63,10 @@ public struct Unchanged: Sendable, Equatable {
         case unreadableImages
         /// What an SVG holds that the rendering can't check (scripts, animation).
         case uncheckable(String)
-        /// Nothing this file can get (yet): why, in words.
-        case notSupported(String)
-        /// It can't be converted: why, in words.
-        case notConvertible(String)
+        /// Nothing this file can get (yet).
+        case notSupported(Unsupported)
+        /// It can't be converted.
+        case notConvertible(Inconvertible)
         /// The metadata level's promise couldn't be kept: why.
         case metadataNotFilterable(String)
         /// A smaller result failed its check: why.
@@ -107,6 +107,16 @@ public struct Unchanged: Sendable, Equatable {
             }
         }
 
+        /// Which kind of a reason that has kinds (not supported, not
+        /// convertible), the same in every language (`--json`).
+        public var kind: String? {
+            switch self {
+            case .notSupported(let why): why.rawValue
+            case .notConvertible(let why): why.rawValue
+            default: nil
+            }
+        }
+
         public var description: String {
             switch self {
             case .empty: String(localized: "Empty file", bundle: .module)
@@ -115,17 +125,83 @@ public struct Unchanged: Sendable, Equatable {
             case .readOnly: String(localized: "The file or its destination folder is read-only", bundle: .module)
             case .damaged(nil): String(localized: "The file is damaged or incomplete", bundle: .module)
             case .damaged(let detail?): String(localized: "The file is damaged: \(detail)", bundle: .module)
-            case .contentCredentials:
-                String(localized: "Has Content Credentials (C2PA), which any change would invalidate", bundle: .module)
+            case .contentCredentials: String(localized: "Has Content Credentials (C2PA)", bundle: .module)
             case .appleCgBI: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module)
             case .motionPhotoVideo: String(localized: "Motion photo whose video can’t be located safely", bundle: .module)
             case .unreadableImages: String(localized: "Holds images that can’t be read safely", bundle: .module)
             case .uncheckable(let detail): String(localized: "\(detail) – it can’t be checked safely", bundle: .module)
-            case .notSupported(let detail), .notConvertible(let detail): detail
+            case .notSupported(let why): why.description
+            case .notConvertible(let why): why.description
             case .metadataNotFilterable(let detail): String(localized: "The metadata couldn’t be filtered safely: \(detail)", bundle: .module)
             case .resultRejected(let detail): String(localized: "Result rejected: \(detail)", bundle: .module)
             case .alreadyOptimal: String(localized: "Already optimal", bundle: .module)
             case .changedMeanwhile: String(localized: "The file changed in the meantime", bundle: .module)
+            }
+        }
+    }
+}
+
+extension Unchanged {
+    /// What a file can't get (yet). The raw value is the name in `--json`.
+    public enum Unsupported: String, Sendable, Equatable, CustomStringConvertible {
+        case animatedWebP, lossyWebP, gif
+        case heicWithoutLoss, hdrHEIC
+        /// A JPEG XL that wasn't made from a JPEG.
+        case jxlNotFromJPEG
+        /// The JPEG in a JPEG XL doesn't rebuild (damaged, or changed since).
+        case jpegInJXLNotRebuildable
+        /// The JPEG in a JPEG XL holds more than the photo.
+        case jpegInJXLHoldsMore
+        case nothingToOptimize
+
+        public var description: String {
+            switch self {
+            case .animatedWebP: String(localized: "Animated WebP is not supported yet", bundle: .module)
+            case .lossyWebP: String(localized: "Lossy WebP can’t be optimized without loss", bundle: .module)
+            case .gif: String(localized: "GIF optimization comes in a later version", bundle: .module)
+            case .heicWithoutLoss: String(localized: "HEIC can only be optimized in lossy mode", bundle: .module)
+            case .hdrHEIC: String(localized: "HDR HEIC images are left untouched", bundle: .module)
+            case .jxlNotFromJPEG: String(localized: "Only JPEG XL files made from a JPEG can be optimized so far", bundle: .module)
+            case .jpegInJXLNotRebuildable:
+                String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module)
+            case .jpegInJXLHoldsMore:
+                String(localized: "The JPEG in this JPEG XL holds more than the photo (HDR gain map, depth map or video)", bundle: .module)
+            case .nothingToOptimize: String(localized: "Nothing to optimize", bundle: .module)
+            }
+        }
+    }
+
+    /// Why a file can't be converted. The raw value is the name in `--json`.
+    public enum Inconvertible: String, Sendable, Equatable, CustomStringConvertible {
+        case notJPEG, notJXL
+        /// Neither: a file that can't go either way.
+        case notJPEGOrJXL
+        /// A JPEG XL that wasn't made from a JPEG: there is none to go back to.
+        case notFromJPEG
+        /// A JPEG XL viewer would show only the photo, not the video.
+        case motionPhoto
+        /// A JPEG XL viewer would show only the photo, not the other images.
+        case moreImages
+        case dataAfterImage
+        /// CMYK, arithmetic coding, 12 bits, or too much data after the image.
+        case notLossless
+        case notSmaller
+
+        public var description: String {
+            switch self {
+            case .notJPEG: String(localized: "Only JPEGs can be converted to JPEG XL", bundle: .module)
+            case .notJXL: String(localized: "Only JPEG XL files can be converted back to JPEG", bundle: .module)
+            case .notJPEGOrJXL: String(localized: "Only JPEG and JPEG XL files can be converted", bundle: .module)
+            case .notFromJPEG: String(localized: "This JPEG XL wasn’t made from a JPEG, so there is no JPEG to go back to", bundle: .module)
+            case .motionPhoto: String(localized: "Motion photo – a JPEG XL viewer would show only the photo, not the video", bundle: .module)
+            case .moreImages:
+                String(localized: "Holds more than one image (HDR gain map, depth map or a second view) – a JPEG XL viewer would show only the photo",
+                       bundle: .module)
+            case .dataAfterImage: String(localized: "Holds data after the image that a JPEG XL viewer wouldn’t know", bundle: .module)
+            case .notLossless:
+                String(localized: "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)",
+                       bundle: .module)
+            case .notSmaller: String(localized: "As JPEG XL it wouldn’t be smaller", bundle: .module)
             }
         }
     }

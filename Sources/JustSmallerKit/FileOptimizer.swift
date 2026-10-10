@@ -290,7 +290,8 @@ public struct FileOptimizer: Sendable {
         guard hasEndMarker(data, format: format) else {
             return format == .webp ? String(localized: "truncated", bundle: .module) : String(localized: "no end marker", bundle: .module)
         }
-        // From the file, not the mapped data: ImageIO reads some files differently from data.
+        // From the file, as other apps open it: ImageIO takes the name's
+        // extension as a hint (an .mpo is read as MPO, not as plain JPEG).
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return unreadable }
         for status in [CGImageSourceGetStatus(source), CGImageSourceGetStatusAtIndex(source, 0)] where status != .statusComplete {
             return status == .statusIncomplete || status == .statusUnexpectedEOF ? String(localized: "truncated", bundle: .module) : unreadable

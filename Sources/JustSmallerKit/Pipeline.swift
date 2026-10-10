@@ -158,15 +158,15 @@ enum Pipeline {
     }
 
     /// Why a file gets no stages at all, for the status column.
-    static func reasonForNoStages(_ format: ImageFormat, facts: FileFacts, settings: OptimizationSettings) -> String {
+    static func reasonForNoStages(_ format: ImageFormat, facts: FileFacts, settings: OptimizationSettings) -> Unchanged.Unsupported {
         switch format {
-        case .webp where facts.isAnimated: String(localized: "Animated WebP is not supported yet", bundle: .module)
-        case .webp: String(localized: "Lossy WebP can’t be optimized without loss", bundle: .module)
-        case .gif: String(localized: "GIF optimization comes in a later version", bundle: .module)
-        case .heic where !settings.lossy: String(localized: "HEIC can only be optimized in lossy mode", bundle: .module)
-        case .heic: String(localized: "HDR HEIC images are left untouched", bundle: .module)
-        case .jxl: String(localized: "Only JPEG XL files made from a JPEG can be optimized so far", bundle: .module)
-        default: String(localized: "Nothing to optimize", bundle: .module)
+        case .webp where facts.isAnimated: .animatedWebP
+        case .webp: .lossyWebP
+        case .gif: .gif
+        case .heic where !settings.lossy: .heicWithoutLoss
+        case .heic: .hdrHEIC
+        case .jxl: .jxlNotFromJPEG
+        default: .nothingToOptimize
         }
     }
 

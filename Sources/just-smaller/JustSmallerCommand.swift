@@ -161,6 +161,8 @@ struct Report: Sendable {
     var lossy = false
     /// Why the file stays as it is (`Unchanged.Reason.code`), or nil.
     var reason: String?
+    /// Which kind of not supported or not convertible, or nil.
+    var kind: String?
     /// The reason or the error, in words.
     var message: String?
     var holdsPrivateData: Bool?
@@ -176,7 +178,8 @@ struct Report: Sendable {
             (identical, lossy, self.rejected) = (fidelity == .pixelIdentical, fidelity == .lossy, rejected)
         case .unchanged(let kept):
             (status, originalSize, newSize, result) = ("unchanged", kept.size, kept.size, kept.copy)
-            (reason, message, holdsPrivateData, rejected) = (kept.reason.code, kept.reason.description, kept.holdsPrivateData, kept.rejected)
+            (reason, kind, message) = (kept.reason.code, kept.reason.kind, kept.reason.description)
+            (holdsPrivateData, rejected) = (kept.holdsPrivateData, kept.rejected)
             identical = kept.reason == .alreadyOptimal
         }
     }
@@ -205,6 +208,7 @@ struct Report: Sendable {
                                      "saved": saved, "identical": identical, "lossy": lossy, "tools": tools]
         if let result, result != file { object["result"] = result.path }
         if let reason { object["reason"] = reason }
+        if let kind { object["kind"] = kind }
         if let message { object["message"] = message }
         if let holdsPrivateData { object["privateData"] = holdsPrivateData }
         if !rejected.isEmpty {

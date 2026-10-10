@@ -131,12 +131,12 @@
         }
       }
     },
-    "Has Content Credentials (C2PA), which any change would invalidate": {
+    "Has Content Credentials (C2PA)": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Enthält einen Herkunftsnachweis (C2PA), den jede Änderung ungültig machen würde"
+            "value": "Enthält Herkunftsnachweis (C2PA)"
           }
         }
       }
@@ -317,6 +317,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "Nichts zu optimieren"
+          }
+        }
+      }
+    },
+    "Only JPEG and JPEG XL files can be converted": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur JPEG- und JPEG-XL-Dateien lassen sich umwandeln"
           }
         }
       }

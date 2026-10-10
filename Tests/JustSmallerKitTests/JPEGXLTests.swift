@@ -49,10 +49,6 @@ final class JPEGXLTests {
         return nil
     }
 
-    private func reason(_ outcome: Outcome) -> String? {
-        TestImages.reason(outcome)?.description
-    }
-
     private func gps(_ url: URL) -> Any? {
         let source = CGImageSourceCreateWithURL(url as CFURL, nil)!
         return (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any])?[kCGImagePropertyGPSDictionary]
@@ -237,15 +233,14 @@ final class JPEGXLTests {
         let dest = CGImageDestinationCreateWithURL(png as CFURL, UTType.png.identifier as CFString, 1, nil)!
         CGImageDestinationAddImage(dest, TestImages.pattern(), nil)
         #expect(CGImageDestinationFinalize(dest))
-        #expect(reason(try await convert(png, to: .jxl)) != nil)
+        #expect(TestImages.reason(try await convert(png, to: .jxl)) == .notConvertible(.notJPEG))
         #expect(FileManager.default.fileExists(atPath: png.path))
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "image.jxl").path))
     }
 
     @Test func anHDRPhotoStaysJPEG() async throws {
         let photo = TestImages.gainMapPhoto(at: dir.appending(path: "hdr.jpg"))
-        let reason = try #require(reason(try await convert(photo, to: .jxl)))
-        #expect(reason.contains("more than one image"))
+        #expect(TestImages.reason(try await convert(photo, to: .jxl)) == .notConvertible(.moreImages))
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "hdr.jxl").path))
     }
 
@@ -266,7 +261,7 @@ final class JPEGXLTests {
     /// give, but not a JPEG XL: it would be shown larger, so it stays JPEG.
     @Test func aJPEGBrowsersShowSmallerStaysJPEG() async throws {
         let url = try densityJPEG("density.jpg")
-        #expect(reason(try await convert(url, to: .jxl))?.contains("at another size") == true)
+        #expect(TestImages.reason(try await convert(url, to: .jxl))?.description.contains("at another size") == true)
         #expect(!FileManager.default.fileExists(atPath: dir.appending(path: "density.jxl").path))
     }
 
@@ -315,14 +310,14 @@ final class JPEGXLTests {
         let tiny = jpeg("tiny.jpg", width: 1, height: 1)
         // Nothing but the image: a few hundred bytes JPEG XL can't beat.
         try JPEGMetadataFilter.filter(Data(contentsOf: tiny), level: .removeAll, orientation: 1, itemLengths: [:]).write(to: tiny)
-        #expect(reason(try await convert(tiny, to: .jxl)) == "As JPEG XL it wouldn’t be smaller")
+        #expect(TestImages.reason(try await convert(tiny, to: .jxl)) == .notConvertible(.notSmaller))
         #expect(FileManager.default.fileExists(atPath: tiny.path))
     }
 
     @Test func aJPEGXLNotMadeFromAJPEGHasNoWayBack() async throws {
         let bare = dir.appending(path: "pixels.jxl")
         try Data([0xFF, 0x0A, 0xFA, 0x7F, 0x01]).write(to: bare)
-        #expect(reason(try await convert(bare, to: .jpeg)) == FileConverter.notFromJPEG)
+        #expect(TestImages.reason(try await convert(bare, to: .jpeg)) == .notConvertible(.notFromJPEG))
     }
 
     @Test func aDamagedJPEGXLStaysAsItIs() async throws {
@@ -330,7 +325,7 @@ final class JPEGXLTests {
         let jxl = try #require(result(try await convert(jpeg("cut.jpg", width: 256, height: 192), to: .jxl)))
         let data = try Data(contentsOf: jxl)
         try data.prefix(data.count - 200).write(to: jxl)
-        #expect(reason(try await convert(jxl, to: .jpeg)) != nil)
+        #expect(TestImages.reason(try await convert(jxl, to: .jpeg)) != nil)
     }
 
     // MARK: - The checks
