@@ -40,9 +40,13 @@ struct PipelineTests {
         #expect(!ImageFormat.gif.isOptimizable)
         var lossy = OptimizationSettings()
         lossy.lossy = true
+        let compact = QualityChooserTests.Chooser([90])
+        compact.otherFormatsLossless = false
         for format in ImageFormat.allCases where !format.isOptimizable {
-            for settings in [OptimizationSettings(), lossy] {
-                #expect(Pipeline.stages(for: format, facts: FileFacts(byteSize: 100_000), settings: settings).isEmpty)
+            let facts = FileFacts(byteSize: 100_000)
+            #expect(Pipeline.stages(for: format, facts: facts, settings: OptimizationSettings()).isEmpty)
+            for chooser in [nil, QualityChooserTests.Chooser([90]), compact] as [(any QualityChooser)?] {
+                #expect(Pipeline.stages(for: format, facts: facts, settings: lossy, chooser: chooser).isEmpty)
             }
         }
     }
