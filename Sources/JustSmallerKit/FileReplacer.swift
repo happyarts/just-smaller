@@ -34,7 +34,7 @@ enum FileReplacer {
             defer { if let staged { removeStaging(staged) } }
             let source = staged?.file ?? result
             try copyMetadata(from: original, to: source)
-            let trashed = try replaceViaTrash(original, with: source)
+            let trashed = try replaceViaTrash(original, named: dates.name, with: source)
             restoreDates(dates, on: original, keepModificationDate: keepModificationDate)
             return trashed
         }
@@ -191,9 +191,8 @@ enum FileReplacer {
     /// under its own name (so Finder's Put Back returns it to where it was),
     /// then the result is moved to its path. If that fails, the original
     /// comes back from the Trash.
-    private static func replaceViaTrash(_ original: URL, with replacement: URL) throws -> URL? {
+    private static func replaceViaTrash(_ original: URL, named name: String?, with replacement: URL) throws -> URL? {
         let fm = FileManager.default
-        let name = try? FileOptimizer.freshValues(of: original, [.nameKey]).name
         let trashed = try Trash.move(original)
         do {
             try move(replacement, to: original, keepingSpellingOf: name)
@@ -276,7 +275,7 @@ enum FileReplacer {
     /// the new name begins with `originalName` (as on disk, mostly NFC), that
     /// part keeps the original's spelling ("Bären.jpg" → "Bären.jxl"). APFS
     /// only: exFAT then no longer lets FileManager delete the file. Never
-    /// overwrites; copies across volumes.
+    /// overwrites; copies across volumes; fails with FileManager's errors.
     private static func move(_ file: URL, to target: URL, keepingSpellingOf originalName: String?) throws {
         let name = target.lastPathComponent
         let folder = target.deletingLastPathComponent()
@@ -294,7 +293,17 @@ enum FileReplacer {
             failed = errno
             if failed != EEXIST { unlink(path) }
         }
-        throw POSIXError(POSIXErrorCode(rawValue: failed) ?? .EIO)
+        let code: CocoaError.Code = switch failed {
+        case EEXIST: .fileWriteFileExists
+        case ENOSPC, EDQUOT: .fileWriteOutOfSpace
+        case EACCES, EPERM: .fileWriteNoPermission
+        case EROFS: .fileWriteVolumeReadOnly
+        case ENAMETOOLONG, EINVAL: .fileWriteInvalidFileName
+        case ENOENT: .fileNoSuchFile
+        default: .fileWriteUnknown
+        }
+        throw CocoaError(code, userInfo: [NSFilePathErrorKey: path,
+                                          NSUnderlyingErrorKey: POSIXError(POSIXErrorCode(rawValue: failed) ?? .EIO)])
     }
 
     /// FileManager.removeItem, also on exFAT: there a name stored
