@@ -2,29 +2,6 @@ import Foundation
 import ImageIO
 import OSLog
 
-/// What an optimized file kept of its original.
-public enum Fidelity: Sendable, Equatable {
-    /// Every step was proven to keep every pixel.
-    case pixelIdentical
-    /// No lossy step ran, but the format's check is not an exact comparison
-    /// (an SVG's rendering).
-    case lossless
-    /// A lossy step is part of the result.
-    case lossy
-}
-
-public enum Outcome: Sendable {
-    /// `result` is where the optimized file is: the original's place, or a new file.
-    case optimized(originalSize: Int64, newSize: Int64, tools: [String], result: URL, trashedOriginal: URL?,
-                   fidelity: Fidelity)
-    /// `copy` is set when an unchanged copy was written to an output folder.
-    case alreadyOptimal(size: Int64, copy: URL?)
-    /// A smaller result was found but failed verification; the file stays as
-    /// it is. `copy` as for `alreadyOptimal`.
-    case unchanged(reason: String, size: Int64, copy: URL?)
-    case skipped(reason: String, size: Int64?)
-}
-
 private let log = Logger(subsystem: "JustSmallerKit", category: "optimizer")
 
 /// Optimizes one file: runs the format's pipeline in a private work
@@ -50,49 +27,33 @@ public struct FileOptimizer: Sendable {
         let fm = FileManager.default
         let before = try Self.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey, .isWritableKey])
         let size = Int64(before.fileSize ?? 0)
-
-        guard size > 0 else {
-            return .skipped(reason: String(localized: "Empty file", bundle: .module), size: 0)
+        func unchanged(_ reason: Unchanged.Reason) throws -> Outcome {
+            try keep(url, reason, size: size, destination: destination)
         }
+
+        guard size > 0 else { return try unchanged(.empty) }
+        guard let format = ImageFormat.detect(at: url) else { return try unchanged(.notAnImage) }
         // Replacing the file needs write access to it and to its folder. In
         // the App Sandbox a single dropped file never has a writable folder;
         // FileReplacer handles that case.
         let folder = url.deletingLastPathComponent().path
         let folderWritable = fm.isWritableFile(atPath: folder) || (Sandbox.isActive && Sandbox.permitsWriting(folder))
-        guard destination != .replace || (before.isWritable == true && folderWritable) else {
-            return .skipped(reason: String(localized: "The file or its folder is read-only", bundle: .module), size: size)
-        }
-        guard let format = ImageFormat.detect(at: url) else {
-            return .skipped(reason: String(localized: "Not a supported image", bundle: .module), size: size)
-        }
-        guard settings.isEnabled(format) else {
-            return .skipped(reason: String(localized: "\(format.displayName) is turned off in Settings", bundle: .module), size: size)
-        }
-        guard format == .svg || Self.isComplete(url, format: format) else {
-            return .skipped(reason: String(localized: "The file is damaged or incomplete", bundle: .module), size: size)
-        }
-        guard !Self.hasContentCredentials(url, format: format) else {
-            return .skipped(reason: String(localized: "Has Content Credentials (C2PA). Optimizing would invalidate them.", bundle: .module),
-                            size: size)
-        }
-        guard !(format == .png && Self.isAppleCgBI(url)) else {
-            return .skipped(reason: String(localized: "Apple’s iPhone PNG variant (CgBI), which only Apple’s tools can read", bundle: .module),
-                            size: size)
-        }
+        guard destination != .replace || (before.isWritable == true && folderWritable) else { return try unchanged(.readOnly) }
+        guard settings.isEnabled(format) else { return try unchanged(.turnedOff(format)) }
+        if format != .svg, let damage = Self.incompleteness(of: url, format: format) { return try unchanged(.damaged(damage)) }
+        guard !Self.hasContentCredentials(url, format: format) else { return try unchanged(.contentCredentials) }
+        guard !(format == .png && Self.isAppleCgBI(url)) else { return try unchanged(.appleCgBI) }
         // A JPEG is optimized image by image along its layout — unless the
         // layout says it must stay as it is.
         var jpegLayout: JPEGLayout?
         if format == .jpeg {
             guard let layout = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap({ JPEGLayout.read(ByteView($0)) }) else {
-                return .skipped(reason: String(localized: "The file is damaged or incomplete", bundle: .module), size: size)
+                return try unchanged(.damaged(nil))
             }
             switch layout.problem {
-            case .video:
-                return .skipped(reason: String(localized: "Motion photo whose video can’t be located safely – left unchanged", bundle: .module), size: size)
-            case .unfittingIndex, .unreadableXMP, .unlistedImages:
-                return .skipped(reason: String(localized: "Holds images that can’t be read safely – left unchanged", bundle: .module), size: size)
-            case nil:
-                jpegLayout = layout
+            case .video: return try unchanged(.motionPhotoVideo)
+            case .unfittingIndex, .unreadableXMP, .unlistedImages: return try unchanged(.unreadableImages)
+            case nil: jpegLayout = layout
             }
         }
         var facts = Self.facts(about: url, format: format, size: size)
@@ -100,7 +61,7 @@ public struct FileOptimizer: Sendable {
         // A JPEG XL is stored anew from the JPEG it holds: that JPEG must
         // rebuild and be one a JPEG XL shows in full.
         if format == .jxl, facts.isJPEGInJXL, let reason = await FileConverter.obstacleToRecompressing(url) {
-            return .skipped(reason: reason, size: size)
+            return try unchanged(reason)
         }
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
         // that step is proven on the text. Only when all metadata stays,
@@ -108,24 +69,29 @@ public struct FileOptimizer: Sendable {
         if format == .svg, let reason = SVGContent.uncheckableReason(url) {
             let convertible = facts.isUTF16 && settings.metadata == .keep
                 && (try? Data(contentsOf: url)).flatMap(SVGText.utf8) != nil
-            guard convertible else {
-                return .skipped(reason: String(localized: "\(reason) – left unchanged, it can’t be checked safely", bundle: .module), size: size)
-            }
+            guard convertible else { return try unchanged(.uncheckable(reason)) }
             facts.isUncheckableSVG = true
         }
         let stages = Pipeline.stages(for: format, facts: facts, settings: settings, chooser: chooser)
-        guard !stages.isEmpty else {
-            return .skipped(reason: Pipeline.reasonForNoStages(format, facts: facts, settings: settings), size: size)
-        }
+        guard !stages.isEmpty else { return try unchanged(.notSupported(Pipeline.reasonForNoStages(format, facts: facts, settings: settings))) }
 
         let ext = url.pathExtension.isEmpty ? format.rawValue : url.pathExtension
         let (work, source) = try Self.workCopy(of: url, named: "source.\(ext)")
         defer { try? fm.removeItem(at: work) }
 
         var best = source, bestSize = size, used: [String] = [], lastError: (any Error)?
-        // A smaller result that failed verification: the file is not
-        // "already optimal", and the list should say why it stayed as it is.
-        var rejected: VerificationError?
+        // Every result that failed its check, kept when its steps are
+        // discarded. The last one counted (see `beforeTrial`) says why the
+        // file stayed as it is: it is not "already optimal".
+        var rejections: [Rejection] = [], counted = 0
+        // A check's finding: listed when it judged a result, and returned as
+        // the reason in words.
+        func record(_ error: any Error, step: String) -> String {
+            guard let error = error as? VerificationError else { return error.localizedDescription }
+            rejections.append(Rejection(error, step: step))
+            counted = rejections.count
+            return error.reason
+        }
         // Only formats whose image data is compared exactly can earn the
         // guarantee: pixels for PNG, GIF and WebP, DCT coefficients for JPEG.
         let canBeIdentical = [.png, .gif, .webp, .jpeg, .heic, .jxl].contains(format)
@@ -141,7 +107,7 @@ public struct FileOptimizer: Sendable {
         // steps ran into goes with them.
         var beforeTrial: (best: URL, size: Int64, used: [String],
                           beforeLoss: (best: URL, size: Int64, used: [String])?,
-                          rejected: VerificationError?, lastError: (any Error)?, limit: Int64)?
+                          counted: Int, lastError: (any Error)?, limit: Int64)?
         stages: for (n, stage) in stages.enumerated() {
             try Task.checkCancellation()
             var shown = Set<String>()
@@ -159,7 +125,7 @@ public struct FileOptimizer: Sendable {
                             return .nothing
                         } catch {
                             log.error("\(candidate.name, privacy: .public) failed on \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
-                            return .failed(error, required: candidate.isRequired)
+                            return .failed(error, candidate)
                         }
                     }
                 }
@@ -171,8 +137,8 @@ public struct FileOptimizer: Sendable {
             for attempt in attempts {
                 switch attempt {
                 case .output(let candidate, let output, let size): results.append((candidate, output, size))
-                case .failed(let error, required: true):
-                    metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                case .failed(let error, let candidate) where candidate.isRequired:
+                    metadataFailure = record(error, step: candidate.name)
                     best = source
                     break stages
                 case .failed(let error, _): lastError = error
@@ -199,17 +165,17 @@ public struct FileOptimizer: Sendable {
                 } catch {
                     log.fault("\(candidate.name, privacy: .public) produced a bad result for \(url.lastPathComponent, privacy: .private): \(error.localizedDescription, privacy: .public)")
                     lastError = error
-                    if let error = error as? VerificationError { rejected = error }
+                    let reason = record(error, step: candidate.name)
                     // The promise can't be kept: say why here, rather than
                     // let later stages work on the unfiltered file.
                     if promised {
-                        metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                        metadataFailure = reason
                         best = source
                         break stages
                     }
                     continue
                 }
-                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, beforeLoss, rejected, lastError, limit) }
+                if candidate.judgedFinished { beforeTrial = (best, bestSize, used, beforeLoss, counted, lastError, limit) }
                 if candidate.isLossy, beforeLoss == nil { beforeLoss = (best, bestSize, used) }
                 best = output; bestSize = outSize; used.append(candidate.name)
                 break
@@ -217,7 +183,7 @@ public struct FileOptimizer: Sendable {
         }
         if let trial = beforeTrial, best != source, bestSize >= trial.limit {
             (best, bestSize, used, beforeLoss) = (trial.best, trial.size, trial.used, trial.beforeLoss)
-            (rejected, lastError) = (trial.rejected, trial.lastError)
+            (counted, lastError) = (trial.counted, trial.lastError)
         }
 
         // A chosen encoding is measured once more, as the finished file. If
@@ -238,7 +204,7 @@ public struct FileOptimizer: Sendable {
             do {
                 try MetadataCheck.verify(original: source, result: best, level: settings.metadata)
             } catch {
-                metadataFailure = (error as? VerificationError)?.reason ?? error.localizedDescription
+                metadataFailure = record(error, step: used.joined(separator: " + "))
                 best = source
             }
         }
@@ -248,23 +214,11 @@ public struct FileOptimizer: Sendable {
             // is the reason, not what a tool or a check said about it.
             let damage = lastError != nil || metadataFailure != nil ? await Verifier.damage(of: source, format: format) : nil
             if damage == nil, metadataFailure == nil, let lastError, used.isEmpty, !(lastError is VerificationError) { throw lastError }
-            var copy: URL?
-            if case .newFile(let planned, includeUnchanged: true) = destination {
-                copy = try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
-                                                 moveAsideToTrash: settings.moveOriginalsToTrash)
-            }
-            if let damage {
-                return .unchanged(reason: String(localized: "Unchanged – the file is damaged: \(damage)", bundle: .module), size: size, copy: copy)
-            }
-            if let metadataFailure {
-                return .unchanged(reason: String(localized: "Unchanged – the metadata couldn’t be filtered safely: \(metadataFailure)", bundle: .module),
-                                  size: size, copy: copy)
-            }
-            if let rejected {
-                return .unchanged(reason: String(localized: "Unchanged – result rejected: \(rejected.reason)", bundle: .module),
-                                  size: size, copy: copy)
-            }
-            return .alreadyOptimal(size: size, copy: copy)
+            let reason: Unchanged.Reason = if let damage { .damaged(damage) }
+                else if let metadataFailure { .metadataNotFilterable(metadataFailure) }
+                else if counted > 0 { .resultRejected(rejections[counted - 1].reason) }
+                else { .alreadyOptimal }
+            return try keep(url, reason, size: size, destination: destination, from: source, rejected: rejections)
         }
         try Task.checkCancellation()
         // Listed like a step: the gain map the original hid shows everywhere
@@ -281,40 +235,67 @@ public struct FileOptimizer: Sendable {
             let target = try FileReplacer.writeNew(best, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
                                                    moveAsideToTrash: settings.moveOriginalsToTrash)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: target, trashedOriginal: nil,
-                              fidelity: fidelity)
+                              fidelity: fidelity, rejected: rejections)
         case .replace:
             // Don't overwrite changes someone made while we were working.
             let now = try Self.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey])
             guard now.fileSize == before.fileSize, now.contentModificationDate == before.contentModificationDate else {
-                return .skipped(reason: String(localized: "The file changed while it was being optimized", bundle: .module), size: size)
+                return try keep(url, .changedMeanwhile, size: size, destination: destination, rejected: rejections)
             }
             let trashed = try FileReplacer.replace(url, with: best, moveOriginalToTrash: settings.moveOriginalsToTrash,
                                                    keepModificationDate: settings.keepModificationDate)
             return .optimized(originalSize: size, newSize: bestSize, tools: used, result: url, trashedOriginal: trashed,
-                              fidelity: fidelity)
+                              fidelity: fidelity, rejected: rejections)
         }
+    }
+
+    /// The file stays as it is. When the reason says it belongs in an
+    /// output folder, an unchanged copy goes there: of `file`, the copy from
+    /// before the work (used up), or else of the original.
+    private func keep(_ url: URL, _ reason: Unchanged.Reason, size: Int64, destination: Destination,
+                      from file: URL? = nil, rejected: [Rejection] = []) throws -> Outcome {
+        let holdsPrivateData = Unchanged.holdsPrivateData(file ?? url, reason: reason, level: settings.metadata)
+        var copy: URL?
+        if reason.belongsInOutputFolder, case .newFile(let planned, includeUnchanged: true) = destination {
+            func write(_ source: URL) throws -> URL {
+                try FileReplacer.writeNew(source, to: OutputClaims.claim(planned, for: url), attributesFrom: url,
+                                          moveAsideToTrash: settings.moveOriginalsToTrash)
+            }
+            if let file {
+                copy = try write(file)
+            } else {
+                let (work, source) = try Self.workCopy(of: url, named: url.lastPathComponent)
+                defer { try? FileManager.default.removeItem(at: work) }
+                copy = try write(source)
+            }
+        }
+        return .unchanged(Unchanged(reason: reason, size: size, copy: copy, holdsPrivateData: holdsPrivateData, rejected: rejected))
     }
 
     private enum Attempt: Sendable {
         case output(Candidate, URL, Int64)
-        case failed(any Error, required: Bool)
+        case failed(any Error, Candidate)
         case nothing
     }
 
     // MARK: -
 
-    /// Truncated or corrupt files are left exactly as they are. ImageIO
-    /// happily decodes the first part of a truncated PNG, so the container's
-    /// end marker is checked as well.
-    static func isComplete(_ url: URL, format: ImageFormat) -> Bool {
-        guard let data = try? Data(contentsOf: url, options: .alwaysMapped), hasEndMarker(data, format: format)
-        else { return false }
-        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-              CGImageSourceGetStatus(source) == .statusComplete,
-              CGImageSourceGetCount(source) > 0,
-              CGImageSourceGetStatusAtIndex(source, 0) == .statusComplete
-        else { return false }
-        return CGImageSourceCreateImageAtIndex(source, 0, nil) != nil
+    /// Why a file is truncated or corrupt, or nil when it reads to its end.
+    /// Such files are left exactly as they are. ImageIO happily decodes the
+    /// first part of a truncated PNG, so the container's end marker is
+    /// checked as well.
+    static func incompleteness(of url: URL, format: ImageFormat) -> String? {
+        let unreadable = String(localized: "unreadable", bundle: .module)
+        guard let data = try? Data(contentsOf: url, options: .alwaysMapped) else { return unreadable }
+        guard hasEndMarker(data, format: format) else {
+            return format == .webp ? String(localized: "truncated", bundle: .module) : String(localized: "no end marker", bundle: .module)
+        }
+        // From the file, not the mapped data: ImageIO reads some files differently from data.
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(source) > 0 else { return unreadable }
+        for status in [CGImageSourceGetStatus(source), CGImageSourceGetStatusAtIndex(source, 0)] where status != .statusComplete {
+            return status == .statusIncomplete || status == .statusUnexpectedEOF ? String(localized: "truncated", bundle: .module) : unreadable
+        }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil) == nil ? unreadable : nil
     }
 
     /// C2PA Content Credentials are signed with a hash over the file's bytes,

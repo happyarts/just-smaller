@@ -76,7 +76,7 @@ final class QualityChooserTests {
     @Test func theChosenEncodingIsUsedAndCheckedAsTheFinishedFile() async throws {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([90, 75])
-        guard case .optimized(let before, let after, let tools, _, _, let fidelity) =
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(chooser.tried == [90, 75])
@@ -90,7 +90,7 @@ final class QualityChooserTests {
     func aFailedCheckLeavesTheLosslessResult(searchFails: Bool) async throws {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([75], passes: false, fails: searchFails)
-        guard case .optimized(_, _, let tools, _, _, let fidelity) =
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
@@ -102,9 +102,8 @@ final class QualityChooserTests {
         let url = jpeg("photo.jpg", quality: 0.98)
         let chooser = Chooser([])
         switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
-        case .alreadyOptimal: break
-        case let outcome: Issue.record("\(outcome)")
+        case .optimized(_, _, let tools, _, _, let fidelity, _): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
+        case .unchanged(let kept): #expect(kept.reason == .alreadyOptimal, "\(kept)")
         }
         #expect(chooser.verified.isEmpty)
     }
@@ -114,9 +113,8 @@ final class QualityChooserTests {
         let url = jpeg("small.jpg", quality: 0.3)
         let chooser = Chooser([100])
         switch try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
-        case .alreadyOptimal: break
-        case let outcome: Issue.record("\(outcome)")
+        case .optimized(_, _, let tools, _, _, let fidelity, _): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
+        case .unchanged(let kept): #expect(kept.reason == .alreadyOptimal, "\(kept)")
         }
         #expect(chooser.tried == [100] && chooser.verified.isEmpty)
     }
@@ -146,7 +144,7 @@ final class QualityChooserTests {
         #expect(CGImageDestinationFinalize(dest))
         var settings = self.settings
         settings.quality = 85
-        guard case .optimized(_, _, let tools, _, _, let fidelity) =
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings, chooser: chooser).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(tools.contains("quantizr") && fidelity == .lossy && chooser.verified.isEmpty, "\(tools) \(fidelity)")
@@ -185,7 +183,7 @@ final class QualityChooserTests {
           </g>
         </svg>
         """.utf8).write(to: url)
-        guard case .optimized(_, _, _, _, _, let fidelity) =
+        guard case .optimized(_, _, _, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings, chooser: Chooser([80])).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(fidelity == .lossless)

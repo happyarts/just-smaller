@@ -11,6 +11,16 @@
         }
       }
     },
+    "%@ – it can’t be checked safely": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ – lässt sich nicht sicher prüfen"
+          }
+        }
+      }
+    },
     "-optimized": {
       "localizations": {
         "de": {
@@ -27,6 +37,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "ein JPEG-XL-Programm würde es anders zeigen"
+          }
+        }
+      }
+    },
+    "Already optimal": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bereits optimal"
           }
         }
       }
@@ -111,12 +131,12 @@
         }
       }
     },
-    "Has Content Credentials (C2PA). Converting would invalidate them.": {
+    "Has Content Credentials (C2PA), which any change would invalidate": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hat Content Credentials (C2PA). Umwandeln würde sie ungültig machen."
+            "value": "Enthält einen Herkunftsnachweis (C2PA), den jede Änderung ungültig machen würde"
           }
         }
       }
@@ -141,22 +161,22 @@
         }
       }
     },
-    "Has Content Credentials (C2PA). Optimizing would invalidate them.": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enthält einen Herkunftsnachweis (C2PA). Eine Optimierung würde ihn ungültig machen."
-          }
-        }
-      }
-    },
     "Holds data after the image that a JPEG XL viewer wouldn’t know": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
             "value": "Enthält Daten nach dem Bild, die ein JPEG-XL-Programm nicht kennen würde"
+          }
+        }
+      }
+    },
+    "Holds images that can’t be read safely": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enthält Bilder, die sich nicht sicher lesen lassen"
           }
         }
       }
@@ -251,6 +271,16 @@
         }
       }
     },
+    "Motion photo whose video can’t be located safely": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bewegtfoto, dessen Video sich nicht sicher finden lässt"
+          }
+        }
+      }
+    },
     "Motion photo – a JPEG XL viewer would show only the photo, not the video": {
       "localizations": {
         "de": {
@@ -261,22 +291,22 @@
         }
       }
     },
+    "no end marker": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "kein Ende-Kennzeichen"
+          }
+        }
+      }
+    },
     "Not a supported image": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
             "value": "Kein unterstütztes Bildformat"
-          }
-        }
-      }
-    },
-    "Not converted – result rejected: %@": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nicht umgewandelt – Ergebnis verworfen: %@"
           }
         }
       }
@@ -341,22 +371,12 @@
         }
       }
     },
-    "The file changed while it was being converted": {
+    "The file changed in the meantime": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Die Datei hat sich während des Umwandelns geändert"
-          }
-        }
-      }
-    },
-    "The file changed while it was being optimized": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Die Datei wurde während der Optimierung verändert"
+            "value": "Die Datei wurde inzwischen verändert"
           }
         }
       }
@@ -371,22 +391,22 @@
         }
       }
     },
-    "The file or its folder is read-only": {
+    "The file is damaged: %@": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Die Datei oder ihr Ordner ist schreibgeschützt"
+            "value": "Die Datei ist beschädigt: %@"
           }
         }
       }
     },
-    "The folder for the new file is read-only": {
+    "The file or its destination folder is read-only": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Der Ordner für die neue Datei ist schreibgeschützt"
+            "value": "Die Datei oder ihr Zielordner ist schreibgeschützt"
           }
         }
       }
@@ -561,26 +581,6 @@
         }
       }
     },
-    "Unchanged – result rejected: %@": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unverändert – Ergebnis verworfen: %@"
-          }
-        }
-      }
-    },
-    "Unchanged – the file is damaged: %@": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unverändert – die Datei ist beschädigt: %@"
-          }
-        }
-      }
-    },
     "Contains scripts": {
       "localizations": {
         "de": {
@@ -621,16 +621,6 @@
         }
       }
     },
-    "%@ – left unchanged, it can’t be checked safely": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%@ – unverändert gelassen, lässt sich nicht sicher prüfen"
-          }
-        }
-      }
-    },
     "contains content that can’t be checked": {
       "localizations": {
         "de": {
@@ -647,26 +637,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Die optimierte Datei ließ sich nicht an ihren Platz legen. Das Original liegt im Papierkorb als „%@“."
-          }
-        }
-      }
-    },
-    "Holds images that can’t be read safely – left unchanged": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Enthält Bilder, die sich nicht sicher lesen lassen – unverändert gelassen"
-          }
-        }
-      }
-    },
-    "Motion photo whose video can’t be located safely – left unchanged": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Bewegtfoto, dessen Video sich nicht sicher finden lässt – unverändert gelassen"
           }
         }
       }
@@ -741,16 +711,6 @@
         }
       }
     },
-    "Unchanged – the metadata couldn’t be filtered safely: %@": {
-      "localizations": {
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Unverändert – die Metadaten ließen sich nicht sicher filtern: %@"
-          }
-        }
-      }
-    },
     "text changed": {
       "localizations": {
         "de": {
@@ -767,6 +727,16 @@
           "stringUnit": {
             "state": "translated",
             "value": "der Decoder meldet beschädigte Daten"
+          }
+        }
+      }
+    },
+    "truncated": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "abgeschnitten"
           }
         }
       }

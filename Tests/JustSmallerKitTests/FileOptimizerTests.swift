@@ -77,7 +77,7 @@ final class FileOptimizerTests {
         let copy = dir.appending(path: "reference.png")
         try FileManager.default.copyItem(at: url, to: copy)
 
-        guard case .optimized(let before, let after, let tools, _, _, let fidelity) = try await optimize(url) else {
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity, _) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
         #expect(after < before)
@@ -191,7 +191,7 @@ final class FileOptimizerTests {
         try Data(svg.utf8).write(to: url)
         var settings = self.settings
         settings.lossy = lossy
-        guard case .optimized(let before, let after, _, _, _, let fidelity) =
+        guard case .optimized(let before, let after, _, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(after < before / 2)
@@ -212,7 +212,8 @@ final class FileOptimizerTests {
 
         for url in [file, inFolder] {
             let before = try Data(contentsOf: url)
-            guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
+            let outcome = try await optimize(url)
+            #expect(TestImages.reason(outcome) == .readOnly, "\(url.lastPathComponent): \(outcome)")
             #expect(try Data(contentsOf: url) == before)
         }
     }
@@ -226,7 +227,7 @@ final class FileOptimizerTests {
         let destination = OutputPlanner.destination(for: url, root: nil, settings: settings)
         #expect(destination == .newFile(dir.appending(path: "photo-opt.png"), includeUnchanged: false))
 
-        guard case .optimized(_, let after, _, let result, nil, _) = try await FileOptimizer(settings: settings)
+        guard case .optimized(_, let after, _, let result, nil, _, _) = try await FileOptimizer(settings: settings)
             .optimize(url, to: destination, progress: { _ in }) else { Issue.record("not optimized"); return }
         #expect(try Data(contentsOf: url) == original)
         #expect(result.lastPathComponent == "photo-opt.png")
@@ -316,7 +317,7 @@ final class FileOptimizerTests {
         let url = dir.appending(path: "dynamic.svg")
         let svg = "<?xml version=\"1.0\"?>\n<!-- comment -->\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100\" height=\"100\">  \(content)  </svg>\n"
         try Data(svg.utf8).write(to: url)
-        guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
+        guard case .uncheckable = TestImages.reason(try await optimize(url)) else { Issue.record("not left alone"); return }
         #expect(try String(contentsOf: url, encoding: .utf8) == svg)
     }
 
@@ -440,7 +441,7 @@ final class FileOptimizerTests {
         let segment: [UInt8] = [0xFF, 0xE2, 0x00, 0x0A] + Array("MPF\0".utf8) + [0, 0, 0, 0]
         try (plain.prefix(2) + Data(segment) + plain.dropFirst(2)).write(to: mpf)
         let before = try Data(contentsOf: mpf)
-        guard case .skipped = try await optimize(mpf) else { Issue.record("not skipped"); return }
+        #expect(TestImages.reason(try await optimize(mpf)) == .unreadableImages)
         #expect(try Data(contentsOf: mpf) == before)
     }
 
@@ -450,7 +451,7 @@ final class FileOptimizerTests {
         let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in
             try? edited.write(to: url)
         }
-        guard case .skipped = outcome else { Issue.record("replaced a changed file: \(outcome)"); return }
+        guard TestImages.reason(outcome) == .changedMeanwhile else { Issue.record("replaced a changed file: \(outcome)"); return }
         #expect(try Data(contentsOf: url) == edited)
     }
 
@@ -589,7 +590,7 @@ final class FileOptimizerTests {
             try fm.createDirectory(at: sub, withIntermediateDirectories: true)
             let url = sub.appending(path: "IMG_1.png")
             try fm.copyItem(at: write(image(), "\(folder)-src.png", type: .png), to: url)
-            guard case .optimized(_, _, _, let result, _, _) = try await FileOptimizer(settings: settings)
+            guard case .optimized(_, _, _, let result, _, _, _) = try await FileOptimizer(settings: settings)
                 .optimize(url, to: .newFile(out.appending(path: "IMG_1.png"), includeUnchanged: false), progress: { _ in })
             else { Issue.record("not optimized"); return }
             results.append(result)
@@ -670,7 +671,7 @@ final class FileOptimizerTests {
             try await Verifier.verify(original: a, result: b, format: .jpeg, pixelsMustMatch: true)
         }
         // The rewritten entropy coding carries the same coefficients and earns the seal.
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(a) else {
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = try await optimize(a) else {
             Issue.record("not optimized"); return
         }
         #expect(tools.contains("jpeg-scan"))
@@ -710,7 +711,7 @@ final class FileOptimizerTests {
         let url = write(image(width: 400, height: 300, space: CGColorSpace.displayP3), "lossy.jpg", type: .jpeg,
                         properties: [kCGImagePropertyOrientation: 6,
                                      kCGImageDestinationLossyCompressionQuality: 0.97])
-        guard case .optimized(let before, let after, let tools, _, _, let fidelity) =
+        guard case .optimized(let before, let after, let tools, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(tools.contains("jpegli"))
@@ -765,9 +766,8 @@ final class FileOptimizerTests {
     /// is, never an error.
     private func expectOptimizedWithoutLossOrUnchanged(_ url: URL, original: Data, settings: OptimizationSettings) async throws {
         switch try await FileOptimizer(settings: settings).optimize(url, progress: { _ in }) {
-        case .optimized(_, _, let tools, _, _, let fidelity): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
-        case .alreadyOptimal, .unchanged: #expect(try Data(contentsOf: url) == original)
-        case let outcome: Issue.record("\(outcome)")
+        case .optimized(_, _, let tools, _, _, let fidelity, _): #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
+        case .unchanged: #expect(try Data(contentsOf: url) == original)
         }
     }
 
@@ -804,7 +804,7 @@ final class FileOptimizerTests {
         let url = write(grainyImage(), "quantize.png", type: .png)
         let before = try Data(contentsOf: url).count
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(tools.contains("quantizr"), "\(tools)")
         #expect(try Data(contentsOf: url).count < before)
         #expect(iccName(url) == CGColorSpace.displayP3 as String)
@@ -822,7 +822,7 @@ final class FileOptimizerTests {
         try FileManager.default.copyItem(at: url, to: original)
 
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(!tools.contains("quantizr") && fidelity == .pixelIdentical, "\(tools)")
         try await Verifier.verify(original: original, result: url, format: .png, pixelsMustMatch: true)
     }
@@ -839,7 +839,7 @@ final class FileOptimizerTests {
         }.write(to: url)
 
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(tools.contains("quantizr"), "\(tools)")
         let chunks = try PNGChunks.read(ByteView(Data(contentsOf: url)), strict: true)
         #expect(chunks.map(\.type) == ["IHDR", "sRGB", "PLTE", "IDAT", "IEND"])
@@ -897,7 +897,7 @@ final class FileOptimizerTests {
         #expect(before.contains("eXIf") && before.contains("iTXt"), "ImageIO wrote no EXIF or XMP: \(before)")
 
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, _, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(tools.contains("quantizr"), "\(tools)")
         try MetadataCheck.verify(original: original, result: url, level: level)
         let after = try types(url), image = try #require(after.firstIndex(of: "IDAT"))
@@ -920,7 +920,7 @@ final class FileOptimizerTests {
         let url = write(image(width: 400, height: 300), "already-small.jpg", type: .jpeg,
                         properties: [kCGImageDestinationLossyCompressionQuality: 0.4])
         #expect((JPEGQuality.estimate(try Data(contentsOf: url)) ?? 100) < 90)
-        guard case .optimized(_, _, let tools, _, _, let fidelity) =
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) =
             try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("not optimized"); return }
         #expect(!tools.contains("jpegli"))
@@ -935,20 +935,60 @@ final class FileOptimizerTests {
         #expect(estimates[0] < estimates[1] && estimates[1] < estimates[2])
     }
 
+    /// `jpeg` with a minimal APP11 segment that holds a JUMBF superbox labelled "c2pa".
+    private static func withContentCredentials(_ jpeg: Data) -> Data {
+        let payload: [UInt8] = Array("JP".utf8) + [0, 1, 0, 0, 0, 1] + [0, 0, 0, 24] + Array("jumb".utf8)
+            + [0, 0, 0, 16] + Array("jumd".utf8) + Array("c2pa".utf8) + [0, 0, 0, 0]
+        return jpeg.prefix(2) + JPEGMarkers.write(0xEB, payload) + jpeg.dropFirst(2)
+    }
+
     @Test func contentCredentialsAreLeftIntact() async throws {
         let plain = write(image(), "c2pa-source.jpg", type: .jpeg,
                           properties: [kCGImageDestinationLossyCompressionQuality: 0.95])
-        var bytes = [UInt8](try Data(contentsOf: plain))
-        // A minimal APP11 segment with a JUMBF superbox labelled "c2pa".
-        let payload: [UInt8] = Array("JP".utf8) + [0, 1, 0, 0, 0, 1] + [0, 0, 0, 24] + Array("jumb".utf8)
-            + [0, 0, 0, 16] + Array("jumd".utf8) + Array("c2pa".utf8) + [0, 0, 0, 0]
-        let length = payload.count + 2
-        bytes.insert(contentsOf: [0xFF, 0xEB, UInt8(length >> 8), UInt8(length & 0xFF)] + payload, at: 2)
+        let bytes = Self.withContentCredentials(try Data(contentsOf: plain))
         let url = dir.appending(path: "c2pa.jpg")
-        try Data(bytes).write(to: url)
+        try bytes.write(to: url)
 
-        guard case .skipped = try await optimize(url) else { Issue.record("must be skipped"); return }
-        #expect(try Data(contentsOf: url) == Data(bytes))
+        #expect(TestImages.reason(try await optimize(url)) == .contentCredentials)
+        #expect(try Data(contentsOf: url) == bytes)
+    }
+
+    /// What stays as it is still goes into an output folder, so that the
+    /// folder is complete: an image as it was (Content Credentials, a
+    /// truncated PNG), what isn't an image not at all. An image says whether
+    /// it still holds what the metadata level removes, unless the level
+    /// keeps everything.
+    @Test func whatStaysGoesIntoTheOutputFolder() async throws {
+        let located = write(image(), "located.jpg", type: .jpeg,
+                            properties: [kCGImagePropertyGPSDictionary: [kCGImagePropertyGPSLatitude: 48.1, kCGImagePropertyGPSLatitudeRef: "N"],
+                                         kCGImageDestinationLossyCompressionQuality: 0.95])
+        let c2pa = dir.appending(path: "c2pa.jpg")
+        try Self.withContentCredentials(try Data(contentsOf: located)).write(to: c2pa)
+        let png = try Data(contentsOf: write(image(), "whole.png", type: .png))
+        let truncated = dir.appending(path: "truncated.png")
+        try png.prefix(png.count / 2).write(to: truncated)
+        let text = dir.appending(path: "text.gif")
+        try Data("not a gif at all".utf8).write(to: text)
+
+        func kept(_ url: URL, _ level: MetadataHandling) async throws -> Unchanged? {
+            var settings = self.settings
+            (settings.metadata, settings.moveOriginalsToTrash) = (level, false)
+            let target = dir.appending(path: "output-\(level.rawValue)").appending(path: url.lastPathComponent)
+            guard case .unchanged(let kept) = try await FileOptimizer(settings: settings)
+                .optimize(url, to: .newFile(target, includeUnchanged: true), progress: { _ in }) else { return nil }
+            #expect((kept.copy == nil) == !FileManager.default.fileExists(atPath: target.path))
+            if let copy = kept.copy { #expect(try Data(contentsOf: copy) == Data(contentsOf: url)) }
+            return kept
+        }
+        let credentials = try #require(try await kept(c2pa, .removePrivate))
+        #expect(credentials.reason == .contentCredentials && credentials.copy != nil && credentials.holdsPrivateData == true)
+        let damaged = try #require(try await kept(truncated, .removePrivate))
+        guard case .damaged(_?) = damaged.reason else { Issue.record("\(damaged)"); return }
+        #expect(damaged.copy != nil && damaged.holdsPrivateData == false)
+        let notAnImage = try #require(try await kept(text, .removePrivate))
+        #expect(notAnImage.reason == .notAnImage && notAnImage.copy == nil && notAnImage.holdsPrivateData == nil)
+        let everything = try #require(try await kept(c2pa, .keep))
+        #expect(everything.copy != nil && everything.holdsPrivateData == nil)
     }
 
     @Test func appleCgBIPNGIsRecognised() throws {
@@ -1062,7 +1102,7 @@ final class FileOptimizerTests {
         for c in all.dropFirst() where PNGChunks.isCritical(c) { png += c.whole.bytes }
         let url = dir.appending(path: "hp-srgb.png")
         try png.write(to: url)
-        guard case .optimized(_, _, _, _, _, let fidelity) = try await optimize(url) else {
+        guard case .optimized(_, _, _, _, _, let fidelity, _) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
         #expect(fidelity == .pixelIdentical)
@@ -1123,8 +1163,9 @@ final class FileOptimizerTests {
             _ = try? await optimize(url)
             #expect(try Data(contentsOf: url) == before, "\(url.lastPathComponent) was modified")
         }
-        guard case .skipped = try await optimize(truncated) else {
-            Issue.record("a truncated PNG must be skipped, not attempted"); return
+        let outcome = try await optimize(truncated)
+        guard case .damaged(let detail?) = TestImages.reason(outcome), detail.contains("end marker") || detail.contains("Ende") else {
+            Issue.record("a truncated PNG must be left alone, not attempted: \(outcome)"); return
         }
         let leftovers = try FileManager.default.contentsOfDirectory(atPath: dir.path).sorted()
         #expect(leftovers == ["source.png", "text.gif", "truncated.png"])
@@ -1137,14 +1178,15 @@ final class FileOptimizerTests {
     /// profile whose checksum is wrong, at every level; a JPEG with a
     /// restart marker out of turn, whose location must go.
     @Test func damageIsTheReasonAFileStays() async throws {
-        func staysDamaged(_ url: URL, _ level: MetadataHandling) async throws {
+        @discardableResult
+        func staysDamaged(_ url: URL, _ level: MetadataHandling) async throws -> Outcome {
             var settings = self.settings
             settings.metadata = level
             let before = try Data(contentsOf: url)
             let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in }
-            guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(url.lastPathComponent), \(level): \(outcome)"); return }
-            #expect(TestImages.isDamaged(reason), "\(level): \(reason)")
+            #expect(TestImages.isDamaged(outcome), "\(url.lastPathComponent), \(level): \(outcome)")
             #expect(try Data(contentsOf: url) == before)
+            return outcome
         }
         let png = try Data(contentsOf: write(image(space: CGColorSpace.displayP3), "profiles.png", type: .png,
                                               properties: [kCGImagePropertyPNGDictionary: [kCGImagePropertyPNGSoftware: "SecretApp"]]))
@@ -1182,15 +1224,40 @@ final class FileOptimizerTests {
             let url = dir.appending(path: "damaged-data-\(n).jpg")
             try damaged.write(to: url)
             #expect(StructureCheck.damage(of: url, format: .jpeg) == nil, "image \(n + 1)")
-            for level in MetadataHandling.allCases { try await staysDamaged(url, level) }
+            // The damage is the reason; what the checks said of the results
+            // is still listed, and none of them changed pixels.
+            var rejected: [Rejection] = []
+            for level in MetadataHandling.allCases {
+                if case .unchanged(let kept) = try await staysDamaged(url, level) { rejected += kept.rejected }
+            }
+            #expect(!rejected.isEmpty && rejected.allSatisfy { !$0.pixelsChanged }, "image \(n + 1): \(rejected)")
         }
+    }
+
+    /// A check that compares the image data says so when it differs; other
+    /// findings don't.
+    @Test func changedPixelsAreNamedAsSuch() async throws {
+        let a = write(image(), "a.png", type: .png)
+        let ctx = CGContext(data: nil, width: 96, height: 64, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.draw(image(), in: CGRect(x: 0, y: 0, width: 96, height: 64))
+        ctx.setFillColor(red: 1, green: 0, blue: 0, alpha: 1)
+        ctx.fill(CGRect(x: 10, y: 10, width: 1, height: 1))
+        let b = write(ctx.makeImage()!, "b.png", type: .png)
+        let c = write(image(width: 95), "c.png", type: .png)
+        func finding(_ result: URL) async -> VerificationError? {
+            do { try await Verifier.verify(original: a, result: result, format: .png, pixelsMustMatch: true) } catch { return error as? VerificationError }
+            return nil
+        }
+        #expect(await finding(b)?.pixelsChanged == true)
+        #expect(await finding(c).map { !$0.pixelsChanged } == true)
     }
 
     @Test func originalGoesToTrashAndCanBeFound() async throws {
         var settings = self.settings
         settings.moveOriginalsToTrash = true
         let url = write(image(), "trash me.png", type: .png)
-        guard case .optimized(_, _, _, _, let trashed?, _) = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
+        guard case .optimized(_, _, _, _, let trashed?, _, _) = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
         else { Issue.record("no trashed original"); return }
         #expect(FileManager.default.fileExists(atPath: trashed.path))
         #expect(trashed.path.hasPrefix(Trash.testFolder!.path))

@@ -71,7 +71,7 @@ final class SVGTextTests {
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false
         let outcome = try await FileOptimizer(settings: settings).optimize(url) { _ in }
-        guard case .optimized(_, let size, let tools, _, _, _) = outcome else {
+        guard case .optimized(_, let size, let tools, _, _, _, _) = outcome else {
             Issue.record("not optimized: \(outcome)")
             return
         }

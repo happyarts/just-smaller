@@ -78,7 +78,7 @@ final class HEICTests {
         settings.quality = 40
         settings.outputLossy = .replace
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, _, _, _, let fidelity) = outcome else {
+        guard case .optimized(_, _, _, _, _, let fidelity, _) = outcome else {
             // Lossless with nothing to remove: the file stays as it is.
             #expect(!lossy && level == .keep, "not optimized: \(outcome)"); return
         }
@@ -118,7 +118,7 @@ final class HEICTests {
         settings.lossy = true
         settings.quality = 50
         settings.outputLossy = .replace
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else { Issue.record("not optimized"); return }
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = try await optimize(url) else { Issue.record("not optimized"); return }
         #expect(tools.contains("ImageIO") && fidelity == .lossy)
         #expect(try tiles(url) == [384, 384])
         #expect(props(try Data(contentsOf: url))[kCGImagePropertyGPSDictionary] == nil)
@@ -159,7 +159,7 @@ final class HEICTests {
         await #expect(throws: VerificationError.self) {
             try await Verifier.verify(original: url, result: other, format: .heic, pixelsMustMatch: true)
         }
-        guard case .optimized(_, _, _, _, _, let fidelity) = try await optimize(url) else { Issue.record("not optimized"); return }
+        guard case .optimized(_, _, _, _, _, let fidelity, _) = try await optimize(url) else { Issue.record("not optimized"); return }
         #expect(fidelity == .pixelIdentical)
         let p = props(try Data(contentsOf: url))
         #expect(p[kCGImagePropertyGPSDictionary] == nil)

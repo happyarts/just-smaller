@@ -87,12 +87,12 @@ converted = before = after = 0
 for n in names:
     a, r = os.path.join(orig, n), records.get(n, {})
     jxl = os.path.join(run, stem(n) + ".jxl")
-    if r.get("status") == "failed": fails.append((n, "ERROR: " + r.get("reason", "")))
+    if r.get("status") == "failed": fails.append((n, "ERROR: " + r.get("message", "")))
     if r.get("status") != "optimized":
-        reasons[re.sub(r":.*", "", r.get("reason", "?"))] += 1
+        reasons[re.sub(r":.*", "", r.get("message", "?"))] += 1
         # A check that failed is worth a look, file by file.
-        if r.get("status") == "rejected" or "couldn’t be filtered" in r.get("reason", ""):
-            print(f"  rejected {n}: {r.get('reason')}")
+        if r.get("reason") in ("resultRejected", "metadataNotFilterable"):
+            print(f"  rejected {n}: {r.get('message')}")
         b = os.path.join(run, n)
         if not os.path.exists(b) or open(a, "rb").read() != open(b, "rb").read():
             fails.append((n, "NOT CONVERTED, BUT TOUCHED"))
@@ -128,7 +128,7 @@ for line in open(os.path.join(work, "to-jpeg.jsonl")):
 for n in result:
     r = backs.get(stem(n))
     if not r or r.get("status") != "optimized":
-        fails.append((n, "NOT BACK TO JPEG: " + (r or {}).get("reason", "not reported"))); continue
+        fails.append((n, "NOT BACK TO JPEG: " + (r or {}).get("message", "not reported"))); continue
     c = subprocess.run([jpegcmp, os.path.join(orig, n), r["result"]], capture_output=True, text=True)
     if c.returncode != 0: fails.append((n, "BACK, COEFFICIENTS: " + (c.stdout + c.stderr).strip()))
 

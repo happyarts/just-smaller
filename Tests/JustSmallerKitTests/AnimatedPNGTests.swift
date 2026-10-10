@@ -209,7 +209,7 @@ final class AnimatedPNGTests {
         let url = try saved(original, "animated-\(effort)-\(lossy).png")
         let reference = try saved(original, "reference-\(effort)-\(lossy).png")
 
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else {
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = try await optimize(url) else {
             Issue.record("not optimized, nothing checked"); return
         }
         #expect(tools.contains("OxiPNG"))
@@ -291,14 +291,8 @@ final class AnimatedPNGTests {
     func damagedAnimationStaysAsItIs(damage: Damage) async throws {
         let data = Self.changed(damage.change)
         let url = try saved(data, "\(damage).png")
-        switch try await optimize(url) {
-        case .skipped(let reason, _):
-            #expect(["The file is damaged or incomplete", "Die Datei ist beschädigt oder unvollständig"].contains(reason))
-        case .unchanged(let reason, _, _):
-            #expect(TestImages.isDamaged(reason), "\(reason)")
-        case let outcome:
-            Issue.record("\(outcome)")
-        }
+        let outcome = try await optimize(url)
+        #expect(TestImages.isDamaged(outcome), "\(outcome)")
         #expect(try Data(contentsOf: url) == data)
     }
 }

@@ -18,11 +18,16 @@
 # (google-xmp.py) and must read the same. --private runs your own photos in
 # Testkorpus/private (a folder or a link to one; never in a repository) the same
 # way. Result sizes are compared with the last baseline so that a compression
-# regression shows up even when everything is still lossless.
+# regression shows up even when everything is still lossless. A step whose
+# result had other pixels or DCT coefficients than its input fails the run,
+# also when that result was rejected and the file stays as it is: a tool broke
+# the image. The reasons files stay as they are, and every rejected result,
+# are listed.
 #
 # --lossy runs with loss (just-smaller --lossy) and writes the results into an
 # output folder (--output), so the originals must stay byte for byte as they
-# were. Where a step with loss changed the picture (a PNG, the photo of a JPEG
+# were, and every image that stays as it is must be in the output folder as it
+# was. Where a step with loss changed the picture (a PNG, the photo of a JPEG
 # that holds one image, a HEIC, an SVG; never in a result the tool calls
 # identical), its pixels or coefficients are not compared: it must be the same
 # format, decode (a JPEG without a warning) to the same size, and keep
@@ -116,7 +121,10 @@ for line in open(os.path.join(work, "results.jsonl")):
     r = json.loads(line)
     records[os.path.basename(r["file"])] = r
     if r["status"] == "failed" and not os.path.basename(r["file"]).startswith("broken"):
-        fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("reason", "")))
+        fails.append((os.path.basename(r["file"]), "ERROR: " + r.get("message", "")))
+    # A tool that changed the image, even where its result was thrown away.
+    for x in r.get("rejected", []):
+        if x["pixelsChanged"]: fails.append((os.path.basename(r["file"]), f"PIXELS CHANGED BY {x['step']} (result rejected)"))
 def mp_index(b):
     """The first image's multi-picture index (MPF), an APP2 segment among its
     headers: where the segment starts and ends, where its first table or frame
@@ -207,12 +215,13 @@ for n in names:
         fails.append((n, "LOST")); continue
     rec = records.get(n, {})
     if lossy:
-        # The original stays; its result is in the output folder, unless it
-        # got none (skipped): then the original is what is checked.
+        # The original stays; its result is in the output folder, and so is
+        # every image that stays as it is. Without one (not an image), the
+        # original is what is checked.
         if os.path.getsize(b) != len(whole_a) or open(b, "rb").read() != whole_a:
             fails.append((n, "CHANGED THE ORIGINAL")); continue
         if os.path.exists(os.path.join(output, n)): b = os.path.join(output, n)
-        elif rec.get("status") in ("optimized", "unchanged", "rejected"):
+        elif rec.get("status") == "optimized" or rec.get("status") == "unchanged" and rec.get("reason") not in ("empty", "notAnImage"):
             fails.append((n, "NO RESULT IN THE OUTPUT FOLDER")); continue
     # With loss, only these may show a changed picture, and only when the
     # tool reports a lossy step in the result; the rest is checked as without.
@@ -229,7 +238,7 @@ for n in names:
     # Also files that stay as they are now but got smaller before: a tool
     # that stopped working shows up here.
     if n in baseline and sb > baseline[n]:
-        why = rec.get("reason") or "+".join(tools) or rec.get("status", "")
+        why = rec.get("message") or "+".join(tools) or rec.get("status", "")
         regress.append((n, baseline[n], f"{sb}  ({why})"))
     # An original whose multi-picture index lay behind its tables and lies in
     # front of them in the result is compared as it reads with its index in
@@ -338,6 +347,11 @@ if baseline:
     was = sum(baseline.get(n, result.get(n, 0)) for n in result); now = sum(result.values())
     print(f"vs baseline: {now - was:+d} bytes over {len(result)} files")
 if lossy: print(f"with loss: {relaxed} results checked to decode, not to match")
+# Why files stay as they are, and every result that failed its check.
+reasons = collections.Counter(r.get("reason") for r in records.values() if r["status"] == "unchanged")
+if reasons: print("unchanged: " + ", ".join(f"{k} {c}" for k, c in reasons.most_common()))
+for n, r in sorted(records.items()):
+    for x in r.get("rejected", []): print(f"  rejected {n} ({r.get('reason') or r['status']}): {x['step']}: {x['reason']}")
 for n, old, new in regress: print(f"  REGRESSION {n}: {old} -> {new}")
 for n, why in fails: print(f"  FAIL {n}: {why}")
 if update == "yes":

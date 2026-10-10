@@ -51,16 +51,21 @@ public struct FileConverter: Sendable {
                         progress: @escaping @Sendable (String) -> Void) async throws -> Outcome {
         let before = try FileOptimizer.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey, .creationDateKey])
         let size = Int64(before.fileSize ?? 0)
-        guard size > 0 else { return .skipped(reason: String(localized: "Empty file", bundle: .module), size: 0) }
+        func unchanged(_ reason: Unchanged.Reason, rejected: [Rejection] = []) -> Outcome {
+            // Said of a JPEG only: going back to JPEG gives the JPEG as it was
+            // put in, metadata and all.
+            let level = target == .jxl && ImageFormat.detect(at: url) == .jpeg ? settings.metadata : .keep
+            return .unchanged(Unchanged(reason: reason, size: size, holdsPrivateData: Unchanged.holdsPrivateData(url, reason: reason, level: level),
+                                        rejected: rejected))
+        }
+        guard size > 0 else { return unchanged(.empty) }
         // The output folder may not exist yet: what counts is where it will be made.
         var folder = destination.deletingLastPathComponent()
         while !FileManager.default.fileExists(atPath: folder.path), folder.pathComponents.count > 1 { folder.deleteLastPathComponent() }
         guard FileManager.default.isWritableFile(atPath: folder.path) || (Sandbox.isActive && Sandbox.permitsWriting(folder.path)) else {
-            return .skipped(reason: String(localized: "The folder for the new file is read-only", bundle: .module), size: size)
+            return unchanged(.readOnly)
         }
-        if let reason = target == .jxl ? Self.obstacleToJXL(url) : Self.obstacleToJPEG(url) {
-            return .skipped(reason: reason, size: size)
-        }
+        if let reason = target == .jxl ? Self.obstacleToJXL(url) : Self.obstacleToJPEG(url) { return unchanged(reason) }
 
         let (work, source) = try FileOptimizer.workCopy(of: url, named: "source.\(target == .jxl ? "jpg" : "jxl")")
         defer { try? FileManager.default.removeItem(at: work) }
@@ -69,9 +74,8 @@ public struct FileConverter: Sendable {
         case .jxl:
             switch try await toJXL(source, smallerThan: size, work: work, progress: progress) {
             case .converted(let jxl): result = jxl
-            case .refused(let reason): return .skipped(reason: reason, size: size)
-            case .rejected(let reason):
-                return .unchanged(reason: String(localized: "Not converted – result rejected: \(reason)", bundle: .module), size: size, copy: nil)
+            case .refused(let reason): return unchanged(reason)
+            case .rejected(let rejections): return unchanged(.resultRejected(rejections.last?.reason ?? ""), rejected: rejections)
             }
         case .jpeg:
             progress("jxl-transcode")
@@ -79,14 +83,13 @@ public struct FileConverter: Sendable {
             do {
                 try await ToolRunner.run("jxl-transcode", ["decode", source.path, jpeg.path], in: work)
             } catch let error as ToolError {
-                return .skipped(reason: error.status == 4 ? Self.notFromJPEG
-                                    : String(localized: "The file is damaged or incomplete", bundle: .module), size: size)
+                return unchanged(error.status == 4 ? .notConvertible(Self.notFromJPEG) : .damaged(nil))
             }
             do {
                 try await Verifier.verifyConversion(jpeg: jpeg, jxl: source, tolerance: .foreign, rebuilt: true)
                 try Self.checkJPEG(jpeg)
             } catch let error as VerificationError {
-                return .unchanged(reason: String(localized: "Not converted – result rejected: \(error.reason)", bundle: .module), size: size, copy: nil)
+                return unchanged(.resultRejected(error.reason), rejected: [Rejection(error, step: "jxl-transcode")])
             }
             result = jpeg
         }
@@ -95,7 +98,7 @@ public struct FileConverter: Sendable {
         // Don't act on a file someone changed while we were working.
         let now = try FileOptimizer.freshValues(of: url, [.fileSizeKey, .contentModificationDateKey])
         guard now.fileSize == before.fileSize, now.contentModificationDate == before.contentModificationDate else {
-            return .skipped(reason: String(localized: "The file changed while it was being converted", bundle: .module), size: size)
+            return unchanged(.changedMeanwhile)
         }
         let newSize = Int64((try? result.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { $0 } ?? 0)
         // A file of that name that isn't one of ours (another picture called
@@ -119,15 +122,15 @@ public struct FileConverter: Sendable {
             }
         }
         return .optimized(originalSize: size, newSize: newSize, tools: ["jxl-transcode"], result: written,
-                          trashedOriginal: trashed, fidelity: .pixelIdentical)
+                          trashedOriginal: trashed, fidelity: .pixelIdentical, rejected: [])
     }
 
     private enum Conversion {
         case converted(URL)
         /// The file can't become a JPEG XL; it stays as it is.
-        case refused(String)
-        /// A JPEG XL was made but failed a check.
-        case rejected(String)
+        case refused(Unchanged.Reason)
+        /// Each JPEG XL made failed a check.
+        case rejected([Rejection])
     }
 
     /// Only a JPEG XL smaller than the original file (`smallerThan` bytes)
@@ -155,22 +158,22 @@ public struct FileConverter: Sendable {
             // Removing private data is a promise: without it, no conversion.
             if level != .keep {
                 let reason = (error as? VerificationError)?.reason ?? error.localizedDescription
-                return .refused(String(localized: "The metadata couldn’t be filtered safely: \(reason)", bundle: .module))
+                return .refused(.metadataNotFilterable(reason))
             }
         }
 
         progress("jxl-transcode")
         let candidates = try await Self.encodings(of: jpeg, effort: settings.effort, work: work)
         guard !candidates.isEmpty else {
-            return .refused(String(localized: "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)",
-                                   bundle: .module))
+            return .refused(.notConvertible(String(localized: "This JPEG can’t be stored as JPEG XL without loss (CMYK, arithmetic coding, 12 bits, or too much data after the image)",
+                                                   bundle: .module)))
         }
         let smaller = candidates.filter { $0.size < limit }
         guard !smaller.isEmpty else {
-            return .refused(String(localized: "As JPEG XL it wouldn’t be smaller", bundle: .module))
+            return .refused(.notConvertible(String(localized: "As JPEG XL it wouldn’t be smaller", bundle: .module)))
         }
         progress(String(localized: "Checking", bundle: .module))
-        var rejected = ""
+        var rejected: [Rejection] = []
         for (jxl, _) in smaller {
             do {
                 try await Verifier.verifyConversion(jpeg: jpeg, jxl: jxl, tolerance: .converted)
@@ -178,7 +181,7 @@ public struct FileConverter: Sendable {
                 return .converted(jxl)
             } catch let error as VerificationError {
                 log.fault("JPEG XL rejected: \(error.reason, privacy: .public)")
-                rejected = error.reason
+                rejected.append(Rejection(error, step: "jxl-transcode"))
             }
         }
         return .rejected(rejected)
@@ -208,7 +211,7 @@ public struct FileConverter: Sendable {
     /// Why a JPEG XL made from a JPEG can't be stored anew, or nil: its
     /// JPEG doesn't rebuild (edited since, damaged), holds more than the
     /// photo, or has Content Credentials.
-    static func obstacleToRecompressing(_ jxl: URL) async -> String? {
+    static func obstacleToRecompressing(_ jxl: URL) async -> Unchanged.Reason? {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? fm.removeItem(at: work) }
@@ -217,56 +220,48 @@ public struct FileConverter: Sendable {
             try fm.createDirectory(at: work, withIntermediateDirectories: true)
             try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
         } catch {
-            return String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module)
+            return .notSupported(String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module))
         }
         guard let data = try? Data(contentsOf: rebuilt, options: .alwaysMapped),
               let layout = JPEGLayout.read(ByteView(data)), layout.jxlObstacle == nil else {
-            return String(localized: "The JPEG in this JPEG XL holds more than the photo (HDR gain map, depth map or video)", bundle: .module)
+            return .notSupported(String(localized: "The JPEG in this JPEG XL holds more than the photo (HDR gain map, depth map or video)", bundle: .module))
         }
-        if FileOptimizer.hasContentCredentials(rebuilt, format: .jpeg) {
-            return String(localized: "Has Content Credentials (C2PA). Optimizing would invalidate them.", bundle: .module)
-        }
+        if FileOptimizer.hasContentCredentials(rebuilt, format: .jpeg) { return .contentCredentials }
         return nil
     }
 
     static let notFromJPEG = String(localized: "This JPEG XL wasn’t made from a JPEG, so there is no JPEG to go back to", bundle: .module)
 
     /// Why `url` can't become a JPEG XL that shows all of it, or nil.
-    static func obstacleToJXL(_ url: URL) -> String? {
+    static func obstacleToJXL(_ url: URL) -> Unchanged.Reason? {
         guard ImageFormat.detect(at: url) == .jpeg else {
-            return String(localized: "Only JPEGs can be converted to JPEG XL", bundle: .module)
+            return .notConvertible(String(localized: "Only JPEGs can be converted to JPEG XL", bundle: .module))
         }
-        guard FileOptimizer.isComplete(url, format: .jpeg) else {
-            return String(localized: "The file is damaged or incomplete", bundle: .module)
-        }
-        guard !FileOptimizer.hasContentCredentials(url, format: .jpeg) else {
-            return String(localized: "Has Content Credentials (C2PA). Converting would invalidate them.", bundle: .module)
-        }
+        if let damage = FileOptimizer.incompleteness(of: url, format: .jpeg) { return .damaged(damage) }
+        guard !FileOptimizer.hasContentCredentials(url, format: .jpeg) else { return .contentCredentials }
         guard let layout = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap({ JPEGLayout.read(ByteView($0)) }) else {
-            return String(localized: "The file is damaged or incomplete", bundle: .module)
+            return .damaged(nil)
         }
         switch layout.jxlObstacle {
         case .video?:
-            return String(localized: "Motion photo – a JPEG XL viewer would show only the photo, not the video", bundle: .module)
+            return .notConvertible(String(localized: "Motion photo – a JPEG XL viewer would show only the photo, not the video", bundle: .module))
         case .moreImages?:
-            return String(localized: "Holds more than one image (HDR gain map, depth map or a second view) – a JPEG XL viewer would show only the photo",
-                          bundle: .module)
+            return .notConvertible(String(localized: "Holds more than one image (HDR gain map, depth map or a second view) – a JPEG XL viewer would show only the photo",
+                                          bundle: .module))
         case .otherData?:
-            return String(localized: "Holds data after the image that a JPEG XL viewer wouldn’t know", bundle: .module)
+            return .notConvertible(String(localized: "Holds data after the image that a JPEG XL viewer wouldn’t know", bundle: .module))
         case nil:
             return nil
         }
     }
 
     /// Why `url` can't go back to JPEG, or nil.
-    static func obstacleToJPEG(_ url: URL) -> String? {
+    static func obstacleToJPEG(_ url: URL) -> Unchanged.Reason? {
         guard let data = try? Data(contentsOf: url, options: .alwaysMapped), JXLContainer.isJXL(ByteView(data)) else {
-            return String(localized: "Only JPEG XL files can be converted back to JPEG", bundle: .module)
+            return .notConvertible(String(localized: "Only JPEG XL files can be converted back to JPEG", bundle: .module))
         }
-        guard let file = try? JXLContainer.read(ByteView(data)) else {
-            return String(localized: "The file is damaged or incomplete", bundle: .module)
-        }
-        return file.hasReconstructionData ? nil : notFromJPEG
+        guard let file = try? JXLContainer.read(ByteView(data)) else { return .damaged(nil) }
+        return file.hasReconstructionData ? nil : .notConvertible(notFromJPEG)
     }
 
     /// A rebuilt JPEG reads cleanly, the strict way, before it is written.

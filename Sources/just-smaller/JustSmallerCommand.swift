@@ -132,9 +132,9 @@ struct JustSmallerCommand: AsyncParsableCommand {
             for await report in group {
                 print(asJSON ? report.json : report.line)
                 if report.status == "failed" { failed += 1 }
-                if report.status == "skipped" || report.status == "rejected" { skipped += 1 }
+                if report.status == "unchanged" && report.reason != "alreadyOptimal" { skipped += 1 }
                 saved += report.saved
-                if report.status == "optimized" || report.status == "unchanged" { total += report.originalSize }
+                if report.status == "optimized" || report.reason == "alreadyOptimal" { total += report.originalSize }
                 startNext()
             }
         }
@@ -142,7 +142,7 @@ struct JustSmallerCommand: AsyncParsableCommand {
             let percent = Double(saved) / Double(total)
             print("\(found.count == 1 ? "1 file" : "\(found.count) files"), \(saved.formatted(.byteCount(style: .file))) saved (\(percent.formatted(.percent.precision(.fractionLength(1)))))")
         }
-        // 0: all fine, 1: some files skipped or left unchanged for a reason, 2: errors.
+        // 0: all fine, 1: some files left unchanged for a reason other than being optimal, 2: errors.
         if failed > 0 { throw ExitCode(2) }
         if skipped > 0 { throw ExitCode(1) }
     }
@@ -159,28 +159,31 @@ struct Report: Sendable {
     var identical = false
     /// A lossy step is part of the result.
     var lossy = false
+    /// Why the file stays as it is (`Unchanged.Reason.code`), or nil.
     var reason: String?
+    /// The reason or the error, in words.
+    var message: String?
+    var holdsPrivateData: Bool?
+    var rejected: [Rejection] = []
 
     var saved: Int64 { status == "optimized" ? originalSize - newSize : 0 }
 
     init(file: URL, outcome: Outcome) {
         self.file = file
         switch outcome {
-        case .optimized(let before, let after, let tools, let result, _, let fidelity):
+        case .optimized(let before, let after, let tools, let result, _, let fidelity, let rejected):
             (status, originalSize, newSize, self.result, self.tools) = ("optimized", before, after, result, tools)
-            (identical, lossy) = (fidelity == .pixelIdentical, fidelity == .lossy)
-        case .alreadyOptimal(let size, let copy):
-            (status, originalSize, newSize, result, identical) = ("unchanged", size, size, copy, true)
-        case .unchanged(let reason, let size, let copy):
-            (status, originalSize, newSize, result, self.reason) = ("rejected", size, size, copy, reason)
-        case .skipped(let reason, let size):
-            (status, originalSize, newSize, self.reason) = ("skipped", size ?? 0, size ?? 0, reason)
+            (identical, lossy, self.rejected) = (fidelity == .pixelIdentical, fidelity == .lossy, rejected)
+        case .unchanged(let kept):
+            (status, originalSize, newSize, result) = ("unchanged", kept.size, kept.size, kept.copy)
+            (reason, message, holdsPrivateData, rejected) = (kept.reason.code, kept.reason.description, kept.holdsPrivateData, kept.rejected)
+            identical = kept.reason == .alreadyOptimal
         }
     }
 
     init(file: URL, error: String) {
         self.file = file
-        reason = error
+        message = error
     }
 
     var line: String {
@@ -190,9 +193,10 @@ struct Report: Sendable {
             // A file grows only when private metadata had to go.
             let percent = (Double(abs(saved)) / Double(max(originalSize, 1))).formatted(.percent.precision(.fractionLength(1)))
             return "✓ \(name)  \(originalSize.formatted(.byteCount(style: .file))) → \(newSize.formatted(.byteCount(style: .file)))  \(saved < 0 ? "+" : "−")\(percent)  \(tools.joined(separator: " + "))\(identical ? "  (identical)" : "")"
-        case "unchanged": return "= \(name)  already optimal"
-        case "skipped", "rejected": return "– \(name)  \(reason ?? "")"
-        default: return "! \(name)  \(reason ?? "failed")"
+        case "unchanged":
+            let note = holdsPrivateData == true ? "  (private data stays in)" : ""
+            return reason == "alreadyOptimal" ? "= \(name)  already optimal\(note)" : "– \(name)  \(message ?? "")\(note)"
+        default: return "! \(name)  \(message ?? "failed")"
         }
     }
 
@@ -201,6 +205,11 @@ struct Report: Sendable {
                                      "saved": saved, "identical": identical, "lossy": lossy, "tools": tools]
         if let result, result != file { object["result"] = result.path }
         if let reason { object["reason"] = reason }
+        if let message { object["message"] = message }
+        if let holdsPrivateData { object["privateData"] = holdsPrivateData }
+        if !rejected.isEmpty {
+            object["rejected"] = rejected.map { ["step": $0.step, "reason": $0.reason, "pixelsChanged": $0.pixelsChanged] as [String: Any] }
+        }
         let data = (try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data()
         return String(decoding: data, as: UTF8.self)
     }

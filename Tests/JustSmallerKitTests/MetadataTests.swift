@@ -593,7 +593,7 @@ final class MetadataTests {
         var settings = OptimizationSettings()
         settings.moveOriginalsToTrash = false
         let outcome = try await FileOptimizer(settings: settings).optimize(url, progress: { _ in })
-        guard case .optimized(_, _, _, _, _, let fidelity) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, _, _, _, let fidelity, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(fidelity == .pixelIdentical)
         let p = props(url)
         #expect(p[kCGImagePropertyGPSDictionary] == nil)

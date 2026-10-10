@@ -5,6 +5,13 @@ import ImageIO
 
 struct VerificationError: LocalizedError {
     let reason: String
+    /// The image data (pixels, DCT coefficients) was compared and differs.
+    var pixelsChanged = false
+
+    static var pixelsChanged: VerificationError {
+        VerificationError(reason: String(localized: "pixels changed", bundle: .module), pixelsChanged: true)
+    }
+
     var errorDescription: String? { String(localized: "Result rejected: \(reason)", bundle: .module) }
 }
 
@@ -280,7 +287,7 @@ enum Verifier {
         do {
             try await ToolRunner.run("jpegcmp", [original?.path ?? "--check", result.path], in: result.deletingLastPathComponent())
         } catch let error as ToolError where error.status == 1 {
-            throw VerificationError(reason: String(localized: "pixels changed", bundle: .module))
+            throw VerificationError.pixelsChanged
         } catch let error as ToolError where error.status == 2 {
             if unreadableIsSound { return }
             throw VerificationError(reason: String(localized: "unreadable", bundle: .module))
@@ -462,7 +469,7 @@ enum Verifier {
         var i = 0, j = 0, endA = da[0], endB = db[0]
         var pa = try pixels(a, 0, deep: deep, straight: exactUnderAlpha), pb = try pixels(b, 0, deep: deep, straight: exactUnderAlpha)
         while true {
-            guard pa == pb else { throw VerificationError(reason: String(localized: "pixels changed", bundle: .module)) }
+            guard pa == pb else { throw VerificationError.pixelsChanged }
             // Step past whichever frame ends first, or both if they end together.
             let stepA = endA <= endB, stepB = endB <= endA
             if stepA { i += 1 }

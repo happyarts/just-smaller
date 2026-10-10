@@ -135,7 +135,7 @@ final class MultiImageJPEGTests {
         #expect(props(parts[1])[kCGImagePropertyGPSDictionary] != nil)
 
         settings.metadata = level
-        guard case .optimized(let from, let to, _, _, _, let fidelity) = try await optimize(url) else {
+        guard case .optimized(let from, let to, _, _, _, let fidelity, _) = try await optimize(url) else {
             Issue.record("not optimized"); return
         }
         #expect(fidelity == .pixelIdentical && to < from)
@@ -189,7 +189,7 @@ final class MultiImageJPEGTests {
         try (try Data(contentsOf: url) + Data([0, 0, 0, 0x18]) + Data("ftypmp42".utf8) + Data(repeating: 0x42, count: 5000)).write(to: url)
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: url)))?.problem == .video)
         let before = try Data(contentsOf: url)
-        guard case .skipped = try await optimize(url) else { Issue.record("not skipped"); return }
+        #expect(TestImages.reason(try await optimize(url)) == .motionPhotoVideo)
         #expect(try Data(contentsOf: url) == before)
     }
 
@@ -249,7 +249,7 @@ final class MultiImageJPEGTests {
         let oldWrong = try motionPhoto("misplaced-old.jpg", old: true) { $0 - 1 }
         #expect(JPEGLayout.read(ByteView(try Data(contentsOf: oldWrong.url)))?.problem == .video)
         let before = try Data(contentsOf: wrong.url)
-        guard case .skipped = try await optimize(wrong.url) else { Issue.record("not skipped"); return }
+        #expect(TestImages.reason(try await optimize(wrong.url)) == .motionPhotoVideo)
         #expect(try Data(contentsOf: wrong.url) == before)
 
         // Placed means: exactly one video, an MP4 that ends the file at its length.
@@ -354,7 +354,7 @@ final class MultiImageJPEGTests {
         #expect(layout.withGainMapShown(ByteView(original), for: ByteView(try Data(contentsOf: shown))) == (try Data(contentsOf: shown)))
         #expect(!shownGainMap(url))
         let outcome = try await optimize(url)
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = outcome else { Issue.record("not optimized: \(outcome)"); return }
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = outcome else { Issue.record("not optimized: \(outcome)"); return }
         #expect(fidelity == .pixelIdentical && tools.last == FileOptimizer.repairedHDR)
         #expect(layout.showsGainMap(in: ByteView(try Data(contentsOf: url))))
         #expect(shownGainMap(url) && headroom(url) == headroom(shown))
@@ -363,12 +363,12 @@ final class MultiImageJPEGTests {
         let seen = try ultraHDR("seen-\(level.rawValue).jpg", hidden: true, isoMarked: true)
         #expect(try #require(JPEGLayout.read(ByteView(try Data(contentsOf: seen)))).hidesGainMap && shownGainMap(seen))
         let headroomSeen = headroom(seen)
-        guard case .optimized(_, _, let seenTools, _, _, _) = try await optimize(seen) else { Issue.record("not optimized"); return }
+        guard case .optimized(_, _, let seenTools, _, _, _, _) = try await optimize(seen) else { Issue.record("not optimized"); return }
         #expect(!seenTools.contains(FileOptimizer.repairedHDR) && shownGainMap(seen) && headroom(seen) == headroomSeen)
 
         let undeclared = try ultraHDR("undeclared-\(level.rawValue).jpg", hidden: true, declared: false)
         #expect(try #require(JPEGLayout.read(ByteView(try Data(contentsOf: undeclared)))).hidesGainMap == false)
-        if case .optimized(_, _, let tools, _, _, _) = try await optimize(undeclared) { #expect(!tools.contains(FileOptimizer.repairedHDR)) }
+        if case .optimized(_, _, let tools, _, _, _, _) = try await optimize(undeclared) { #expect(!tools.contains(FileOptimizer.repairedHDR)) }
         #expect(!shownGainMap(undeclared))
     }
 
@@ -449,7 +449,7 @@ final class MultiImageJPEGTests {
                 guard case .optimized = outcome else { Issue.record("not optimized: \(outcome)"); continue }
                 #expect(try Data(contentsOf: url).suffix(png.count + camera.count) == png + camera)
             } else {
-                guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(outcome)"); continue }
+                guard case .metadataNotFilterable(let reason) = TestImages.reason(outcome) else { Issue.record("\(outcome)"); continue }
                 #expect(reason.contains("must stay as it is") && (try? Data(contentsOf: url)) == before)
             }
         }
@@ -467,7 +467,7 @@ final class MultiImageJPEGTests {
         settings.metadata = .removePrivate
         let before = try Data(contentsOf: url)
         let outcome = try await optimize(url)
-        guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(outcome)"); return }
+        guard case .metadataNotFilterable(let reason) = TestImages.reason(outcome) else { Issue.record("\(outcome)"); return }
         let after = try Data(contentsOf: url)
         #expect(reason.contains("must stay as it is") && after == before)
     }
@@ -502,7 +502,12 @@ final class MultiImageJPEGTests {
         #expect(JPEGLayout.read(ByteView(chance))?.problem == nil)
         for url in [unlisted, cut] {
             let before = try Data(contentsOf: url)
-            guard case .skipped = try await optimize(url) else { Issue.record("\(url.lastPathComponent) not skipped"); continue }
+            let outcome = try await optimize(url)
+            if url == unlisted {
+                #expect(TestImages.reason(outcome) == .unreadableImages, "\(outcome)")
+            } else if case .damaged = TestImages.reason(outcome) {} else {
+                Issue.record("\(url.lastPathComponent): \(outcome)")
+            }
             #expect(try Data(contentsOf: url) == before)
         }
     }
@@ -620,7 +625,7 @@ final class MultiImageJPEGTests {
                 .joined().contains(where: \.isLossy)
         }
         #expect(!lossy(layout) && lossy(plain))
-        guard case .optimized(_, _, let tools, _, _, let fidelity) = try await optimize(url) else { Issue.record("not optimized"); return }
+        guard case .optimized(_, _, let tools, _, _, let fidelity, _) = try await optimize(url) else { Issue.record("not optimized"); return }
         #expect(fidelity == .pixelIdentical && !tools.contains("jpegli"))
     }
 
@@ -920,7 +925,7 @@ final class MultiImageJPEGTests {
             if optimized {
                 guard case .optimized = outcome else { Issue.record("\(name): \(outcome)"); continue }
             } else {
-                guard case .unchanged(let reason, _, _) = outcome else { Issue.record("\(name): \(outcome)"); continue }
+                guard case .metadataNotFilterable(let reason) = TestImages.reason(outcome) else { Issue.record("\(name): \(outcome)"); continue }
                 let after = try Data(contentsOf: file.url)
                 #expect(reason.contains("must stay as it is") && after == before, "\(name)")
             }

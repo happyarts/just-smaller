@@ -79,10 +79,16 @@ enum TestImages {
         return r
     }
 
-    /// Whether `reason` says the file stays as it is because it is damaged
-    /// (in English or German).
-    static func isDamaged(_ reason: String) -> Bool {
-        ["Unchanged – the file is damaged: ", "Unverändert – die Datei ist beschädigt: "].contains { reason.hasPrefix($0) }
+    /// Why the file stayed as it is, or nil when it didn't.
+    static func reason(_ outcome: Outcome) -> Unchanged.Reason? {
+        guard case .unchanged(let kept) = outcome else { return nil }
+        return kept.reason
+    }
+
+    /// The file stayed as it is, and the damage found is the reason given.
+    static func isDamaged(_ outcome: Outcome) -> Bool {
+        guard case .damaged(_?) = reason(outcome) else { return false }
+        return true
     }
 
     static func properties(_ data: Data) -> [CFString: Any] {
