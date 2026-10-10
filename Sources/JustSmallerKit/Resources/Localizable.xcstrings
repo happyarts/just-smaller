@@ -21,6 +21,16 @@
         }
       }
     },
+    "Not enough free space on “%@” for the work files": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht genug freier Platz auf „%@“ für die Arbeitsdateien"
+          }
+        }
+      }
+    },
     "a JPEG XL viewer would show it differently": {
       "localizations": {
         "de": {

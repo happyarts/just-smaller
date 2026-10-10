@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 final class JPEGXLTests {
     let dir: URL
     var settings = OptimizationSettings()
+    var volumes: [DiskImage] = []
 
     init() throws {
         dir = FileManager.default.temporaryDirectory.appending(path: "JustSmallerTests-\(UUID().uuidString)")
@@ -21,6 +22,7 @@ final class JPEGXLTests {
         Trash.testFolder = FileManager.default.temporaryDirectory.appending(path: "JustSmallerTests-Trash")
     }
     deinit {
+        for volume in volumes { volume.eject() }
         try? FileManager.default.removeItem(at: dir)
     }
 
@@ -137,6 +139,55 @@ final class JPEGXLTests {
         #expect(try spelled("B\u{E4}r.jxl"))
         _ = try #require(result(try await convert(jxl, to: .jpeg)))
         #expect(try spelled("B\u{E4}r.jpg"))
+    }
+
+    // MARK: - Other volumes
+
+    /// A disk image, ejected when the test ends.
+    private func volume(_ fileSystem: String) throws -> DiskImage {
+        let volume = try DiskImage(fileSystem, in: dir)
+        volumes.append(volume)
+        return volume
+    }
+
+    /// A JPEG whose pixels, unpacked for the check, take 9 MB.
+    private func large(on volume: DiskImage) throws -> URL {
+        let url = volume.mount.appending(path: "large.jpg")
+        try FileManager.default.moveItem(at: jpeg("large.jpg", width: 2000, height: 1500), to: url)
+        return url
+    }
+
+    @Test func convertsOnAMemoryCardTooSmallForTheCheck() async throws {
+        let card = try volume("MS-DOS")
+        let original = try large(on: card)
+        let jxl = try #require(result(try await convert(original, to: .jxl)))
+        #expect(!FileManager.default.fileExists(atPath: original.path))
+        #expect(FileManager.default.fileExists(atPath: jxl.path))
+    }
+
+    @Test func aFullDiskIsSaidToBeFull() async throws {
+        let disk = try volume("APFS")
+        let original = try large(on: disk)
+        let before = try Data(contentsOf: original)
+        await #expect { try await self.convert(original, to: .jxl) } throws: { FileOptimizer.isOutOfSpace($0) }
+        #expect(try Data(contentsOf: original) == before)
+    }
+
+    @Test func deletesAPrecomposedNameOnExFAT() async throws {
+        let card = try volume("ExFAT")
+        // Written by path, so "ä" stays precomposed (NFC); exFAT lists it decomposed.
+        let name = card.mount.path + "/B\u{E4}r.jpg"
+        #expect(copyfile(jpeg("bear.jpg").path, name, nil, copyfile_flags_t(COPYFILE_DATA)) == 0)
+        // An extended attribute, which exFAT keeps in an AppleDouble file.
+        #expect(setxattr(name, "com.apple.metadata:kMDItemFinderComment", "bear", 4, 0, 0) == 0)
+        #expect(FileManager.default.fileExists(atPath: card.mount.path + "/._B\u{E4}r.jpg"))
+        let original = try #require(FileManager.default.contentsOfDirectory(at: card.mount, includingPropertiesForKeys: nil)
+            .first { $0.pathExtension == "jpg" })
+        _ = try #require(result(try await convert(original, to: .jxl)))
+        // Its AppleDouble file ("._Bär.jpg") goes with it.
+        let left = try FileManager.default.contentsOfDirectory(atPath: card.mount.path)
+        #expect(left.filter { $0.hasSuffix(".jpg") }.isEmpty)
+        #expect(left.map { $0.precomposedStringWithCanonicalMapping }.contains("B\u{E4}r.jxl"))
     }
 
     @Test func keepsThePermissions() async throws {

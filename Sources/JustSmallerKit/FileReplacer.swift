@@ -92,9 +92,11 @@ enum FileReplacer {
         let inode: ino_t
         let links: nlink_t
 
-        init?(_ url: URL) {
+        init?(_ url: URL) { self.init(path: url.path) }
+
+        init?(path: String) {
             var info = stat()
-            guard lstat(url.path, &info) == 0 else { return nil }
+            guard lstat(path, &info) == 0 else { return nil }
             device = info.st_dev
             inode = info.st_ino
             links = info.st_nlink
@@ -255,7 +257,7 @@ enum FileReplacer {
             // volume, a symlinked folder): never trash the original for a copy.
             if isSameFile(target, original) { throw OutputIsOriginal() }
             if !moveAsideToTrash {
-                try fm.removeItem(at: target)
+                try remove(target)
             } else {
                 do {
                     try Trash.move(target)
@@ -293,6 +295,20 @@ enum FileReplacer {
             if failed != EEXIST { unlink(path) }
         }
         throw POSIXError(POSIXErrorCode(rawValue: failed) ?? .EIO)
+    }
+
+    /// FileManager.removeItem, also on exFAT: there a name stored
+    /// precomposed (NFC) is listed and spelled in URLs decomposed (NFD), and
+    /// the file opens and renames by that spelling but can't be deleted by
+    /// it. Then it is deleted by its precomposed spelling, if that names the
+    /// same file.
+    static func remove(_ url: URL) throws {
+        do {
+            try FileManager.default.removeItem(at: url)
+        } catch let error as CocoaError where error.code == .fileNoSuchFile {
+            let precomposed = url.deletingLastPathComponent().path + "/" + url.lastPathComponent.precomposedStringWithCanonicalMapping
+            guard let file = FileID(url), FileID(path: precomposed) == file, unlink(precomposed) == 0 else { throw error }
+        }
     }
 
     struct OutputIsOriginal: LocalizedError {

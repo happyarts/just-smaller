@@ -113,7 +113,7 @@ public struct FileConverter: Sendable {
         var trashed: URL?
         if replacesOriginal {
             do {
-                if settings.moveOriginalsToTrash { trashed = try Trash.move(url) } else { try FileManager.default.removeItem(at: url) }
+                if settings.moveOriginalsToTrash { trashed = try Trash.move(url) } else { try FileReplacer.remove(url) }
             } catch {
                 log.error("The original stays next to the converted file: \(error.localizedDescription, privacy: .public)")
             }
@@ -149,8 +149,8 @@ public struct FileConverter: Sendable {
             try await Verifier.verify(original: source, result: filtered, format: .jpeg, pixelsMustMatch: true,
                                       structure: StructureCheck.Reference(original: source, format: .jpeg, level: level))
             jpeg = filtered
-        } catch is CancellationError {
-            throw CancellationError()
+        } catch where error is CancellationError || FileOptimizer.isOutOfSpace(error) {
+            throw error
         } catch {
             // Removing private data is a promise: without it, no conversion.
             if level != .keep {
@@ -207,8 +207,8 @@ public struct FileConverter: Sendable {
 
     /// Why a JPEG XL made from a JPEG can't be stored anew, or nil: its
     /// JPEG doesn't rebuild (edited since, damaged), holds more than the
-    /// photo, or has Content Credentials.
-    static func obstacleToRecompressing(_ jxl: URL) async -> String? {
+    /// photo, or has Content Credentials. A full disk throws.
+    static func obstacleToRecompressing(_ jxl: URL) async throws -> String? {
         let fm = FileManager.default
         let work = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
         defer { try? fm.removeItem(at: work) }
@@ -216,6 +216,8 @@ public struct FileConverter: Sendable {
         do {
             try fm.createDirectory(at: work, withIntermediateDirectories: true)
             try await ToolRunner.run("jxl-transcode", ["decode", jxl.path, rebuilt.path], in: work)
+        } catch where FileOptimizer.isOutOfSpace(error) {
+            throw error
         } catch {
             return String(localized: "The JPEG in this JPEG XL can’t be rebuilt (damaged, or changed since it was made)", bundle: .module)
         }

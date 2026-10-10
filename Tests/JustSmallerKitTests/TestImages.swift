@@ -226,3 +226,36 @@ enum GoogleXMPSamples {
         return try JPEGMarkers.headers(ByteView(file)).segments
     }
 }
+
+/// A small disk image with its own file system (APFS, ExFAT, MS-DOS),
+/// mounted inside `folder` and hidden from Finder, for what only other
+/// volumes do. `eject` before the folder goes.
+struct DiskImage {
+    let mount: URL
+
+    /// 8 MB.
+    init(_ fileSystem: String, in folder: URL) throws {
+        let image = folder.appending(path: "\(fileSystem).dmg")
+        mount = folder.appending(path: fileSystem)
+        try Self.hdiutil("create", "-size", "8m", "-fs", fileSystem, "-volname", "JSTest", image.path)
+        try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
+        try Self.hdiutil("attach", "-nobrowse", "-noverify", "-mountpoint", mount.path, image.path)
+    }
+
+    func eject() {
+        try? Self.hdiutil("detach", "-force", mount.path)
+    }
+
+    private static func hdiutil(_ arguments: String...) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/hdiutil")
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "hdiutil \(arguments.joined(separator: " ")) failed"])
+        }
+    }
+}

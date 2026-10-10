@@ -99,7 +99,7 @@ public struct FileOptimizer: Sendable {
         facts.jpegLayout = jpegLayout
         // A JPEG XL is stored anew from the JPEG it holds: that JPEG must
         // rebuild and be one a JPEG XL shows in full.
-        if format == .jxl, facts.isJPEGInJXL, let reason = await FileConverter.obstacleToRecompressing(url) {
+        if format == .jxl, facts.isJPEGInJXL, let reason = try await FileConverter.obstacleToRecompressing(url) {
             return .skipped(reason: reason, size: size)
         }
         // An SVG the rendering can't check still gets re-encoded from UTF-16:
@@ -383,9 +383,10 @@ public struct FileOptimizer: Sendable {
     }
 
     /// A private work folder with a copy of the file. On the file's own
-    /// volume when it is local (a clone on APFS, and the result moves back
-    /// with a rename); on the local disk for network volumes, so intermediate
-    /// files never travel over the network — unless the startup disk is full.
+    /// volume when it can clone files (APFS: the copy takes no space, and the
+    /// result moves back with a rename); otherwise on the startup disk, so
+    /// intermediate files never travel over the network or fill a memory
+    /// card — unless the startup disk is full.
     static func workCopy(of url: URL, named name: String) throws -> (work: URL, source: URL) {
         let fm = FileManager.default
         func copy(into work: URL) throws -> (work: URL, source: URL) {
@@ -395,8 +396,8 @@ public struct FileOptimizer: Sendable {
         func onVolume() throws -> (work: URL, source: URL) {
             try copy(into: fm.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: url, create: true))
         }
-        let local = (try? url.resourceValues(forKeys: [.volumeIsLocalKey]).volumeIsLocal) ?? true
-        if local { return try onVolume() }
+        let volume = try? url.resourceValues(forKeys: [.volumeIsLocalKey, .volumeSupportsFileCloningKey])
+        if volume?.volumeIsLocal ?? true, volume?.volumeSupportsFileCloning ?? true { return try onVolume() }
         let temp = fm.temporaryDirectory.appending(path: "JustSmaller-\(UUID().uuidString)", directoryHint: .isDirectory)
         do {
             try fm.createDirectory(at: temp, withIntermediateDirectories: true)
@@ -407,7 +408,7 @@ public struct FileOptimizer: Sendable {
         }
     }
 
-    private static func isOutOfSpace(_ error: any Error) -> Bool {
+    static func isOutOfSpace(_ error: any Error) -> Bool {
         let error = error as NSError
         return (error.domain == NSCocoaErrorDomain && error.code == NSFileWriteOutOfSpaceError)
             || (error.domain == NSPOSIXErrorDomain && error.code == Int(ENOSPC))

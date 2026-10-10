@@ -24,6 +24,7 @@
 #include <jxl/decode.h>
 #include <jxl/encode.h>
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -40,12 +41,16 @@ static bool read_file(const char *path, std::vector<uint8_t> *out) {
     return ok;
 }
 
+// Says why it failed (a full disk, say).
 static bool write_file(const char *path, const uint8_t *data, size_t size) {
     FILE *f = std::fopen(path, "wb");
-    if (!f) return false;
-    bool ok = std::fwrite(data, 1, size, f) == size;
-    ok = std::fclose(f) == 0 && ok;
-    if (!ok) std::remove(path);
+    bool ok = f && std::fwrite(data, 1, size, f) == size;
+    int error = errno;
+    if (f && std::fclose(f) != 0 && ok) { ok = false; error = errno; }
+    if (!ok) {
+        std::fprintf(stderr, "jxl-transcode: can't write output: %s\n", std::strerror(error));
+        if (f) std::remove(path);
+    }
     return ok;
 }
 
@@ -87,7 +92,7 @@ static int encode(const char *in, const char *out, int effort, bool compress_box
         available = jxl.size() - used;
     }
     if (status != JXL_ENC_SUCCESS) return fail(1, "encoding failed");
-    return write_file(out, jxl.data(), next - jxl.data()) ? 0 : fail(1, "can't write output");
+    return write_file(out, jxl.data(), next - jxl.data()) ? 0 : 1;
 }
 
 static int decode(const char *in, const char *out) {
@@ -131,7 +136,7 @@ static int decode(const char *in, const char *out) {
             if (!reconstructing) return fail(4, "no JPEG reconstruction data in this file");
             size_t size = jpeg.size() - JxlDecoderReleaseJPEGBuffer(decoder);
             // A rebuilt JPEG is one frame; anything after it doesn't belong to it.
-            return write_file(out, jpeg.data(), size) ? 0 : fail(1, "can't write output");
+            return write_file(out, jpeg.data(), size) ? 0 : 1;
         }
         case JXL_DEC_SUCCESS:
             return fail(1, "no image in this file");

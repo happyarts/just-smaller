@@ -90,8 +90,16 @@ public enum ToolRunner {
             throw ToolError(tool: name, status: status, message: String(localized: "The optimizer took too long and was stopped.", bundle: .module))
         }
         if status != 0 {
-            let message = (try? String(contentsOf: errURL, encoding: .utf8))?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let output = (try? String(contentsOf: errURL, encoding: .utf8)) ?? ""
+            // A full disk is no fault of the file: it fails as a full disk,
+            // not as whatever the tool's status means.
+            if output.contains(String(cString: strerror(ENOSPC))) {
+                let volume = try? directory.resourceValues(forKeys: [.volumeLocalizedNameKey]).volumeLocalizedName
+                throw CocoaError(.fileWriteOutOfSpace, userInfo: volume.map {
+                    [NSLocalizedDescriptionKey: String(localized: "Not enough free space on “\($0)” for the work files", bundle: .module)]
+                } ?? [:])
+            }
+            let message = output.trimmingCharacters(in: .whitespacesAndNewlines)
                 .split(separator: "\n").last.map(String.init) ?? ""
             throw ToolError(tool: name, status: status, message: message)
         }
